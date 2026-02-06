@@ -1,0 +1,40 @@
+# SLAM Integration Workspace Rules
+
+When working in `slam_integration/` or helping with SLAM tasks:
+
+## Entry Point
+Read `docs/COORDINATOR.md` for phase routing and workflow rules.
+
+## Phase Files (load one at a time)
+- Phase 1: `docs/phases/phase1_assessment.md` (hardware questions in 3 batches)
+- Phase 2: `docs/phases/phase2_validation.md` (compatibility check)
+- Phase 3: `docs/phases/phase3_generation.md` (config/launch/URDF generation)
+- Phase 4: `docs/phases/phase4_installation.md` (workspace setup)
+- Phase 5: `docs/phases/phase5_testing.md` (progressive testing)
+- Phase 6: `docs/phases/phase6_troubleshooting.md` (operational troubleshooting)
+- Phase 7: `docs/phases/phase7_optimization.md` (tuning & optimization)
+- Phase 9: `docs/phases/phase9_voxl.md` (VOXL/ModalAI only)
+
+## Troubleshooting (load on-demand)
+- Coordinate frames: `docs/troubleshooting/coordinate_frames.md`
+- ROS/build errors: `docs/troubleshooting/ros_environment.md`
+- Performance: `docs/troubleshooting/performance.md`
+- Calibration: `docs/troubleshooting/sensor_calibration.md`
+- VIO issues: `docs/troubleshooting/vio_specific.md`
+- Visualization/debugging: `docs/troubleshooting/visualization_debugging.md`
+- Hardware/vibration/data quality: `docs/troubleshooting/hardware_data_quality.md`
+- Dependencies/flowchart: `docs/troubleshooting/dependencies_flowchart.md`
+
+## Rules
+1. Load ONE phase file at a time, unload previous
+2. Generate real values, never placeholders
+3. Use web search proactively for specs, repos, drivers
+4. Prefer C++ for real-time code, Python for launch files
+5. Offer progress YAML saves after each phase
+6. If VOXL detected, load phase9 and use `adb shell` for all commands
+
+## Supporting Docs (reference only when needed)
+- `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` - Technical reference
+- `docs/SLAM_INTEGRATION_TEMPLATE.md` - Config templates
+- `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` - Systematic diagnostics
+- `scripts/README_INSTALL.md` - Installation script docs

@@ -1,0 +1,27 @@
+# SLAM Agent Solutions Log
+# Auto-populated by the SLAM agent after resolving issues during Phases 5-6.
+# Each entry records a problem, root cause, and fix so future sessions can check here first.
+#
+# Format:
+#   - id: unique identifier (auto-increment)
+#     date: YYYY-MM-DD
+#     phase: which phase the issue occurred in
+#     hardware: relevant hardware (platform, sensor, algorithm)
+#     symptom: what the user reported
+#     root_cause: why it happened
+#     fix: what resolved it
+#     files_changed: list of files modified to fix
+#     tags: searchable keywords
+#
+# Example:
+#   - id: 1
+#     date: 2026-02-06
+#     phase: 5
+#     hardware: {platform: jetson_orin, lidar: ouster_os1_64, slam: fast_lio2}
+#     symptom: "SLAM publishes odometry but drone flies in wrong direction"
+#     root_cause: "LiDAR mounted 90° rotated, extrinsic yaw offset missing"
+#     fix: "Added -1.5708 rad yaw to extrinsicRot in FAST-LIO config"
+#     files_changed: [config/fast_lio2.yaml]
+#     tags: [coordinate_frames, extrinsics, rotation, fast_lio2]
+
+solutions: []

@@ -1,0 +1,39 @@
+# SLAM Agent Hardware Profiles
+# Auto-populated after Phase 1 completion. When a new session starts with matching hardware,
+# the agent can skip Phase 1 entirely and load the cached config.
+#
+# Format:
+#   - id: unique identifier
+#     date: YYYY-MM-DD
+#     fingerprint: hash of key hardware fields for quick matching
+#     hardware:
+#       platform: {type, model, ram_gb, compute_module}
+#       lidar: {model, interface, points_per_second}
+#       camera: {model, type, resolution, interface}
+#       imu_source: lidar | flight_controller | external
+#       flight_controller: {model, firmware, version}
+#       communication: mavros | dds
+#       ros_version: noetic | humble | foxy | iron
+#       slam_algorithm: name
+#     phase1_config: {full YAML config output from Phase 1}
+#     validated: true/false (true if passed Phase 2)
+#     integration_complete: true/false (true if passed Phase 5)
+#
+# Example:
+#   - id: 1
+#     date: 2026-02-06
+#     fingerprint: "jetson_orin-ouster_os1_64-fast_lio2-ardupilot-humble"
+#     hardware:
+#       platform: {type: jetson, model: orin_nano, ram_gb: 8}
+#       lidar: {model: ouster_os1_64, interface: ethernet, points_per_second: 1310720}
+#       camera: null
+#       imu_source: lidar
+#       flight_controller: {model: cube_orange, firmware: ardupilot, version: "4.5"}
+#       communication: mavros
+#       ros_version: humble
+#       slam_algorithm: fast_lio2
+#     phase1_config: {... full config ...}
+#     validated: true
+#     integration_complete: true
+
+profiles: []

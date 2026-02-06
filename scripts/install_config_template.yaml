@@ -1,0 +1,25 @@
+# SLAM Integration Installation Configuration
+# Fill in your hardware details from Phase 1 assessment
+# Then run: ./install_slam_integration.sh install_config.yaml
+
+# ROS Configuration
+ros_version: "ROS1"  # or "ROS2"
+ros_distro: "noetic"  # noetic, melodic, humble, iron, etc.
+
+# Workspace Configuration
+workspace_path: "~/catkin_ws"  # or ~/onboard_ws, ~/slam_ws, etc.
+
+# Flight Controller Configuration
+flight_controller: "ArduPilot"  # or "PX4"
+use_dds: false  # true for ROS2+PX4 or ROS2+ArduPilot (optional)
+
+# Sensor Configuration
+lidar_type: "Ouster"  # Ouster, Velodyne, Livox, Hesai, etc.
+camera_type: "RealSense"  # RealSense, ZED, etc. (optional)
+
+# SLAM Algorithm Configuration
+slam_algorithm: "FAST-LIO2"  # FAST-LIO2, LIO-SAM, LVI-SAM, OpenVINS, etc.
+
+# Optional: Installation flags
+skip_checks: false  # Skip checking for existing installations
+install_mavproxy: false  # Install MAVProxy for testing
