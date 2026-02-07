@@ -12,9 +12,18 @@ This directory contains everything needed to integrate SLAM algorithms with Ardu
 slam_integration/
 ├── README.md                              # This file
 ├── QUICK_START.md                         # One-page quick reference
-├── .cursorrules                           # Cursor workspace rules (thin dispatcher)
-├── .cursor/agents/slam_integration_agent.md   # Cursor agent (thin dispatcher)
-├── .claude/slam_integration_agent.md      # Claude agent (thin dispatcher)
+├── .mcp.json                              # MCP server config (Claude Code + Cursor)
+├── .cursorrules                           # Cursor workspace rules
+├── .cursor/agents/slam_integration_agent.md   # Cursor agent
+├── .claude/
+│   ├── slam_integration_agent.md          # Claude agent dispatcher
+│   └── skills/slam-integration/           # Claude Code Skill
+│       ├── SKILL.md                       #   Skill entrypoint (brain)
+│       └── references/                    #   Symlinks to phase files
+│
+├── mcp/                                   # MCP Server (hands)
+│   ├── slam_mcp_server.py                 #   FastMCP server with 13 tools
+│   └── requirements.txt                   #   Python dependencies
 │
 ├── docs/
 │   ├── COORDINATOR.md                     # Entry point for AI - phase routing & rules
@@ -40,10 +49,13 @@ slam_integration/
 │   │   ├── hardware_data_quality.md      #   Vibration, mounting, environment
 │   │   └── dependencies_flowchart.md     #   Build failures, diagnostic tree
 │   │
-│   ├── learned/                           # Learning system (improves over time)
+│   ├── learned/                           # Learning system (auto-updated, git-backed)
 │   │   ├── hardware_profiles.yaml        #   Cached Phase 1 configs by hardware
 │   │   ├── solutions_log.yaml            #   Resolved issues for future reference
 │   │   └── known_good_configs/           #   Validated config sets from successful integrations
+│   │
+│   ├── profiles/                          # Curated starter hardware profiles
+│   │   └── *.yaml                        #   One file per hardware combination
 │   │
 │   ├── AI_SYSTEM_BUILDER_GUIDE.md         # Original monolithic guide (archive/reference)
 │   ├── SLAM_ARDUPILOT_INTEGRATION_GUIDE.md  # Technical integration reference
@@ -51,7 +63,7 @@ slam_integration/
 │   ├── SLAM_INTEGRATION_DIAGNOSTICS.md    # Systematic diagnostics
 │   └── archive/                           # Archived meta-docs (not for AI runtime)
 │
-├── scripts/                               # Automation & diagnostics
+├── scripts/                               # Automation & diagnostics (called via MCP)
 │   ├── install_slam_integration.sh        #   Main installation orchestrator
 │   ├── install_core_ros_packages.sh       #   Core ROS packages
 │   ├── install_mavros.sh                  #   MAVROS installer
@@ -74,26 +86,30 @@ slam_integration/
 
 ---
 
-## Getting Started
+## Setup
 
-### With Any AI Assistant (Claude, ChatGPT, Cursor, etc.)
-
-1. Point the AI to `docs/COORDINATOR.md` as its entry point
-2. The coordinator tells the AI which phase file to load
-3. The AI asks 3 batched question groups (not 11 individual questions)
-4. Progress through phases 1-5, generating your complete integration
-
-### With Cursor IDE
-Select the `slam_integration_agent` from the agent dropdown. It auto-routes to the coordinator.
-
-### With Claude Code
-```
-"I need help integrating SLAM with my drone.
-Read docs/COORDINATOR.md for the workflow, then start with Phase 1."
+### Prerequisites
+```bash
+pip3 install -r mcp/requirements.txt
 ```
 
-### Resuming a Previous Session
-Save your progress YAML when the AI offers it. To resume:
+This installs the MCP server dependencies so Claude Code / Cursor can run scripts, manage profiles, and commit learned data automatically.
+
+### Getting Started
+
+**With Claude Code** (recommended):
+```
+"Help me integrate SLAM with my drone."
+```
+The `slam-integration` skill activates automatically. MCP tools handle script execution and learning.
+
+**With Cursor IDE**:
+Select the `slam_integration_agent` from the agent dropdown. MCP tools are available via `.mcp.json`.
+
+**With Any AI Assistant** (no MCP):
+Point the AI to `docs/COORDINATOR.md` as its entry point. Scripts must be run manually.
+
+**Resuming a Previous Session**:
 ```
 "Resume my SLAM integration from this progress file: [paste YAML]"
 ```
@@ -117,6 +133,25 @@ The system uses a **coordinator + specialized agents** pattern:
 | Troubleshooter | ~1k tokens | Loads per-issue file on demand |
 
 **Token savings**: ~85% reduction vs original monolithic approach (120k vs 910k per session).
+
+### MCP Tools (Script Execution + Learning)
+
+The `slam-tools` MCP server (`mcp/slam_mcp_server.py`) provides 13 tools:
+
+| Category | Tools | Purpose |
+|----------|-------|---------|
+| Installation | `run_install_script` | Execute install scripts without loading into context |
+| Diagnostics | `run_diagnostic` | Run check/validation scripts |
+| Profiles | `search_profiles`, `get_profile`, `get_known_good_config` | Find matching hardware configs |
+| Learning | `save_hardware_profile`, `update_profile_status`, `save_solution`, `save_known_good_config` | Persist knowledge |
+| Git | `commit_learning`, `pull_latest_learning` | Sync learned data across sessions |
+
+### Self-Updating Learning Loop
+
+The agent improves over time by committing knowledge back to git:
+- After Phase 5 success: saves validated hardware profiles and configs, pushes to git
+- After Phase 6 fix: saves troubleshooting solutions, pushes to git
+- At session start: pulls latest profiles and solutions from git
 
 See `docs/AGENT_TEAM.md` for full architecture documentation.
 

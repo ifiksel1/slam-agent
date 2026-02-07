@@ -3,3 +3,5 @@
 __pycache__/
 *.bag
 *.log
+mcp/__pycache__/
+*.yaml.tmp

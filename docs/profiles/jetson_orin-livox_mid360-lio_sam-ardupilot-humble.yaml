@@ -1,0 +1,64 @@
+fingerprint: "jetson_orin-livox_mid360-lio_sam-ardupilot-humble"
+date: "2026-02-06"
+source: "curated"
+description: "Jetson Orin Nano 8GB with Livox Mid-360 running LIO-SAM on ArduPilot"
+
+hardware:
+  platform:
+    type: jetson
+    model: orin_nano
+    ram_gb: 8
+    cpu_cores: 6
+    gpu: "Ampere 16 CUDA cores"
+    os: "Ubuntu 22.04 (JetPack 6.0)"
+  lidar:
+    model: livox_mid360
+    channels: 1
+    interface: ethernet
+    default_ip: "192.168.1.12"
+    points_per_second: 200000
+    has_imu: true
+    imu_model: BMI088
+    scan_pattern: non_repetitive
+  camera: null
+  imu_source: lidar
+  flight_controller:
+    model: pixhawk6c
+    firmware: ardupilot
+    version: "4.5"
+    telemetry_port: "/dev/ttyTHS1"
+    telemetry_baud: 921600
+  communication: mavros
+  ros_version: humble
+  slam_algorithm: lio_sam
+
+phase1_config:
+  workspace_path: "~/slam_ws"
+  ros_version: "ROS2"
+  ros_distro: "humble"
+  slam_algorithm: "lio_sam"
+  lidar:
+    type: "livox"
+    model: "mid-360"
+    topic: "/livox/lidar"
+    imu_topic: "/livox/imu"
+  imu_source: "lidar"
+  flight_controller:
+    type: "ardupilot"
+    connection: "serial"
+    port: "/dev/ttyTHS1"
+    baud: 921600
+  communication: "mavros"
+  transforms:
+    base_to_lidar:
+      x: 0.0
+      y: 0.0
+      z: 0.08
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+  docker: false
+
+validated: true
+integration_complete: true
+notes: "Tested in outdoor urban canyon. Livox non-repetitive scan pattern works well with LIO-SAM. CPU ~55% on Orin Nano."

@@ -9,16 +9,22 @@ Integrate SLAM algorithm with ArduPilot/PX4 for autonomous indoor/GPS-denied fli
 
 ---
 
-## ⚡ 3-Minute Decision Tree
+## Setup (One-Time)
+
+```bash
+pip3 install -r mcp/requirements.txt   # Enables MCP tools for Claude/Cursor
+```
+
+## 3-Minute Decision Tree
 
 ```
 START: What's your experience level?
 
 ├─ BEGINNER (first time doing this)
-│  └─> Use: docs/AI_SYSTEM_BUILDER_GUIDE.md
-│      ├─ Give file to AI assistant (Claude, GPT-4, etc.)
+│  └─> Use Claude Code or Cursor with the SLAM Integration skill
+│      ├─ Say "Help me integrate SLAM with my drone"
 │      ├─ Answer questions about your hardware
-│      └─ Follow generated instructions
+│      └─ The agent handles installation, testing, and learning
 │
 ├─ INTERMEDIATE (done some ROS/SLAM)
 │  └─> Use: docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md Part 2

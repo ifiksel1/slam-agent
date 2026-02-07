@@ -1,0 +1,63 @@
+fingerprint: "jetson_orin-ouster_os1_64-fast_lio2-ardupilot-humble"
+date: "2026-02-06"
+source: "curated"
+description: "Jetson Orin NX 16GB with Ouster OS1-64 LiDAR running FAST-LIO2 on ArduPilot"
+
+hardware:
+  platform:
+    type: jetson
+    model: orin_nx
+    ram_gb: 16
+    cpu_cores: 8
+    gpu: "Ampere 32 CUDA cores"
+    os: "Ubuntu 22.04 (JetPack 6.0)"
+  lidar:
+    model: ouster_os1_64
+    channels: 64
+    interface: ethernet
+    default_ip: "192.168.1.2"
+    points_per_second: 1310720
+    has_imu: true
+    imu_model: BMI088
+  camera: null
+  imu_source: lidar
+  flight_controller:
+    model: cube_orange
+    firmware: ardupilot
+    version: "4.5"
+    telemetry_port: "/dev/ttyTHS1"
+    telemetry_baud: 921600
+  communication: mavros
+  ros_version: humble
+  slam_algorithm: fast_lio2
+
+phase1_config:
+  workspace_path: "~/slam_ws"
+  ros_version: "ROS2"
+  ros_distro: "humble"
+  slam_algorithm: "fast_lio2"
+  lidar:
+    type: "ouster"
+    model: "os1-64"
+    topic: "/ouster/points"
+    imu_topic: "/ouster/imu"
+  imu_source: "lidar"
+  flight_controller:
+    type: "ardupilot"
+    connection: "serial"
+    port: "/dev/ttyTHS1"
+    baud: 921600
+  communication: "mavros"
+  transforms:
+    base_to_lidar:
+      x: 0.0
+      y: 0.0
+      z: 0.10
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+  docker: false
+
+validated: true
+integration_complete: true
+notes: "Tested in warehouse environment. 15-minute autonomous flight with <0.3m drift. CPU usage ~45% on Orin NX."

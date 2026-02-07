@@ -1,0 +1,67 @@
+fingerprint: "nuc12-realsense_d435i-orb_slam3-ardupilot-humble"
+date: "2026-02-06"
+source: "curated"
+description: "Intel NUC 12 with RealSense D435i running ORB-SLAM3 (stereo-inertial) on ArduPilot"
+
+hardware:
+  platform:
+    type: x86
+    model: nuc12
+    ram_gb: 16
+    cpu_cores: 10
+    gpu: "Intel Iris Xe (integrated)"
+    os: "Ubuntu 22.04"
+  lidar: null
+  camera:
+    model: realsense_d435i
+    type: stereo_depth
+    resolution: "640x480"
+    fps: 30
+    interface: usb3
+    has_imu: true
+    imu_model: BMI055
+  imu_source: camera
+  flight_controller:
+    model: cube_orange
+    firmware: ardupilot
+    version: "4.5"
+    telemetry_port: "/dev/ttyUSB0"
+    telemetry_baud: 921600
+  communication: mavros
+  ros_version: humble
+  slam_algorithm: orb_slam3
+
+phase1_config:
+  workspace_path: "~/slam_ws"
+  ros_version: "ROS2"
+  ros_distro: "humble"
+  slam_algorithm: "orb_slam3"
+  camera:
+    type: "realsense"
+    model: "d435i"
+    color_topic: "/camera/color/image_raw"
+    depth_topic: "/camera/depth/image_rect_raw"
+    imu_topic: "/camera/imu"
+    stereo_left: "/camera/infra1/image_rect_raw"
+    stereo_right: "/camera/infra2/image_rect_raw"
+  imu_source: "camera"
+  flight_controller:
+    type: "ardupilot"
+    connection: "serial"
+    port: "/dev/ttyUSB0"
+    baud: 921600
+  communication: "mavros"
+  slam_mode: "stereo_inertial"
+  transforms:
+    base_to_camera:
+      x: 0.12
+      y: 0.0
+      z: 0.05
+      roll: 0.0
+      pitch: -0.1745
+      yaw: 0.0
+  docker: false
+
+validated: true
+integration_complete: true
+notes: "VIO-based system, tested indoor. D435i stereo-inertial mode with ORB-SLAM3. CPU ~60%. Drift <0.5m over 10 min."

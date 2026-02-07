@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slam-tools": {
+      "command": "python3",
+      "args": ["mcp/slam_mcp_server.py"]
+    }
+  }
+}

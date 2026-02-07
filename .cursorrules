@@ -5,6 +5,12 @@ When working in `slam_integration/` or helping with SLAM tasks:
 ## Entry Point
 Read `docs/COORDINATOR.md` for phase routing and workflow rules.
 
+## MCP Tools
+The `slam-tools` MCP server (`.mcp.json`) wraps all scripts and manages learned data.
+- Prefer `run_install_script()` and `run_diagnostic()` over running scripts manually
+- Call `search_profiles()` and `search_solutions()` before starting from scratch
+- Call `commit_learning()` after Phase 5 success or Phase 6 fixes
+
 ## Phase Files (load one at a time)
 - Phase 1: `docs/phases/phase1_assessment.md` (hardware questions in 3 batches)
 - Phase 2: `docs/phases/phase2_validation.md` (compatibility check)
