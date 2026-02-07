@@ -26,19 +26,44 @@ Author: SLAM Integration Package
 License: BSD-3-Clause
 """
 
-import rospy
 import sys
 import argparse
 from collections import defaultdict
 import time
+import os
+
+# Check if ROS environment is sourced
+if 'ROS_DISTRO' not in os.environ:
+    print("ERROR: ROS environment not sourced.")
+    print()
+    print("Please source your ROS environment first:")
+    print("  ROS1 (Noetic):  source /opt/ros/noetic/setup.bash")
+    print("  ROS2 (Humble):  source /opt/ros/humble/setup.bash")
+    print("  ROS2 (Foxy):    source /opt/ros/foxy/setup.bash")
+    print()
+    print("Then source your workspace:")
+    print("  ROS1: source ~/catkin_ws/devel/setup.bash")
+    print("  ROS2: source ~/ros2_ws/install/setup.bash")
+    sys.exit(1)
 
 try:
+    import rospy
     from sensor_msgs.msg import PointCloud2, Imu, Image
     from nav_msgs.msg import Odometry
     from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
     import rostopic
-except ImportError:
-    print("ERROR: ROS not found. Make sure ROS is installed and sourced.")
+except ImportError as e:
+    print(f"ERROR: Failed to import ROS Python modules: {e}")
+    print()
+    print("ROS environment detected but Python modules not available.")
+    print()
+    print("Troubleshooting:")
+    print("  1. Verify ROS is sourced: echo $ROS_DISTRO")
+    print("  2. Check Python path: echo $PYTHONPATH")
+    print("  3. Install ROS Python packages:")
+    print("     ROS1: sudo apt install python3-rospy python3-sensor-msgs")
+    print("     ROS2: sudo apt install python3-rclpy")
+    print("  4. Verify ROS installation: rosversion -d (ROS1) or ros2 --version (ROS2)")
     sys.exit(1)
 
 

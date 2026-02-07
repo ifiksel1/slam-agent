@@ -44,7 +44,28 @@ fi
 
 # Check core ROS packages
 log_info "Checking core ROS packages..."
-if [[ "$ROS_VERSION" == "ROS1" ]]; then
+
+# Detect actual ROS version from environment
+ACTUAL_ROS_VERSION=""
+if command -v rospack &> /dev/null && [[ -n "$ROS_DISTRO" ]]; then
+    # ROS1 detected (rospack exists)
+    ACTUAL_ROS_VERSION="ROS1"
+elif command -v ros2 &> /dev/null && [[ -n "$ROS_DISTRO" ]]; then
+    # ROS2 detected (ros2 command exists)
+    ACTUAL_ROS_VERSION="ROS2"
+else
+    log_error "Cannot detect ROS environment. Make sure ROS is sourced."
+    ((ERRORS++))
+fi
+
+# Check if detected version matches parameter
+if [[ -n "$ACTUAL_ROS_VERSION" && "$ROS_VERSION" != "$ACTUAL_ROS_VERSION" ]]; then
+    log_warn "ROS version mismatch: expected $ROS_VERSION, detected $ACTUAL_ROS_VERSION"
+    log_warn "Using detected version: $ACTUAL_ROS_VERSION"
+    ROS_VERSION="$ACTUAL_ROS_VERSION"
+fi
+
+if [[ "$ROS_VERSION" == "ROS1" && "$ACTUAL_ROS_VERSION" == "ROS1" ]]; then
     for pkg in tf2_ros robot_state_publisher; do
         if rospack find "$pkg" &> /dev/null; then
             log_success "$pkg installed"
@@ -53,7 +74,7 @@ if [[ "$ROS_VERSION" == "ROS1" ]]; then
             ((ERRORS++))
         fi
     done
-else
+elif [[ "$ROS_VERSION" == "ROS2" && "$ACTUAL_ROS_VERSION" == "ROS2" ]]; then
     for pkg in tf2_ros robot_state_publisher; do
         if ros2 pkg list | grep -q "^${pkg}$"; then
             log_success "$pkg installed"
@@ -66,14 +87,14 @@ fi
 
 # Check MAVROS or DDS
 log_info "Checking flight controller bridge..."
-if [[ "$ROS_VERSION" == "ROS1" ]]; then
+if [[ "$ROS_VERSION" == "ROS1" && "$ACTUAL_ROS_VERSION" == "ROS1" ]]; then
     if rospack find mavros &> /dev/null; then
         log_success "MAVROS installed"
     else
         log_error "MAVROS not found"
         ((ERRORS++))
     fi
-else
+elif [[ "$ROS_VERSION" == "ROS2" && "$ACTUAL_ROS_VERSION" == "ROS2" ]]; then
     if ros2 pkg list | grep -q "^micro_ros_agent$"; then
         log_success "micro-ROS Agent (DDS) installed"
     elif ros2 pkg list | grep -q "^mavros$"; then

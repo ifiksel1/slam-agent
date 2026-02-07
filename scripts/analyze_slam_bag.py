@@ -150,30 +150,55 @@ class SLAMBagAnalyzer:
     
     def _open_bag(self):
         """Open and validate bag file."""
+        import os
+
+        # Check if file exists
+        if not os.path.exists(self.bag_file):
+            print(f"✗ Bag file not found: {self.bag_file}")
+            print()
+            print("Please provide a valid rosbag file path.")
+            print("Example: ./analyze_slam_bag.py /path/to/flight_test.bag")
+            return False
+
+        # Check if file is readable
+        if not os.path.isfile(self.bag_file):
+            print(f"✗ Path is not a file: {self.bag_file}")
+            return False
+
         try:
             self.bag = rosbag.Bag(self.bag_file, 'r')
-            
+
             # Get bag info
             info = self.bag.get_type_and_topic_info()
-            
+
             self.bag_start = self.bag.get_start_time()
             self.bag_end = self.bag.get_end_time()
             self.bag_duration = self.bag_end - self.bag_start
-            
+
             print(f"Bag duration: {self.bag_duration:.1f} seconds ({self.bag_duration/60:.1f} minutes)")
             print(f"Start time: {datetime.fromtimestamp(self.bag_start).strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"Topics: {len(info.topics)}")
-            
+
             if self.start_time or self.end_time:
                 start = self.start_time or 0
                 end = self.end_time or self.bag_duration
                 print(f"Analyzing time range: {start:.1f}s to {end:.1f}s")
-            
+
             print()
             return True
-            
+
+        except rosbag.ROSBagException as e:
+            print(f"✗ Invalid or corrupted bag file: {e}")
+            print()
+            print("The file may be:")
+            print("  - Corrupted or incomplete")
+            print("  - Not a valid rosbag file")
+            print("  - Created with a different ROS version")
+            return False
         except Exception as e:
             print(f"✗ Failed to open bag file: {e}")
+            print()
+            print("Error details: " + str(type(e).__name__))
             return False
     
     def _detect_slam_topic(self):

@@ -26,8 +26,6 @@ Author: SLAM Integration Package
 License: BSD-3-Clause
 """
 
-import rospy
-import tf2_ros
 import sys
 import argparse
 from collections import defaultdict
@@ -35,11 +33,40 @@ import time
 import subprocess
 import os
 
+# Check if ROS environment is sourced
+if 'ROS_DISTRO' not in os.environ:
+    print("ERROR: ROS environment not sourced.")
+    print()
+    print("Please source your ROS environment first:")
+    print("  ROS1 (Noetic):  source /opt/ros/noetic/setup.bash")
+    print("  ROS2 (Humble):  source /opt/ros/humble/setup.bash")
+    print("  ROS2 (Foxy):    source /opt/ros/foxy/setup.bash")
+    print()
+    print("Then source your workspace:")
+    print("  ROS1: source ~/catkin_ws/devel/setup.bash")
+    print("  ROS2: source ~/ros2_ws/install/setup.bash")
+    sys.exit(1)
+
 try:
+    import rospy
+    import tf2_ros
     import tf2_msgs.msg
     from geometry_msgs.msg import TransformStamped
-except ImportError:
-    print("ERROR: ROS tf2 not found. Make sure ROS is installed and sourced.")
+except ImportError as e:
+    print(f"ERROR: Failed to import ROS TF2 modules: {e}")
+    print()
+    print("ROS environment detected but TF2 Python modules not available.")
+    print()
+    print("Troubleshooting:")
+    print("  1. Verify ROS is sourced: echo $ROS_DISTRO")
+    print("  2. Install TF2 Python packages:")
+    print("     ROS1: sudo apt install python3-tf2-ros ros-$ROS_DISTRO-tf2-geometry-msgs")
+    print("     ROS2: sudo apt install ros-$ROS_DISTRO-tf2-ros ros-$ROS_DISTRO-tf2-geometry-msgs")
+    print("  3. Make sure SLAM or robot nodes are running to publish TF data")
+    print()
+    print("To check if TF is available:")
+    print("  ROS1: rostopic echo /tf")
+    print("  ROS2: ros2 topic echo /tf")
     sys.exit(1)
 
 
@@ -86,20 +113,39 @@ class TFTreeValidator:
         print(f"\n{'='*70}")
         print("TF Tree Validator")
         print(f"{'='*70}\n")
-        
+
         rospy.init_node('tf_tree_validator', anonymous=True)
-        
+
         # Initialize TF buffer and listener
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-        
+
         print("Collecting TF data for 3 seconds...")
         rospy.sleep(3.0)
-        
+
         # Get all available frames
         self.all_frames = set(self.tf_buffer.all_frames_as_string().split('\n'))
         self.all_frames.discard('')  # Remove empty string
-        
+
+        if len(self.all_frames) == 0:
+            print("ERROR: No TF frames detected!")
+            print()
+            print("This usually means:")
+            print("  1. SLAM or robot nodes are not running")
+            print("  2. robot_state_publisher is not running")
+            print("  3. No static transforms are being published")
+            print()
+            print("Steps to fix:")
+            print("  1. Launch your SLAM system:")
+            print("     roslaunch fast_lio mapping.launch (or your SLAM launch file)")
+            print("  2. Launch robot description:")
+            print("     roslaunch your_robot robot_description.launch")
+            print("  3. Check for TF publishers:")
+            print("     rostopic info /tf")
+            print("     rostopic info /tf_static")
+            print()
+            return False
+
         print(f"Found {len(self.all_frames)} frames in TF tree\n")
         
         if self.verbose:
