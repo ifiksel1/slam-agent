@@ -1,0 +1,192 @@
+# Solution: ArduPilot MAVLink Stream Rate Not Enabled
+# Category: Autopilot Integration
+# Severity: High (blocks vision fusion)
+# Status: Resolved and Documented
+
+solution:
+  id: "ardupilot_mavlink_stream_rate"
+  title: "MAVLink Stream Rate Not Enabled - Vision Pose Fusion Blocked"
+  date_discovered: "2026-01-13"
+  date_resolved: "2026-01-13"
+  platforms: ["ArduPilot", "MAVROS"]
+  components: ["flight_controller", "integration", "ekf"]
+
+## Problem
+
+problem:
+  symptom: "Local position topic empty despite correct EKF vision source configuration"
+  observable_behavior:
+    - "✅ Vision pose publishing @ 10 Hz: /mavros/vision_pose/pose has data"
+    - "✅ MAVROS connected: /mavros/state shows connected=True"
+    - "✅ EKF parameters correctly set: EK3_SRC1_POSXY=6 (vision)"
+    - "❌ Local position empty: /mavros/local_position/pose has no data"
+
+  root_cause: |
+    MAVLink message streams must be explicitly enabled in ArduPilot.
+    Just because the EKF processes vision data correctly doesn't mean the flight
+    controller will send the resulting LOCAL_POSITION_NED messages back to MAVROS.
+
+    The EKF was working perfectly - it was processing the vision pose and fusing it.
+    But without enabled streams, ArduPilot never sent the fused position output.
+
+  misdiagnosis_risk: |
+    High! Developers commonly assume EKF failure when it's actually a stream
+    rate issue. The EKF debugging rabbit hole can waste hours.
+
+## Solution
+
+solution_approach:
+  name: "Enable MAVLink Streams"
+  difficulty: "trivial"
+  time_to_fix_min: 1
+  permanent: true
+
+### Immediate Fix (Temporary)
+immediate_fix:
+  command: "rosservice call /mavros/set_stream_rate 0 10 1"
+  description: "Enable stream 0 at 10 Hz for all messages"
+  result: "/mavros/local_position/pose immediately starts publishing @ 10 Hz"
+  duration_effect: "only current MAVROS session (lost on reconnect)"
+
+### Permanent Fix (Recommended)
+permanent_fix:
+  approach: "Call stream enablement from launch file"
+  implementation: "enable_mavlink_streams.sh script"
+  trigger: "called from master.launch with 5-second delay"
+
+  script_content: |
+    #!/bin/bash
+    # enable_mavlink_streams.sh
+    # Enables MAVLink streams for vision-based EKF fusion
+
+    sleep 5  # Wait for MAVROS connection
+    rosservice call /mavros/set_stream_rate 0 10 1
+
+  launch_file_integration: |
+    <node pkg="orin_slam_integration"
+          type="enable_mavlink_streams.sh"
+          name="enable_mavlink_streams"
+          output="screen"
+          launch-prefix="bash -c 'sleep 5; $0 $@' "/>
+
+## Verification
+
+verification:
+  check_command: "rostopic hz /mavros/local_position/pose"
+  expected_output: "should show ~10 Hz"
+  data_check: "echo data should contain non-zero position values"
+
+## Technical Background
+
+technical_details:
+  mavlink_architecture: |
+    ArduPilot uses a request/response model for sensor telemetry.
+    MAVROS must request data streams, and ArduPilot will send them at the
+    configured rate. Without explicit requests, streams are often disabled
+    to save bandwidth.
+
+  stream_ids: |
+    Stream 0 = All messages (most commonly used)
+    Stream 1 = Position and velocity
+    Stream 2 = Extra 1
+    Stream 3 = Extra 2
+    Stream 4 = Extra 3
+
+    Setting stream 0 to 10 Hz enables all critical messages.
+
+  ekf_fusion_independent: |
+    The EKF processes incoming vision pose data regardless of stream settings.
+    It silently fuses the data into its state estimate. The stream rate only
+    controls whether the fused results are SENT BACK to MAVROS.
+
+    This is why EKF debugging doesn't help - the EKF is working fine!
+
+## Prevention
+
+prevention:
+  checklist: |
+    ✅ During SLAM integration setup:
+    1. After configuring EKF sources, always verify stream rate
+    2. Check: rostopic hz /mavros/local_position/pose
+    3. If empty, call set_stream_rate BEFORE debugging EKF
+
+    ✅ In launch files:
+    1. Always include stream enablement after MAVROS brings up
+    2. Use delay (sleep 5) to ensure MAVROS is ready
+    3. Add verification that streams are active
+
+  documentation: |
+    Add to integration documentation:
+    "If vision pose is publishing but local_position is empty:
+     1. This is a MAVLink stream rate issue (99% of cases)
+     2. Not an EKF problem
+     3. Call: rosservice call /mavros/set_stream_rate 0 10 1"
+
+## Related Issues
+
+related:
+  issue_1:
+    title: "EKF Origin Not Set"
+    relationship: "sibling issue - also blocks vision fusion"
+    solution_id: "ardupilot_ekf_origin_not_set"
+
+  issue_2:
+    title: "LiDAR-to-Body Frame Orientation"
+    relationship: "upstream issue - must be correct before integration"
+    solution_id: "lidar_orientation_inverted"
+
+## Tags
+
+tags:
+  - "autopilot"
+  - "mavlink"
+  - "ekf"
+  - "vision_fusion"
+  - "stream_rate"
+  - "ardupilot"
+  - "mavros"
+  - "gps_denied"
+  - "high_impact"
+  - "easy_fix"
+  - "frequently_missed"
+
+## Impact
+
+impact:
+  blocked_features: ["vision_fusion", "gps_denied_flight"]
+  severity_for_users: "high"
+  difficulty_to_debug: "medium"
+  difficulty_to_fix: "trivial"
+  time_wasted_if_missed: "hours"
+  likelihood_of_occurring: "high"
+
+## File References
+
+references:
+  - path: "scripts/enable_mavlink_streams.sh"
+    status: "implemented"
+  - path: "launch/master.launch"
+    status: "integrated"
+  - path: "launch/vision_bridge.launch"
+    status: "alternative_location"
+  - path: "PHASE6_SUCCESS.md"
+    status: "documented"
+
+## Notes for Future AI Assistants
+
+ai_notes: |
+  This is a common gotcha in ArduPilot + MAVROS + vision fusion integrations.
+
+  If you encounter:
+  - Vision pose working
+  - EKF parameters correctly set
+  - Local position empty
+
+  DO NOT spend time debugging the EKF. This is 99% a stream rate issue.
+
+  Minimal diagnostic:
+  1. rostopic hz /mavros/local_position/pose  (empty?)
+  2. Call set_stream_rate immediately
+  3. If local_position suddenly publishes, stream rate was the issue
+
+  This is documented here to save future integrators from this exact trap.
