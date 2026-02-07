@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "slam-tools": {
-      "command": "python3",
+      "command": "/home/dev/miniforge3/envs/mcp-py310/bin/python",
       "args": ["mcp/slam_mcp_server.py"]
     }
   }
