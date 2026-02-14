@@ -1,0 +1,17 @@
+ouster/os_driver:
+  ros__parameters:
+    sensor_hostname: '169.254.56.220'
+    lidar_mode: '1024x10'
+    timestamp_mode: 'TIME_FROM_INTERNAL_OSC'
+    proc_mask: IMU|PCL
+    use_system_default_qos: false
+    point_type: xyzi
+    pub_static_tf: false
+    sensor_frame: os_sensor
+    lidar_frame: os_lidar
+    imu_frame: os_imu
+    point_cloud_frame: os_lidar
+    organized: true
+    destagger: true
+    min_range: 0.3
+    max_range: 120.0

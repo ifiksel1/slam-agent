@@ -1,0 +1,46 @@
+/**:
+  ros__parameters:
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: false
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: true
+    max_iteration: 4
+    map_file_path: ""
+    common:
+      lid_topic: "/ouster/points"
+      imu_topic: "/ouster/imu"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+    filter_size_corner: 0.5
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 200.0
+    mapping:
+      det_range: 300.0
+      fov_degree: 180.0
+      gyr_cov: 0.1
+      acc_cov: 0.1
+      b_gyr_cov: 0.0001
+      b_acc_cov: 0.0001
+      extrinsic_est_en: false
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    preprocess:
+      blind: 1.0
+      lidar_type: 3
+      scan_line: 64
+      timestamp_unit: 3
+      scan_rate: 10
+    point_filter_num: 2
+    feature_extract_enable: false
+    runtime_pos_log_enable: false
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+    frames:
+      map_frame: "map"
+      odom_frame: "camera_init"
+      body_frame: "base_link"
