@@ -540,6 +540,64 @@ def save_known_good_config(fingerprint: str, configs_json: str) -> str:
     return f"Saved {len(saved)} config files to {config_dir.relative_to(PROJECT_ROOT)}: {', '.join(saved)}"
 
 
+# ─── Node Control Tools ──────────────────────────────────────────────
+
+# Whitelisted actions for node control scripts
+_ALLOWED_NODE_ACTIONS = {"start", "stop", "restart", "status", "logs"}
+
+
+@mcp.tool()
+def control_node(
+    workspace: str,
+    node: str,
+    action: str,
+    args: str = "",
+) -> str:
+    """Start, stop, restart, or check status of a SLAM node via its control script.
+
+    Each SLAM workspace should have control scripts at <workspace>/scripts/<node>.sh
+    that accept actions: start, stop, restart, status, logs [N].
+
+    Examples:
+        control_node("/home/dev/slam-gpu", "fastlio", "restart")
+        control_node("/home/dev/slam-gpu", "fastlio", "status")
+        control_node("/home/dev/slam-gpu", "fastlio", "logs", "50")
+        control_node("/home/dev/slam-gpu", "foxglove", "start")
+
+    Args:
+        workspace: Absolute path to the SLAM workspace (e.g., "/home/dev/slam-gpu")
+        node: Node name matching the script filename without .sh (e.g., "fastlio")
+        action: One of: start, stop, restart, status, logs
+        args: Additional arguments (e.g., line count for logs)
+    """
+    if action not in _ALLOWED_NODE_ACTIONS:
+        return f"Invalid action '{action}'. Allowed: {', '.join(sorted(_ALLOWED_NODE_ACTIONS))}"
+
+    # Sanitize node name (alphanumeric, underscore, hyphen only)
+    if not all(c.isalnum() or c in "_-" for c in node):
+        return f"Invalid node name '{node}'. Use only alphanumeric, underscore, or hyphen."
+
+    script_path = Path(workspace) / "scripts" / f"{node}.sh"
+    if not script_path.exists():
+        # List available scripts
+        scripts_dir = Path(workspace) / "scripts"
+        if scripts_dir.exists():
+            available = [
+                f.stem for f in scripts_dir.glob("*.sh")
+                if f.stem not in ("start_foxglove_bridge", "test_foxglove_bridge")
+            ]
+            return (
+                f"Script not found: {script_path}\n"
+                f"Available control scripts: {', '.join(sorted(available)) or 'none'}"
+            )
+        return f"Scripts directory not found: {scripts_dir}"
+
+    cmd = ["bash", str(script_path), action]
+    if args:
+        cmd.extend(args.split())
+    return _run_command(cmd, timeout=30)
+
+
 # ─── Git Learning Loop ───────────────────────────────────────────────
 
 @mcp.tool()

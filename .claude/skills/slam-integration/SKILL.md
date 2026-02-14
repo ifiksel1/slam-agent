@@ -45,6 +45,16 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Verify installation | `run_diagnostic` | `run_diagnostic("verify_installation", "ROS2 humble ~/slam_ws")` |
 | Analyze flight log | `run_diagnostic` | `run_diagnostic("analyze_slam_bag", "/path/to/bag --plot --report")` |
 
+### Node Control
+| Action | MCP Tool | Example |
+|--------|----------|---------|
+| Start a node | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "start")` |
+| Stop a node | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "stop")` |
+| Restart a node | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "restart")` |
+| Check node status | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "status")` |
+| View node logs | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "logs", "50")` |
+| Foxglove control | `control_node` | `control_node("/home/dev/slam-gpu", "foxglove", "start")` |
+
 ### Profile Management
 | Action | MCP Tool |
 |--------|----------|
@@ -79,6 +89,39 @@ Examples:
 - `nuc12-realsense_d435i-orb_slam3-ardupilot-humble`
 - `raspberry_pi5-livox_mid360-lio_sam-px4-humble`
 
+## Foxglove Visualization (Optional — Offer During Phase 4)
+
+After core SLAM installation is complete, offer the user Foxglove Bridge setup. Present it like this:
+
+> **Optional: Foxglove Studio Visualization**
+>
+> Foxglove Studio is a free, browser-based robotics visualization tool (like RViz but runs on any device with a browser — laptop, tablet, phone). It connects to your SLAM system over WebSocket and lets you visualize:
+> - Live 3D point clouds from your LiDAR
+> - SLAM odometry/trajectory in real-time
+> - TF tree, IMU data, diagnostics
+> - All without installing anything on the viewing device
+>
+> It's especially useful for field testing — you can monitor SLAM from your laptop while the drone is running, without needing X11 forwarding or a display attached to the companion computer.
+>
+> **Would you like to set up Foxglove Bridge?**
+
+If the user accepts:
+
+1. **ROS 2 (Humble/Jazzy)**: Build the C++ `foxglove_bridge` from `foxglove/foxglove-sdk` repo (not the deprecated `ros-foxglove-bridge`)
+   - Dependencies: `rosx_introspection` (build from source), `rapidjson-dev`, `nlohmann-json3-dev`, `libasio-dev`
+   - Fix required: Add `find_package(sensor_msgs REQUIRED)` to foxglove_bridge CMakeLists.txt
+   - Service introspection errors are non-fatal — topic bridging works fine
+   - Add to launch file with `enable_foxglove:=true` argument (default: true)
+   - Note: The Python `foxglove-websocket` 0.1.4 package is protocol-incompatible with modern Foxglove Studio — always use the C++ bridge
+
+2. **ROS 1 (Noetic)**: Use `apt install ros-noetic-rosbridge-server` and Foxglove Studio's rosbridge connection mode
+
+3. **Docker**: Expose port 8765 (already done if using host networking). Add to launch file so it starts automatically with SLAM.
+
+4. **Generate control script**: Create `scripts/foxglove.sh` with start/stop/restart/status/logs commands following the node control script pattern.
+
+5. **Tell the user**: Open Foxglove Studio at https://app.foxglove.dev, click "Open connection", enter `ws://<jetson-ip>:8765`.
+
 ## Behavioral Rules
 
 1. Generate files with ACTUAL values from user config. Never use placeholders.
@@ -88,6 +131,7 @@ Examples:
 5. Keep a ~200-token YAML config summary after Phase 1. Reference it, don't repeat.
 6. If user mentions VOXL/ModalAI, load phase9_voxl.md immediately.
 7. After each phase, offer to save a progress YAML for resume capability.
+8. After Phase 4 installation, offer Foxglove Bridge setup (see section above).
 
 ## Safety Rules
 
