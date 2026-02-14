@@ -44,6 +44,9 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Run a diagnostic | `run_diagnostic` | `run_diagnostic("check_tf_tree", "--frames map odom base_link --verbose")` |
 | Verify installation | `run_diagnostic` | `run_diagnostic("verify_installation", "ROS2 humble ~/slam_ws")` |
 | Analyze flight log | `run_diagnostic` | `run_diagnostic("analyze_slam_bag", "/path/to/bag --plot --report")` |
+| Docker health check | `run_diagnostic` | `run_diagnostic("docker_diagnostics")` |
+| Preflight check | `run_diagnostic` | `run_diagnostic("preflight_check_docker")` |
+| Deploy Docker SLAM | `run_deploy_script` | `run_deploy_script("deploy_docker_slam", "--build")` |
 
 ### Node Control
 | Action | MCP Tool | Example |
@@ -54,6 +57,17 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Check node status | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "status")` |
 | View node logs | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "logs", "50")` |
 | Foxglove control | `control_node` | `control_node("/home/dev/slam-gpu", "foxglove", "start")` |
+
+### Topic Inspection
+| Action | MCP Tool | Example |
+|--------|----------|---------|
+| List all topics | `inspect_topic` | `inspect_topic("list", container="slam_gpu_system")` |
+| Topic publish rate | `inspect_topic` | `inspect_topic("hz", "/ouster/points", container="slam_gpu_system")` |
+| Echo one message | `inspect_topic` | `inspect_topic("echo", "/ouster/imu", container="slam_gpu_system", count=1)` |
+| Topic info + QoS | `inspect_topic` | `inspect_topic("info", "/ouster/points", container="slam_gpu_system")` |
+| Topic bandwidth | `inspect_topic` | `inspect_topic("bw", "/ouster/points", container="slam_gpu_system", duration=10)` |
+| Message type | `inspect_topic` | `inspect_topic("type", "/ouster/points", container="slam_gpu_system")` |
+| Host ROS topics | `inspect_topic` | `inspect_topic("list", ros_version="ROS2", ros_distro="humble")` |
 
 ### Profile Management
 | Action | MCP Tool |

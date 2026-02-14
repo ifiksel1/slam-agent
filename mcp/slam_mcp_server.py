@@ -49,6 +49,12 @@ DIAGNOSTIC_SCRIPTS = {
     "check_sensor_time_sync": ("check_sensor_time_sync.py", "python3"),
     "check_urdf": ("check_urdf.py", "python3"),
     "analyze_slam_bag": ("analyze_slam_bag.py", "python3"),
+    "docker_diagnostics": ("docker_diagnostics.py", "python3"),
+    "preflight_check_docker": ("preflight_check_docker.sh", "bash"),
+}
+
+DEPLOY_SCRIPTS = {
+    "deploy_docker_slam": "deploy_docker_slam.sh",
 }
 
 
@@ -65,7 +71,7 @@ def _run_command(cmd: list[str], timeout: int = 300) -> str:
         output = ""
         if result.stdout:
             output += result.stdout
-        if result.stderr:
+        if result.stderr and result.stderr.strip():
             output += f"\n--- STDERR ---\n{result.stderr}" if output else result.stderr
         if result.returncode != 0:
             output += f"\n[Exit code: {result.returncode}]"
@@ -160,6 +166,8 @@ def run_diagnostic(
     - check_sensor_time_sync <topic1> <topic2> [--duration SEC --log FILE]
     - check_urdf [urdf_file] [--from-param --required-frames f1 f2 --verbose --visualize]
     - analyze_slam_bag <bag_file> [--slam-topic TOPIC --start SEC --end SEC --plot --report]
+    - docker_diagnostics (no args) — full health check of containerized SLAM system
+    - preflight_check_docker (no args) — pre-flight verification for Docker SLAM + Ouster
 
     Args:
         diagnostic_name: Name without extension (e.g., "check_tf_tree")
@@ -178,6 +186,33 @@ def run_diagnostic(
     if args:
         cmd.extend(args.split())
     return _run_command(cmd)
+
+
+# ─── Deployment Tools ────────────────────────────────────────────────
+
+@mcp.tool()
+def run_deploy_script(script_name: str, args: str = "") -> str:
+    """Run a SLAM Docker deployment script.
+
+    Available scripts:
+    - deploy_docker_slam [--build|--start|--stop|--test|--all]
+
+    Args:
+        script_name: Name without .sh extension (e.g., "deploy_docker_slam")
+        args: Space-separated arguments/flags to pass to the script
+    """
+    if script_name not in DEPLOY_SCRIPTS:
+        return (
+            f"Unknown deploy script '{script_name}'. "
+            f"Available: {', '.join(sorted(DEPLOY_SCRIPTS))}"
+        )
+    script_file = SCRIPTS_DIR / DEPLOY_SCRIPTS[script_name]
+    if not script_file.exists():
+        return f"Script not found: {script_file}"
+    cmd = ["bash", str(script_file)]
+    if args:
+        cmd.extend(args.split())
+    return _run_command(cmd, timeout=600)
 
 
 # ─── Profile Tools ───────────────────────────────────────────────────
@@ -596,6 +631,178 @@ def control_node(
     if args:
         cmd.extend(args.split())
     return _run_command(cmd, timeout=30)
+
+
+# ─── Topic Inspection Tools ──────────────────────────────────────────
+
+_ALLOWED_TOPIC_COMMANDS = {"list", "info", "hz", "echo", "bw", "type"}
+
+
+@mcp.tool()
+def inspect_topic(
+    command: str,
+    topic: str = "",
+    container: str = "",
+    ros_version: str = "ROS2",
+    ros_distro: str = "humble",
+    count: int = 1,
+    duration: int = 5,
+) -> str:
+    """Inspect ROS topics (works both inside Docker containers and on host).
+
+    Available commands:
+    - list: Show all topics (no topic arg needed)
+    - info: Show topic details, publishers, subscribers, and QoS (ROS 2 only)
+    - hz: Measure publish rate (uses duration parameter)
+    - echo: Print one or more messages (uses count parameter)
+    - bw: Measure bandwidth (uses duration parameter)
+    - type: Show message type
+
+    Examples:
+        # Docker container:
+        inspect_topic("list", container="slam_gpu_system")
+        inspect_topic("info", "/ouster/points", container="slam_gpu_system")
+        inspect_topic("hz", "/ouster/points", container="slam_gpu_system", duration=10)
+        inspect_topic("echo", "/ouster/imu", container="slam_gpu_system", count=1)
+
+        # Host ROS:
+        inspect_topic("list", ros_version="ROS2", ros_distro="humble")
+        inspect_topic("hz", "/ouster/points", ros_version="ROS1")
+
+    Args:
+        command: One of: list, info, hz, echo, bw, type
+        topic: Topic name (required for all except list). Must start with /.
+        container: Docker container name (if empty, runs on host)
+        ros_version: ROS1 or ROS2 (default: ROS2, ignored if container is set)
+        ros_distro: ROS distro name (default: humble, ignored if container is set)
+        count: Number of messages for echo (default 1, max 10)
+        duration: Seconds to sample for hz and bw (default 5, max 30)
+    """
+    # Validate command
+    if command not in _ALLOWED_TOPIC_COMMANDS:
+        return f"Invalid command '{command}'. Allowed: {', '.join(sorted(_ALLOWED_TOPIC_COMMANDS))}"
+
+    # Validate ROS version
+    if ros_version not in ("ROS1", "ROS2"):
+        return f"Invalid ros_version '{ros_version}'. Must be ROS1 or ROS2."
+
+    # ROS 1 doesn't support 'info' command
+    if command == "info" and ros_version == "ROS1":
+        return "Command 'info' is only available for ROS 2. For ROS 1, use 'type' or 'hz' to get basic topic information."
+
+    # Validate topic (required for all commands except list)
+    if command != "list":
+        if not topic:
+            return f"Command '{command}' requires a topic argument."
+        if not topic.startswith("/"):
+            return f"Topic must start with '/'. Got: {topic}"
+
+    # Sanitize container name if provided
+    if container and not all(c.isalnum() or c in "_-" for c in container):
+        return f"Invalid container name '{container}'. Use only alphanumeric, underscore, or hyphen."
+
+    # Validate parameters
+    if count < 1:
+        count = 1
+    elif count > 10:
+        count = 10
+
+    if duration < 1:
+        duration = 1
+    elif duration > 30:
+        duration = 30
+
+    # Build the topic command based on ROS version
+    if ros_version == "ROS2":
+        cmd_parts = ["ros2", "topic", command]
+
+        if command == "list":
+            cmd_parts.append("-t")  # Show topic types
+        elif command == "info":
+            cmd_parts.extend([topic, "--verbose"])
+        elif command == "hz":
+            cmd_parts.append(topic)
+        elif command == "echo":
+            if count == 1:
+                cmd_parts.extend([topic, "--once"])
+            else:
+                # No --max-msgs in Humble; rely on timeout to stop
+                cmd_parts.append(topic)
+        elif command == "bw":
+            cmd_parts.append(topic)
+        elif command == "type":
+            cmd_parts.append(topic)
+    else:  # ROS1
+        cmd_parts = ["rostopic", command]
+
+        if command == "list":
+            cmd_parts.append("-v")  # Show verbose output with types
+        elif command == "hz":
+            cmd_parts.append(topic)
+        elif command == "echo":
+            cmd_parts.extend([topic, "-n", str(count)])
+        elif command == "bw":
+            cmd_parts.append(topic)
+        elif command == "type":
+            cmd_parts.append(topic)
+
+    topic_cmd = " ".join(cmd_parts)
+
+    # Determine timeout based on command
+    if command in ("hz", "bw"):
+        cmd_timeout = duration + 5  # Add buffer
+    elif command == "echo":
+        cmd_timeout = duration + 5
+    else:
+        cmd_timeout = 30
+
+    # Build execution command
+    if container:
+        # Docker execution with ROS 2 environment
+        setup = (
+            "source /opt/ros/humble/install/setup.bash && "
+            "source /opt/slam_ws/install/setup.bash && "
+            "export ROS_DOMAIN_ID=1"
+        )
+        if command in ("hz", "bw", "echo"):
+            inner = f"{setup} && timeout {duration} {topic_cmd}"
+        else:
+            inner = f"{setup} && {topic_cmd}"
+
+        cmd = ["docker", "exec", container, "bash", "-c", inner]
+    else:
+        # Host execution
+        if ros_version == "ROS2":
+            setup_script = f"/opt/ros/{ros_distro}/setup.bash"
+        else:
+            setup_script = f"/opt/ros/{ros_distro}/setup.bash"
+
+        if command in ("hz", "bw", "echo"):
+            inner = f"source {setup_script} && timeout {duration} {topic_cmd}"
+        else:
+            inner = f"source {setup_script} && {topic_cmd}"
+
+        cmd = ["bash", "-c", inner]
+
+    result = _run_command(cmd, timeout=cmd_timeout)
+
+    # For hz/bw/echo, timeout and the Python traceback from SIGTERM are expected.
+    # Strip the traceback and exit code noise, keep only the useful measurement lines.
+    if command in ("hz", "bw", "echo"):
+        lines = result.split("\n")
+        useful_lines = []
+        skip = False
+        for line in lines:
+            if line.startswith("Traceback (most recent call last):"):
+                skip = True
+            elif line.startswith("[Exit code:"):
+                continue
+            elif not skip:
+                useful_lines.append(line)
+        if useful_lines:
+            return "\n".join(useful_lines).strip()
+
+    return result
 
 
 # ─── Git Learning Loop ───────────────────────────────────────────────
