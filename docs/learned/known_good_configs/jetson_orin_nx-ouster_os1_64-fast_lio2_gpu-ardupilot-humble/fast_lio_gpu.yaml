@@ -7,19 +7,19 @@
       scan_publish_en: true
       dense_publish_en: true
       scan_bodyframe_pub_en: true
-    max_iteration: 4
+    max_iteration: 8
     map_file_path: ""
     common:
       lid_topic: "/ouster/points"
       imu_topic: "/ouster/imu"
       time_sync_en: false
       time_offset_lidar_to_imu: 0.0
-    filter_size_corner: 0.5
-    filter_size_surf: 0.5
-    filter_size_map: 0.5
-    cube_side_length: 200.0
+    filter_size_corner: 0.15
+    filter_size_surf: 0.15
+    filter_size_map: 0.15
+    cube_side_length: 50.0
     mapping:
-      det_range: 300.0
+      det_range: 15.0
       fov_degree: 180.0
       gyr_cov: 0.1
       acc_cov: 0.1
@@ -29,12 +29,12 @@
       extrinsic_T: [0.0, 0.0, 0.0]
       extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     preprocess:
-      blind: 1.0
+      blind: 0.3
       lidar_type: 3
       scan_line: 64
       timestamp_unit: 3
       scan_rate: 10
-    point_filter_num: 2
+    point_filter_num: 1
     feature_extract_enable: false
     runtime_pos_log_enable: false
     pcd_save:
