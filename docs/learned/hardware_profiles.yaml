@@ -1,39 +1,206 @@
-# SLAM Agent Hardware Profiles
-# Auto-populated after Phase 1 completion. When a new session starts with matching hardware,
-# the agent can skip Phase 1 entirely and load the cached config.
-#
-# Format:
-#   - id: unique identifier
-#     date: YYYY-MM-DD
-#     fingerprint: hash of key hardware fields for quick matching
-#     hardware:
-#       platform: {type, model, ram_gb, compute_module}
-#       lidar: {model, interface, points_per_second}
-#       camera: {model, type, resolution, interface}
-#       imu_source: lidar | flight_controller | external
-#       flight_controller: {model, firmware, version}
-#       communication: mavros | dds
-#       ros_version: noetic | humble | foxy | iron
-#       slam_algorithm: name
-#     phase1_config: {full YAML config output from Phase 1}
-#     validated: true/false (true if passed Phase 2)
-#     integration_complete: true/false (true if passed Phase 5)
-#
-# Example:
-#   - id: 1
-#     date: 2026-02-06
-#     fingerprint: "jetson_orin-ouster_os1_64-fast_lio2-ardupilot-humble"
-#     hardware:
-#       platform: {type: jetson, model: orin_nano, ram_gb: 8}
-#       lidar: {model: ouster_os1_64, interface: ethernet, points_per_second: 1310720}
-#       camera: null
-#       imu_source: lidar
-#       flight_controller: {model: cube_orange, firmware: ardupilot, version: "4.5"}
-#       communication: mavros
-#       ros_version: humble
-#       slam_algorithm: fast_lio2
-#     phase1_config: {... full config ...}
-#     validated: true
-#     integration_complete: true
-
-profiles: []
+profiles:
+- id: 1
+  date: '2026-02-11'
+  fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-noetic
+  hardware:
+    system_name: FAST-GPU
+    platform:
+      type: NVIDIA Jetson Orin NX
+      memory: 8GB/16GB
+      gpu: 100 NVIDIA CUDA cores
+      cpu: 8-core ARM64
+      storage: SSD recommended for docker volumes
+    sensors:
+      lidar:
+        type: Ouster OS1-64
+        connection: Ethernet (PoE)
+        ip_range: 192.168.1.x (configurable)
+        data_rate: ~655 kHz per channel
+        topics: /ouster/points, /ouster/imu
+      imu:
+        type: Built-in Ouster IMU
+        integration: Native in lidar driver
+        calibration: Required in FAST-LIO2 config
+    flight_controller:
+      type: Pixhawk 4
+      autopilot: ArduPilot
+      connection: USB/UART serial
+      mavlink_link: /dev/ttyUSB0
+    computing_stack:
+      ros_version: Noetic (ROS 1)
+      middleware: rospy/roscpp
+      environment: Docker container
+      slam_algorithm: FAST-LIO2 GPU
+      slam_source: https://github.com/OmerMersin/FAST_LIO_GPU
+      slam_framework: ROS LIO-SAM based
+    communications:
+      slam_to_autopilot: MAVLink over Serial (USB/UART)
+      odometry_topic: /fast_lio_gpu/odometry
+      pointcloud_topic: /fast_lio_gpu/cloud_registered
+      map_topic: /fast_lio_gpu/map
+    performance_targets:
+      odometry_frequency: 10-20 Hz (standard)
+      latency_budget: 100-200 ms acceptable
+      tracking_mode: Standard autonomous flight
+    docker_considerations:
+    - Volume mounts for ROS workspace
+    - Host network mode for Ouster connection
+    - Serial device passthrough for Pixhawk
+    - GPU support (nvidia-docker)
+  phase1_config:
+    phase: 1
+    status: assessment_complete
+    system_name: FAST-GPU
+    hardware_summary: Jetson Orin NX + Ouster OS1-64 + ArduPilot Pixhawk 4
+    os_variant: Jetson Linux (Ubuntu 22.04 based for Orin)
+    ros_version: noetic
+    slam_algorithm: fast_lio2_gpu
+    assessment_items:
+    - platform: Jetson Orin NX (8GB+ RAM, 100 CUDA cores)
+      status: VERIFIED - Sufficient for FAST-LIO2 GPU acceleration
+    - lidar_sensor: Ouster OS1-64 with native IMU
+      connection: Ethernet PoE
+      driver_needed: ouster_ros (ROS 1 driver)
+      status: VERIFIED - Well-supported, native IMU integrated
+    - imu_configuration: Integrated Ouster IMU
+      calibration_required: true
+      yaml_config: IMU intrinsics in FAST-LIO2 config
+      status: REQUIRES PHASE 3 CONFIG
+    - autopilot: ArduPilot on Pixhawk 4
+      mavlink_link: Serial USB/UART
+      interface: MAVRos (ROS bridge)
+      status: VERIFIED - Standard setup
+    - environment: Docker container
+      network_mode: host (for lidar/flight-controller access)
+      gpu_support: nvidia-docker required
+      status: REQUIRES PHASE 4 SETUP
+    - performance_target: 10-20 Hz odometry
+      system_capability: SUPPORTED (GPU accelerates FAST-LIO2)
+      status: ACHIEVABLE with GPU version
+    next_phase: 2 (Compatibility Validation)
+    phase_2_focus:
+    - Verify FAST_LIO_GPU compiles on ARM64
+    - Verify Ouster ROS driver supports Noetic + ARM64
+    - Confirm Docker nvidia-runtime availability
+    - Validate serial link to Pixhawk
+  validated: false
+  integration_complete: false
+- id: 2
+  date: '2026-02-11'
+  fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-humble
+  hardware:
+    system_name: FAST-GPU
+    platform:
+      type: NVIDIA Jetson Orin NX
+      memory: 8GB/16GB
+      gpu: 100 NVIDIA CUDA cores
+      cpu: 8-core ARM64
+      storage: SSD recommended for docker volumes
+      cuda_capable: true
+    sensors:
+      lidar:
+        type: Ouster OS1-64
+        connection: Ethernet (PoE)
+        ip_address: 169.254.56.220
+        data_rate: ~655 kHz per channel
+        topics: /ouster/points, /ouster/imu
+      imu:
+        type: Built-in Ouster IMU
+        integration: Native in lidar driver
+        calibration: Required in FAST-LIO2-GPU config
+    flight_controller:
+      type: Cube Orange
+      autopilot: ArduPilot
+      connection: USB/UART serial
+      mavlink_link: /dev/ttyUSB0
+      note: Cube Orange is Pixhawk-based, fully compatible with ArduPilot
+    computing_stack:
+      ros_version: Humble (ROS 2)
+      middleware: rclcpp/colcon
+      environment: Docker container (nvidia-docker)
+      slam_algorithm: FAST-LIO2 GPU
+      slam_source: https://github.com/OmerMersin/FAST_LIO_GPU
+      slam_framework: ROS 2 native, CUDA-accelerated
+    communications:
+      slam_to_autopilot: MAVLink over Serial (USB/UART)
+      odometry_topic: /fast_lio_gpu/odometry
+      pointcloud_topic: /fast_lio_gpu/cloud_registered
+      map_topic: /fast_lio_gpu/map
+    performance_targets:
+      odometry_frequency: 10-20 Hz (standard)
+      latency_budget: 100-200 ms acceptable
+      tracking_mode: Standard autonomous flight
+      gpu_acceleration: CUDA-enabled on Jetson Orin NX
+    docker_considerations:
+    - nvidia-docker for GPU access
+    - Volume mounts for workspace
+    - Host network mode for Ouster connection
+    - Serial device passthrough for Cube Orange
+    - ROS 2 Humble base image (arm64v8)
+  phase1_config:
+    phase: 1
+    status: phase2_validation_complete
+    system_name: FAST-GPU
+    hardware_summary: Jetson Orin NX + Ouster OS1-64 + ArduPilot Cube Orange + ROS
+      2 Humble
+    os_variant: Jetson Linux (Ubuntu 22.04 based for Orin)
+    ros_version: humble
+    slam_algorithm: fast_lio2_gpu
+    assessment_items:
+    - platform: Jetson Orin NX (8GB+ RAM, 100 CUDA cores)
+      status: VERIFIED - Sufficient for FAST-LIO2 GPU acceleration
+    - lidar_sensor: Ouster OS1-64 with native IMU
+      connection: Ethernet PoE at 169.254.56.220
+      driver_needed: ouster-ros (ROS 2 driver)
+      status: VERIFIED - ROS 2 Humble driver available
+    - imu_configuration: Integrated Ouster IMU
+      calibration_required: true
+      yaml_config: IMU intrinsics in FAST-LIO2-GPU config
+      status: REQUIRES PHASE 3 CONFIG
+    - autopilot: ArduPilot on Cube Orange
+      mavlink_link: Serial USB/UART
+      interface: ROS 2 bridge (via micro-ROS or ros_gz)
+      status: VERIFIED - ROS 2 Humble supports this
+    - environment: Docker container (nvidia-docker)
+      network_mode: host (for lidar/flight-controller access)
+      gpu_support: nvidia-docker with CUDA 11.8+ required
+      status: REQUIRES PHASE 4 SETUP
+    - fast_lio2_gpu: GPU-accelerated FAST-LIO2
+      ros_version_support: ROS 2 only (not ROS 1)
+      cuda_requirement: CUDA 11.8 minimum (Jetson Orin supports this)
+      status: VERIFIED - ARM64 CUDA support confirmed
+    next_phase: 2 (Compatibility Validation)
+    phase_2_focus:
+    - Verify FAST_LIO_GPU compiles on ARM64 with CUDA
+    - Verify Ouster ROS 2 driver supports Humble + ARM64
+    - Confirm nvidia-docker runtime with GPU access
+    - Validate ROS 2 <-> ArduPilot communication bridge
+    - Verify CUDA 11.8+ available on Jetson
+    critical_changes:
+    - "ROS 1 Noetic \u2192 ROS 2 Humble (FAST_LIO_GPU requirement)"
+    - Update Docker base image to ros:humble
+    - Use colcon instead of catkin for builds
+    - Update launch files to ROS 2 XML format
+    validation_date: '2026-02-11'
+    validation_result: PASSED_WITH_CONDITIONS
+    phase_2_summary:
+      overall_status: VALIDATED
+      critical_blockers: 0
+      medium_risks: 3
+      components_validated:
+      - FAST_LIO_GPU ROS 2 Humble support
+      - ARM64 compatibility (Jetson explicit)
+      - CUDA 12.6 compatibility (exceeds 11.8 min)
+      - Ouster ROS 2 driver (with ARM64 notes)
+      - MAVROS 2.6.0+ ROS 2 Humble
+      - Docker nvidia-runtime on JetPack
+      - GTSAM ARM64 packages
+      - PCL ARM64 (via ROS 2 packages)
+      risks_identified:
+      - Ouster driver nodelets may need recompile on ARM64
+      - GPU memory (8GB) - recommend 16GB for production
+      - PCL VTK dependencies (use ROS 2 binary packages)
+      performance_confidence: HIGH - 10-20 Hz achievable
+      next_phase: 3
+  validated: true
+  integration_complete: false

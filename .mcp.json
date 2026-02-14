@@ -1,8 +1,13 @@
 {
   "mcpServers": {
     "slam-tools": {
-      "command": "/home/dev/miniforge3/envs/mcp-py310/bin/python",
-      "args": ["mcp/slam_mcp_server.py"]
+      "command": "/home/dev/slam-agent/mcp/run_mcp_server.sh",
+      "args": []
+    },
+    "rosbridge-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "rosbridge-mcp-server"]
     }
-  }
+  },
+  "enabledMcpjsonServers": ["slam-tools", "rosbridge-mcp-server"]
 }
