@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  slam-system:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: slam-system:latest
+    container_name: slam-ouster-fastlio
+
+    # Network configuration for Ouster sensor access
+    network_mode: host
+
+    # Privileged mode for hardware access (if needed)
+    privileged: true
+
+    # Environment variables
+    environment:
+      - ROS_HOSTNAME=localhost
+      - ROS_MASTER_URI=http://localhost:11311
+      - DISPLAY=${DISPLAY:-:0}
+      - OUSTER_IP=169.254.56.220
+      - RVIZ_ENABLE=false
+
+    # Volume mounts
+    volumes:
+      # Mount workspace for development
+      - ./workspace:/root/slam_ws/src/workspace:rw
+      # Mount logs directory
+      - ./logs:/root/slam_logs:rw
+      # Mount X11 socket for GUI (rviz)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Mount config files for easy editing
+      - ./config:/root/slam_ws/src/FAST_LIO_SLAM/FAST-LIO/config:rw
+
+    # Device access (if needed for specific hardware)
+    # devices:
+    #   - /dev/dri:/dev/dri  # GPU access for visualization
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (adjust for Jetson)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 6G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "rostopic", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Command - keep container running
+    command: bash -c "source /root/slam_ws/devel/setup.bash && bash"
+
+    # TTY for interactive use
+    tty: true
+    stdin_open: true
+
+# Optional: Service for running SLAM with automatic startup
+  slam-autostart:
+    extends: slam-system
+    container_name: slam-autostart
+    command: bash -c "source /root/slam_ws/devel/setup.bash && /root/preflight_check.sh && roslaunch fast_lio mapping_ouster64_docker.launch"
+    profiles:
+      - autostart
+
+# Optional: Service for running just Ouster driver
+  ouster-driver:
+    extends: slam-system
+    container_name: ouster-driver-only
+    command: bash -c "source /root/slam_ws/devel/setup.bash && roslaunch ouster_ros sensor.launch sensor_hostname:=169.254.56.220 viz:=false"
+    profiles:
+      - driver-only
+
+volumes:
+  workspace:
+  logs:
+
+networks:
+  default:
+    name: slam-network
