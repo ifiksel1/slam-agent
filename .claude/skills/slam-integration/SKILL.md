@@ -22,6 +22,7 @@ Load ONE phase reference file at a time. Never load multiple phases simultaneous
 
 | Phase | Reference File | Purpose | Output |
 |-------|---------------|---------|--------|
+| 0 | [phase0_docker_deployment.md](docs/phases/phase0_docker_deployment.md) | Docker-based deployment (if user wants Docker) | Docker infrastructure |
 | 1 | [phase1_assessment.md](references/phase1_assessment.md) | Hardware assessment (3 batched question groups) | hardware_config.yaml |
 | 2 | [phase2_validation.md](references/phase2_validation.md) | Compatibility validation | install_config.yaml |
 | 3 | [phase3_generation.md](references/phase3_generation.md) | Generate SLAM config, URDF, launch, params | Config file paths |
@@ -160,10 +161,67 @@ If MCP tools are unavailable (server not running), fall back to:
 - Editing YAML files in `docs/learned/` directly using file tools
 - Instructing the user to `git add docs/learned/ && git commit -m "learn: ..." && git push`
 
-## Reference Resources
+## Knowledge Base — Load On Demand
 
+**Rule: Never read docs speculatively. Load ONLY when the current task matches a trigger below.**
+
+### Learned Knowledge (always check FIRST via MCP)
+These are auto-populated from real integrations. Always prefer learned data over static docs.
+
+| What | How to access | Contains |
+|------|--------------|----------|
+| Hardware profiles | `search_profiles()` → `get_profile()` | Validated hardware combos |
+| Known good configs | `get_known_good_config(fingerprint)` | Complete working config sets (YAML, URDF, Dockerfiles, launch, scripts) |
+| Solutions to past issues | `search_solutions(keyword)` | Symptom → root cause → fix |
+| Learned data index | `docs/learned/INDEX.md` | Overview of all learned data |
+
+### Technical Reference — Load during specific phases
+
+| When to load | File | What it contains |
+|-------------|------|-----------------|
+| Phase 3 (config generation) | `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` | EKF params, frame conventions, MAVLink setup |
+| Phase 3 (config generation) | `docs/SLAM_INTEGRATION_TEMPLATE.md` | Config file templates for all SLAM algorithms |
+| Phase 5-6 (testing/debug) | `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` | Diagnostic procedures, expected values |
+| Phase 5-7 (latency tuning) | `docs/VISION_LATENCY_MEASUREMENT.md` | VISO_DELAY_MS measurement methodology |
+| Phase 9 or VOXL detected | `docs/VOXL_CAM_MISSING_STALLED_FIX.md` | VOXL camera stall fix |
+
+### Docker Reference — Load during Docker operations
+
+| When to load | File | What it contains |
+|-------------|------|-----------------|
+| Phase 0 or Docker setup | `DOCKER_README.md` | Docker deployment overview |
+| Phase 0 or Docker setup | `DOCKER_DEPLOYMENT_CHECKLIST.md` | Step-by-step deployment checklist |
+| Docker build issues | `docs/DOCKER_BUILD_LESSONS_LEARNED.md` | ARM64 build fixes, dependency issues |
+| Docker network issues | `DOCKER_NETWORK_GUIDE.md` | Ouster UDP, DDS discovery, host networking |
+| Docker runtime issues | `docs/DOCKER_OPERATIONS_RUNBOOK.md` | ROS1 Docker operations |
+| Docker runtime issues | `docs/DOCKER_OPERATIONS_RUNBOOK_ROS2.md` | ROS2 Docker operations |
+| ROS1+ROS2 coexistence | `docs/DOCKER_MULTI_ROS_ARCHITECTURE.md` | Multi-ROS Docker architecture |
+| Running SLAM in Docker | `DOCKER_SLAM_EXECUTION_GUIDE.md` | Starting services, verifying data flow |
+
+### ROS1 Configs — Load when user has ROS1/Noetic
+
+| File | What it contains |
+|------|-----------------|
+| `config/ouster64.yaml` | ROS1 FAST-LIO config for Ouster OS1-64 |
+| `launch/mapping_ouster64_docker.launch` | ROS1 launch file for Docker SLAM |
+| `Dockerfile` (repo root) | ROS1 Noetic Docker image |
+| `docker-compose.yml` (repo root) | ROS1 Docker Compose |
+
+### Troubleshooting — Load matching symptom only
+
+Load `references/troubleshooting_index.md` first, then the specific file:
+
+| Symptom | File |
+|---------|------|
+| Wrong direction, flyaways, frame errors | `docs/troubleshooting/coordinate_frames.md` |
+| Build errors, package not found | `docs/troubleshooting/ros_environment.md` |
+| SLAM too slow, high latency | `docs/troubleshooting/performance.md` |
+| Calibration, extrinsics wrong | `docs/troubleshooting/sensor_calibration.md` |
+| VIO tracking lost, visual drift | `docs/troubleshooting/vio_specific.md` |
+| No visualization, rviz issues | `docs/troubleshooting/visualization_debugging.md` |
+| Vibration, noisy data, sensor quality | `docs/troubleshooting/hardware_data_quality.md` |
+| Dependency conflicts, version mismatches | `docs/troubleshooting/dependencies_flowchart.md` |
+
+### External References (web search)
 - SLAM installation guides: https://github.com/engcang/SLAM-application
-- LiDAR-UAV autonomy list: https://github.com/hku-mars/LiDAR-UAV-Autonomy
-- Technical reference: `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md`
-- Config templates: `docs/SLAM_INTEGRATION_TEMPLATE.md`
-- Diagnostics: `docs/SLAM_INTEGRATION_DIAGNOSTICS.md`
+- LiDAR-UAV autonomy: https://github.com/hku-mars/LiDAR-UAV-Autonomy
