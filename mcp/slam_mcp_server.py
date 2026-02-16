@@ -654,7 +654,7 @@ def inspect_topic(
 
     Available commands:
     - list: Show all topics (no topic arg needed)
-    - info: Show topic details, publishers, subscribers, and QoS (ROS 2 only)
+    - info: Show topic details, publishers, subscribers, and QoS
     - hz: Measure publish rate (uses duration parameter)
     - echo: Print one or more messages (uses count parameter)
     - bw: Measure bandwidth (uses duration parameter)
@@ -675,8 +675,8 @@ def inspect_topic(
         command: One of: list, info, hz, echo, bw, type
         topic: Topic name (required for all except list). Must start with /.
         container: Docker container name (if empty, runs on host)
-        ros_version: ROS1 or ROS2 (default: ROS2, ignored if container is set)
-        ros_distro: ROS distro name (default: humble, ignored if container is set)
+        ros_version: ROS1 or ROS2 (default: ROS2)
+        ros_distro: ROS distro name (default: humble)
         count: Number of messages for echo (default 1, max 10)
         duration: Seconds to sample for hz and bw (default 5, max 30)
     """
@@ -687,10 +687,6 @@ def inspect_topic(
     # Validate ROS version
     if ros_version not in ("ROS1", "ROS2"):
         return f"Invalid ros_version '{ros_version}'. Must be ROS1 or ROS2."
-
-    # ROS 1 doesn't support 'info' command
-    if command == "info" and ros_version == "ROS1":
-        return "Command 'info' is only available for ROS 2. For ROS 1, use 'type' or 'hz' to get basic topic information."
 
     # Validate topic (required for all commands except list)
     if command != "list":
@@ -739,6 +735,8 @@ def inspect_topic(
 
         if command == "list":
             cmd_parts.append("-v")  # Show verbose output with types
+        elif command == "info":
+            cmd_parts.append(topic)
         elif command == "hz":
             cmd_parts.append(topic)
         elif command == "echo":
@@ -760,12 +758,19 @@ def inspect_topic(
 
     # Build execution command
     if container:
-        # Docker execution with ROS 2 environment
-        setup = (
-            "source /opt/ros/humble/install/setup.bash && "
-            "source /opt/slam_ws/install/setup.bash && "
-            "export ROS_DOMAIN_ID=1"
-        )
+        # Docker execution with ROS environment
+        if ros_version == "ROS2":
+            setup = (
+                f"source /opt/ros/{ros_distro}/setup.bash && "
+                "{ [ -f /opt/slam_ws/install/setup.bash ] && source /opt/slam_ws/install/setup.bash || true; } && "
+                "export ROS_DOMAIN_ID=1"
+            )
+        else:  # ROS1
+            setup = (
+                f"source /opt/ros/{ros_distro}/setup.bash"
+                " && { [ -f /opt/slam_ws/devel/setup.bash ] && source /opt/slam_ws/devel/setup.bash || true; }"
+            )
+
         if command in ("hz", "bw", "echo"):
             inner = f"{setup} && timeout {duration} {topic_cmd}"
         else:
