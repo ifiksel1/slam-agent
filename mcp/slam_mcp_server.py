@@ -51,6 +51,7 @@ DIAGNOSTIC_SCRIPTS = {
     "analyze_slam_bag": ("analyze_slam_bag.py", "python3"),
     "docker_diagnostics": ("docker_diagnostics.py", "python3"),
     "preflight_check_docker": ("preflight_check_docker.sh", "bash"),
+    "measure_vision_latency": ("measure_vision_latency.py", "python3"),
 }
 
 DEPLOY_SCRIPTS = {
@@ -168,6 +169,7 @@ def run_diagnostic(
     - analyze_slam_bag <bag_file> [--slam-topic TOPIC --start SEC --end SEC --plot --report]
     - docker_diagnostics (no args) — full health check of containerized SLAM system
     - preflight_check_docker (no args) — pre-flight verification for Docker SLAM + Ouster
+    - measure_vision_latency [--duration SEC --json --container NAME] — measure SLAM→MAVROS vision pipeline latency and suggest optimal VISO_DELAY_MS
 
     Args:
         diagnostic_name: Name without extension (e.g., "check_tf_tree")
