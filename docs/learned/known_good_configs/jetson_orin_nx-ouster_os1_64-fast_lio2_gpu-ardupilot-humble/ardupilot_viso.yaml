@@ -1,0 +1,35 @@
+# ArduPilot VISO Parameters — Validated 2026-02-16
+# Fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-humble
+# FCU: Cube Orange running ArduPilot
+# Measured pipeline latency: ~50ms end-to-end (FAST-LIO GPU on Jetson Orin NX)
+
+# EKF3 Source Configuration (all ExternalNav)
+EK3_SRC1_POSXY: 6    # ExternalNav
+EK3_SRC1_VELXY: 6    # ExternalNav
+EK3_SRC1_POSZ: 6     # ExternalNav
+EK3_SRC1_VELZ: 6     # ExternalNav
+EK3_SRC1_YAW: 6      # ExternalNav
+AHRS_EKF_TYPE: 3     # EKF3
+EK3_ENABLE: 1
+
+# GPS disabled (GPS-denied operation)
+GPS1_TYPE: 0
+
+# Vision Odometry Input
+VISO_TYPE: 1          # MAVLink vision input enabled
+VISO_DELAY_MS: 60     # Measured: p95=50ms + 10ms margin (was 250, caused floatiness)
+VISO_POS_M_NSE: 0.1   # Position noise (tight: trusts SLAM, good for 4cm-drift FAST-LIO)
+VISO_VEL_M_NSE: 0.2   # Velocity noise
+VISO_YAW_M_NSE: 0.2   # Yaw noise
+
+# LiDAR offset from FCU (from URDF, converted FLU→FRD)
+# Ouster mounted centered, 60mm below base_link, upside-down
+VISO_POS_X: 0.0       # No forward/back offset
+VISO_POS_Y: 0.0       # No left/right offset
+VISO_POS_Z: 0.06      # 60mm down (FRD: positive = down)
+
+# EKF3 Fallback Source 2
+EK3_SRC2_POSXY: 0     # None
+EK3_SRC2_VELXY: 5     # OpticalFlow
+EK3_SRC2_POSZ: 2      # Baro
+EK3_SRC2_YAW: 0       # None

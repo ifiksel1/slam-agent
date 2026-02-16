@@ -1,5 +1,7 @@
-date: '2026-02-14'
+date: '2026-02-16'
 files:
 - fast_lio_gpu.yaml
+- ouster_driver.yaml
+- ardupilot_viso.yaml
 - metadata.yaml
 fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-humble

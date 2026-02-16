@@ -24,4 +24,23 @@
 #     files_changed: [config/fast_lio2.yaml]
 #     tags: [coordinate_frames, extrinsics, rotation, fast_lio2]
 
-solutions: []
+solutions:
+- id: 1
+  date: '2026-02-16'
+  phase: 5
+  hardware: {platform: jetson_orin_nx, lidar: ouster_os1_64, slam: fast_lio2_gpu, autopilot: ardupilot, fcu: cube_orange}
+  symptom: "local_position lags behind or floats around vision_pose"
+  root_cause: "VISO_DELAY_MS=250 but actual pipeline latency was ~50ms. EKF over-compensates for 200ms of delay that doesn't exist, causing overshoot and oscillation."
+  fix: "Set VISO_DELAY_MS=60 (measured p95 latency + 10ms margin). Also set VISO_POS_Z=0.06 from URDF for lever arm compensation."
+  measurement: "Use run_diagnostic('measure_vision_latency', '--duration 30 --json') to measure actual latency and get suggested value."
+  files_changed: [ardupilot_viso.yaml]
+  tags: [viso_delay, ekf, floaty, laggy, local_position, vision_pose, ardupilot, latency]
+- id: 2
+  date: '2026-02-16'
+  phase: 5
+  hardware: {platform: jetson_orin_nx, lidar: ouster_os1_64, slam: fast_lio2_gpu, autopilot: ardupilot}
+  symptom: "Duplicate vision_bridge ROS 2 nodes causing doubled publish rate"
+  root_cause: "Vision bridge restarted without killing old process; stale DDS registration persisted."
+  fix: "Kill process and restart cleanly. Full container restart also clears stale DDS registrations."
+  files_changed: []
+  tags: [vision_bridge, duplicate, dds, restart, mavros]
