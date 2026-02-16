@@ -1,5 +1,0 @@
-# See /home/dev/slam-gpu/docker-compose.yml for full file.
-# Key settings: runtime: nvidia, network_mode: host, privileged: true
-# Image: slam-gpu:latest (16.3GB ARM64)
-# ROS_DOMAIN_ID=1, RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-# Ouster at 169.254.56.220, ArduPilot at /dev/ttyUSB0:921600

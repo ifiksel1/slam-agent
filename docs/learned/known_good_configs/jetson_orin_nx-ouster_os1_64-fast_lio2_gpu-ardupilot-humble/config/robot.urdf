@@ -1,0 +1,226 @@
+<?xml version="1.0"?>
+<!--
+  Robot URDF for Jetson Orin NX + Ouster OS1-64 SLAM System
+
+  Frame hierarchy:
+    base_footprint (ground projection)
+      -> base_link (drone body center)
+        -> os_sensor (Ouster LiDAR mount)
+          -> os_lidar (LiDAR origin)
+          -> os_imu (Integrated IMU)
+
+  Coordinate conventions (ROS REP-103):
+    X: forward, Y: left, Z: up
+
+  Ouster OS1-64 specs:
+    - Integrated IMU at LiDAR origin
+    - IMU offset from laser origin: negligible (<5mm)
+    - Default mounting: upright, forward-facing
+-->
+
+<robot name="slam_robot">
+
+  <!-- ============================== -->
+  <!-- MATERIALS (for visualization) -->
+  <!-- ============================== -->
+
+  <material name="black">
+    <color rgba="0.1 0.1 0.1 1.0"/>
+  </material>
+
+  <material name="blue">
+    <color rgba="0.2 0.4 0.8 1.0"/>
+  </material>
+
+  <material name="red">
+    <color rgba="0.8 0.2 0.2 1.0"/>
+  </material>
+
+  <!-- ============================== -->
+  <!-- BASE FOOTPRINT (ground plane) -->
+  <!-- ============================== -->
+
+  <link name="base_footprint">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+
+  <!-- ============================== -->
+  <!-- BASE LINK (drone body center) -->
+  <!-- ============================== -->
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- Approximate drone body as box -->
+        <box size="0.30 0.30 0.15"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="2.5"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0"
+               iyy="0.05" iyz="0.0"
+               izz="0.08"/>
+    </inertial>
+  </link>
+
+  <!-- Joint: base_footprint -> base_link -->
+  <!-- Drone body is 0.10m above ground when landed -->
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.10" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================== -->
+  <!-- OUSTER SENSOR MOUNT FRAME     -->
+  <!-- ============================== -->
+
+  <link name="os_sensor">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- Ouster OS1-64 dimensions: 85mm diameter, 71mm height -->
+        <cylinder radius="0.0425" length="0.071"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.43"/>  <!-- OS1-64 weight: 430g -->
+      <inertia ixx="0.001" ixy="0.0" ixz="0.0"
+               iyy="0.001" iyz="0.0"
+               izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Joint: base_link -> os_sensor -->
+  <!-- LiDAR mounted 0.15m above drone center, upside down, connector forward -->
+  <!-- Adjust X/Y/Z offsets based on actual mounting position -->
+  <joint name="base_link_to_os_sensor" type="fixed">
+    <parent link="base_link"/>
+    <child link="os_sensor"/>
+    <!--
+      Mounted: centered underneath drone, 6cm below, UPSIDE DOWN, connector forward
+      X: 0.0 (centered front-back)
+      Y: 0.0 (centered left-right)
+      Z: -0.060 (below drone body, hanging underneath)
+      RPY: 0 π 0 (pitch 180° — flipped upside down, connector forward)
+
+      Sensor frame as mounted (relative to body):
+        X = backward (away from connector)
+        Y = left
+        Z = down (inverted)
+    -->
+    <origin xyz="0.0 0.0 -0.060" rpy="0 3.14159 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- ============================== -->
+  <!-- OUSTER LIDAR FRAME            -->
+  <!-- ============================== -->
+
+  <link name="os_lidar">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+
+  <!-- Joint: os_sensor -> os_lidar -->
+  <!-- LiDAR origin is at sensor center -->
+  <joint name="os_sensor_to_os_lidar" type="fixed">
+    <parent link="os_sensor"/>
+    <child link="os_lidar"/>
+    <origin xyz="0 0 0.03675" rpy="0 0 0"/>  <!-- Half height offset -->
+  </joint>
+
+  <!-- ============================== -->
+  <!-- OUSTER IMU FRAME              -->
+  <!-- ============================== -->
+
+  <link name="os_imu">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.01 0.01"/>
+      </geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+
+  <!-- Joint: os_sensor -> os_imu -->
+  <!-- IMU is co-located with LiDAR origin (Ouster integrated IMU) -->
+  <!-- Small offset to match Ouster specs (~36.18mm vertical offset) -->
+  <joint name="os_sensor_to_os_imu" type="fixed">
+    <parent link="os_sensor"/>
+    <child link="os_imu"/>
+    <origin xyz="0 0 0.03618" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============================== -->
+  <!-- MAP FRAME (world reference)   -->
+  <!-- ============================== -->
+  <!--
+    The 'map' frame is published by FAST-LIO-GPU as the global reference.
+    It's not part of the static URDF tree - it's a dynamic TF published by SLAM.
+
+    Frame chain at runtime:
+      map (SLAM output)
+        -> odom (SLAM output)
+          -> base_link (SLAM output)
+            -> os_sensor (URDF static)
+              -> os_lidar (URDF static)
+              -> os_imu (URDF static)
+  -->
+
+  <!-- ============================== -->
+  <!-- NOTES FOR CALIBRATION         -->
+  <!-- ============================== -->
+  <!--
+    EXTRINSIC CALIBRATION:
+
+    1. The transform from base_link -> os_sensor (defined above) is CRITICAL
+       - This defines where the LiDAR is relative to the drone body
+       - Must match physical mounting (measure X, Y, Z offsets)
+       - Must match mounting orientation (RPY angles)
+
+    2. Common mounting scenarios:
+
+       a) Top-mounted, upright:
+          origin xyz="0.0 0.0 0.15" rpy="0 0 0"
+
+       b) Top-mounted, rotated 45° yaw:
+          origin xyz="0.0 0.0 0.15" rpy="0 0 0.7854"
+
+       c) Side-mounted, tilted 90° pitch:
+          origin xyz="0.0 0.15 0.0" rpy="0 1.5708 0"
+
+       d) Inverted (upside-down):
+          origin xyz="0.0 0.0 0.15" rpy="3.1416 0 0"
+
+    3. Verification:
+       - Run: ros2 run tf2_ros tf2_echo base_link os_imu
+       - Check transform matches your physical setup
+       - Visualize in rviz2: ros2 run rviz2 rviz2
+
+    4. Fast-LIO-GPU config:
+       - The extrinsic rotation/translation in fast_lio_gpu.yaml should be
+         IDENTITY if you use os_lidar as the body frame
+       - OR set to this transform if you use base_link as body frame
+  -->
+
+</robot>

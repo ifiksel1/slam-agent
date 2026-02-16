@@ -1,0 +1,117 @@
+# ArduPilot Parameters for SLAM Vision Position Integration
+#
+# Load these parameters onto ArduPilot Cube Orange via:
+#   - Mission Planner: Config/Tuning → Full Parameter List → Load from file
+#   - MAVProxy: param load ardupilot_params.parm
+#   - pymavlink: mav.param_set_send() for each parameter
+#
+# IMPORTANT: After loading, reboot the flight controller for EKF changes to take effect.
+
+# ================================================================
+# EKF3 Configuration
+# ================================================================
+# Use EKF3 as the primary AHRS/EKF
+AHRS_EKF_TYPE,3
+
+# Enable EKF3
+EK3_ENABLE,1
+
+# EKF3 Source Set 1: Use vision for position, velocity, and yaw
+# Source options:
+#   0 = None
+#   1 = GPS
+#   3 = External Nav (deprecated, use 6)
+#   6 = ExternalNav (VISION_POSITION_ESTIMATE)
+EK3_SRC1_POSXY,6     # Vision for horizontal position
+EK3_SRC1_VELXY,6     # Vision for horizontal velocity
+EK3_SRC1_POSZ,1      # Barometer for altitude (or use 6 for vision)
+EK3_SRC1_YAW,6       # Vision for yaw/heading
+
+# ================================================================
+# Vision Sensor Configuration
+# ================================================================
+# VISO_TYPE: Vision odometry sensor type
+#   0 = None
+#   1 = MAVLink (VISION_POSITION_DELTA)
+#   2 = MAVLink (VISION_POSITION_ESTIMATE) ← MAVROS uses this
+VISO_TYPE,2
+
+# VISO_DELAY_MS: Vision sensor delay in milliseconds
+# This accounts for processing latency in the SLAM pipeline.
+# Typical values: 30-100ms depending on compute performance.
+# Start with 50ms and tune if position lags or leads actual motion.
+VISO_DELAY_MS,50
+
+# VISO_POS_M_NSE: Vision position measurement noise (meters)
+# Lower = trust vision more, higher = trust vision less
+# FAST-LIO is very accurate, so we can use a low value
+VISO_POS_M_NSE,0.1
+
+# VISO_YAW_M_NSE: Vision yaw measurement noise (radians)
+# FAST-LIO's yaw is drift-prone without loop closure, but still useful
+VISO_YAW_M_NSE,0.1
+
+# VISO_VEL_M_NSE: Vision velocity measurement noise (m/s)
+# Used if publishing velocity estimates (not applicable for VISION_POSITION_ESTIMATE)
+VISO_VEL_M_NSE,0.2
+
+# ================================================================
+# GPS Configuration
+# ================================================================
+# Disable GPS since we're using vision-only positioning
+# If you want GPS as backup, set GPS_TYPE to your GPS model (e.g., 1 for AUTO)
+GPS_TYPE,0
+
+# ================================================================
+# Arming Checks
+# ================================================================
+# ARMING_CHECK: Bitmask of pre-arm checks
+# Default is 1 (all checks enabled)
+# To allow arming without GPS, disable GPS checks:
+#   388598 = all checks except GPS checks
+# WARNING: Only disable GPS checks if you have reliable vision positioning!
+ARMING_CHECK,388598
+
+# ================================================================
+# MAVLink Stream Rates (Serial Port 1 = companion computer)
+# ================================================================
+# These ensure ArduPilot streams local position, IMU, and other data
+# to MAVROS without needing a service call each boot.
+# SR1 = Serial1 (the companion computer port)
+SR1_EXTRA1,10       # IMU, attitude (10 Hz)
+SR1_EXTRA2,10       # VFR_HUD (10 Hz)
+SR1_EXTRA3,2        # AHRS, system status (2 Hz)
+SR1_POSITION,10     # LOCAL_POSITION_NED, GLOBAL_POSITION_INT (10 Hz)
+SR1_RAW_SENS,2      # Raw sensors (2 Hz)
+SR1_RC_CHAN,2        # RC channels (2 Hz)
+SR1_RAW_CTRL,2      # Servo output (2 Hz)
+
+# ================================================================
+# Optional: Vision Z-axis Configuration
+# ================================================================
+# If you want to use SLAM altitude instead of barometer, change:
+#   EK3_SRC1_POSZ,6
+#
+# However, barometric altitude is usually more stable for vertical control.
+# Vision altitude can drift over time without absolute height reference.
+
+# ================================================================
+# Optional: Optical Flow Configuration
+# ================================================================
+# If you have an optical flow sensor for low-altitude backup, configure:
+#   FLOW_TYPE,x (sensor type)
+#   EK3_SRC1_POSXY,0 (switch source based on altitude)
+# This is not needed if vision positioning works at all flight altitudes.
+
+# ================================================================
+# Post-Load Checklist
+# ================================================================
+# After loading these parameters:
+# 1. Reboot flight controller (PREFLIGHT_REBOOT_REQUIRED will be set)
+# 2. Verify EKF3 is active: check /mavros/state for "armed" capability
+# 3. Check /mavros/state: should show "connected: true"
+# 4. Monitor /mavros/vision_pose/pose: should receive SLAM odometry
+# 5. Check EKF status: /mavros/extended_state or Mission Planner HUD
+# 6. Pre-arm: EKF should show "using vision position" in messages
+# 7. Test: Move drone by hand, check position tracking in GCS
+# 8. Only fly after confirming vision position is stable and accurate!

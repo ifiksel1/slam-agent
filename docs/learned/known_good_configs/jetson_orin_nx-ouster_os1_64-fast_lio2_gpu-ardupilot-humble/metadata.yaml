@@ -1,7 +1,60 @@
 date: '2026-02-16'
-files:
-- fast_lio_gpu.yaml
-- ouster_driver.yaml
-- ardupilot_viso.yaml
-- metadata.yaml
 fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-humble
+description: >
+  Complete validated SLAM system for Jetson Orin NX with Ouster OS1-64 LiDAR,
+  FAST-LIO2 GPU SLAM, ArduPilot Cube Orange, and MAVROS sidecar container.
+  Includes Docker infrastructure, launch files, control scripts, and tuned configs.
+  Bench tested with 4cm return-to-origin drift in small indoor room.
+
+hardware:
+  platform: NVIDIA Jetson Orin NX (8GB)
+  lidar: Ouster OS1-64
+  autopilot: ArduPilot Cube Orange
+  slam: FAST-LIO2 GPU (CUDA SM 8.7)
+  ros: ROS 2 Humble (from source on L4T)
+
+files:
+  # SLAM config (tuned)
+  - fast_lio_gpu.yaml
+  - ouster_driver.yaml
+  - ardupilot_viso.yaml
+
+  # Robot model
+  - config/robot.urdf
+  - config/mavros_config.yaml
+  - config/ardupilot_params.parm
+
+  # Docker infrastructure
+  - docker/Dockerfile
+  - docker/docker-compose.yml
+  - docker/docker-entrypoint.sh
+
+  # Launch files
+  - launch/slam_launch.py
+
+  # MAVROS sidecar
+  - mavros/Dockerfile
+  - mavros/vision_bridge.py
+  - mavros/mavros_bridge_launch.py
+
+  # Control scripts
+  - scripts/fastlio.sh
+  - scripts/ouster.sh
+  - scripts/mavros.sh
+  - scripts/foxglove.sh
+  - scripts/slam-system.sh
+
+validated_parameters:
+  viso_delay_ms: 60
+  viso_pos_m_nse: 0.1
+  viso_pos_z: 0.06
+  pipeline_latency_ms: 50
+  slam_hz: 10
+  drift_cm: 4
+
+notes:
+  - MAVROS built via apt in sidecar container (ros:humble), not from source
+  - Foxglove Bridge built from foxglove-sdk C++ (not deprecated ros-foxglove-bridge)
+  - MAVROS launch must use apm.launch XML (not direct Node) to avoid plugin topic collisions
+  - Vision bridge uses 180° Y-axis similarity transform for frame correction
+  - Healthcheck in docker-compose.yml has wrong setup.bash path (needs fix)

@@ -1,0 +1,264 @@
+version: '3.8'
+
+services:
+  slam-gpu:
+    image: slam-gpu:latest
+    container_name: slam_gpu_system
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # ================================================================
+    # GPU ACCESS
+    # ================================================================
+    # nvidia-docker2 provides GPU access inside the container.
+    runtime: nvidia
+
+    # ================================================================
+    # NETWORKING
+    # ================================================================
+    # Host network mode is required for:
+    #   1. Ouster LiDAR UDP multicast traffic (ports 7502/7503)
+    #   2. Low-latency DDS discovery (FastRTPS)
+    #   3. Link-local addressing (169.254.x.x) for Ouster
+    network_mode: host
+
+    # ================================================================
+    # DEVICE ACCESS
+    # ================================================================
+    # Privileged mode grants access to all host devices.
+    # Required for serial (ArduPilot) and GPU.
+    privileged: true
+
+    # Serial device for ArduPilot Cube Orange
+    # Note: with privileged=true, all /dev devices are accessible.
+    # The 'devices' mapping provides clarity and documentation.
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyACM0:/dev/ttyACM0
+
+    # ================================================================
+    # ENVIRONMENT VARIABLES
+    # ================================================================
+    environment:
+      # ROS 2 configuration
+      - ROS_DOMAIN_ID=1
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+      # Ouster LiDAR
+      - OUSTER_IP=169.254.56.220
+      - OUSTER_LIDAR_MODE=1024x10
+      # ArduPilot MAVROS
+      - MAVROS_PORT=/dev/ttyUSB0
+      - MAVROS_BAUD=921600
+      # NVIDIA GPU access
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # CUDA settings (Jetson has 1 GPU = device 0)
+      - CUDA_VISIBLE_DEVICES=0
+
+    # ================================================================
+    # VOLUME MOUNTS
+    # ================================================================
+    volumes:
+      # Configuration files (read-only at runtime)
+      - ./config:/opt/slam_ws/config:ro
+      - ./launch:/opt/slam_ws/launch:ro
+
+      # ROS 2 bag recording (read-write)
+      - ./bags:/opt/slam_ws/bags:rw
+
+      # ROS 2 logs
+      - ./logs:/root/.ros/log:rw
+
+      # Shared memory for FastRTPS DDS
+      - /dev/shm:/dev/shm
+
+      # CUDA device access (Jetson-specific)
+      - /tmp/argus_socket:/tmp/argus_socket
+
+    # ================================================================
+    # HEALTH CHECK
+    # ================================================================
+    # Verify the ROS 2 daemon is responsive.
+    # Uses the workspace setup path from the from-source build.
+    healthcheck:
+      test: ["CMD-SHELL", "source /opt/ros/humble/install/setup.bash && source /opt/slam_ws/install/setup.bash 2>/dev/null; ros2 topic list 2>/dev/null | grep -q '/ouster/points' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # ================================================================
+    # RESTART AND RESOURCE LIMITS
+    # ================================================================
+    restart: unless-stopped
+
+    # IPC host for shared memory performance (DDS)
+    ipc: host
+
+    # Security options for GPU/CUDA access
+    security_opt:
+      - seccomp:unconfined
+
+    # Memory limits: leave ~1.5GB for Jetson system on 8GB device
+    # Note: 'deploy' limits only work in Swarm mode. For standalone,
+    # use 'mem_limit' instead.
+    mem_limit: 6500m
+
+    # ulimits for GPU memory locking and stack
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+
+    # Working directory
+    working_dir: /opt/slam_ws
+
+    # ================================================================
+    # STARTUP COMMAND
+    # ================================================================
+    # Launch the full SLAM pipeline via launch file.
+    # Source BOTH the base ROS 2 install and the workspace overlay.
+    command: >
+      bash -c "
+        source /opt/ros/humble/install/setup.bash &&
+        source /opt/slam_ws/install/setup.bash &&
+        ros2 launch /opt/slam_ws/launch/slam_launch.py
+      "
+
+    # ================================================================
+    # LOGGING
+    # ================================================================
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # ==================================================================
+  # OPTIONAL: RViz2 Visualization (separate container)
+  # ==================================================================
+  # Start with: docker compose --profile visualization up rviz2
+  rviz2:
+    image: slam_integration:latest
+    container_name: slam_rviz2
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+
+    environment:
+      - ROS_DOMAIN_ID=1
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
+      - ./rviz:/opt/slam_ws/rviz:ro
+
+    command: >
+      bash -c "
+        source /opt/ros/humble/install/setup.bash &&
+        source /opt/slam_ws/install/setup.bash &&
+        ros2 run rviz2 rviz2 -d /opt/slam_ws/rviz/slam.rviz
+      "
+
+    depends_on:
+      - slam-gpu
+
+    profiles:
+      - visualization
+
+    restart: "no"
+
+  # ==================================================================
+  # MAVROS Bridge for ArduPilot Vision Position Integration
+  # ==================================================================
+  # Sidecar container that:
+  #   1. Runs MAVROS to communicate with ArduPilot Cube Orange
+  #   2. Forwards SLAM odometry to ArduPilot as vision position estimates
+  #
+  # Start with: docker compose up -d mavros
+  # Control with: ./scripts/mavros.sh {start|stop|restart|status|logs}
+  mavros:
+    build:
+      context: ./mavros
+      dockerfile: Dockerfile
+    container_name: slam_mavros
+
+    # ================================================================
+    # NETWORKING
+    # ================================================================
+    # Host network mode for ROS 2 DDS communication with slam-gpu container
+    network_mode: host
+
+    # ================================================================
+    # DEVICE ACCESS
+    # ================================================================
+    # Privileged mode for serial device access
+    privileged: true
+
+    # Serial device for ArduPilot Cube Orange
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
+
+    # ================================================================
+    # ENVIRONMENT VARIABLES
+    # ================================================================
+    environment:
+      # ROS 2 configuration (must match slam-gpu container)
+      - ROS_DOMAIN_ID=1
+      - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+    # ================================================================
+    # VOLUME MOUNTS
+    # ================================================================
+    volumes:
+      # Configuration files (read-only)
+      - ./config:/ws/config:ro
+
+      # Shared memory for FastRTPS DDS
+      - /dev/shm:/dev/shm
+
+    # ================================================================
+    # DEPENDENCIES
+    # ================================================================
+    # Start after slam-gpu so SLAM odometry is available
+    depends_on:
+      - slam-gpu
+
+    # ================================================================
+    # RESTART POLICY
+    # ================================================================
+    restart: unless-stopped
+
+    # IPC host for shared memory performance (DDS)
+    ipc: host
+
+    # Working directory
+    working_dir: /ws
+
+    # ================================================================
+    # STARTUP COMMAND
+    # ================================================================
+    # Launch MAVROS and vision bridge via ROS 2 launch file
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        ros2 launch /ws/launch/mavros_bridge_launch.py
+      "
+
+    # ================================================================
+    # LOGGING
+    # ================================================================
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
