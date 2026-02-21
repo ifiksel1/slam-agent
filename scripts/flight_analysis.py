@@ -62,6 +62,9 @@ VIBRATION_CRITICAL_THRESHOLD = 100.0
 HOVER_PCT_MIN = 40.0
 HOVER_PCT_MAX = 60.0
 
+# Motor KV rating for RPM estimation from voltage+PWM (modify for your motors)
+DEFAULT_MOTOR_KV = 2400
+
 # ==============================================================================
 # Data Structures
 # ==============================================================================
@@ -388,7 +391,7 @@ class FlightDataExtractor:
         # Convert timestamps to relative time from start
         if self.start_time is not None:
             for topic_data in self.data.values():
-                if topic_data['timestamps']:
+                if len(topic_data['timestamps']) > 0:
                     topic_data['timestamps'] = np.array(topic_data['timestamps']) - self.start_time
 
 # ==============================================================================
@@ -436,7 +439,7 @@ class FlightAnalyzer:
         }
 
         # Duration from SLAM odometry
-        if 'slam_odom' in self.data and self.data['slam_odom']['timestamps']:
+        if 'slam_odom' in self.data and len(self.data['slam_odom']['timestamps']) > 0:
             times = self.data['slam_odom']['timestamps']
             summary['duration_sec'] = float(times[-1] - times[0])
 
@@ -472,8 +475,8 @@ class FlightAnalyzer:
             msgs = self.data['battery']['messages']
 
             # Battery percentage
-            # ROS 2 BatteryState.percentage is [0.0, 1.0]; scale to [0, 100]
-            if 'percentage' in msgs[0]:
+            # ROS 2 BatteryState.percentage is [0.0, 1.0]; -1.0 means unknown/disconnected
+            if 'percentage' in msgs[0] and float(msgs[0]['percentage']) >= 0.0:
                 summary['battery_start_pct'] = float(msgs[0]['percentage']) * 100.0
                 summary['battery_end_pct'] = float(msgs[-1]['percentage']) * 100.0
             elif 'remaining' in msgs[0]:
@@ -920,7 +923,7 @@ class FlightPlotter:
         summary = self.analysis['summary']
 
         # Battery timeline
-        if 'battery' in self.data and self.data['battery']['timestamps']:
+        if 'battery' in self.data and len(self.data['battery']['timestamps']) > 0:
             times = np.array(self.data['battery']['timestamps'])
             percentages = []
             for msg in self.data['battery']['messages']:
@@ -934,7 +937,7 @@ class FlightPlotter:
             ax1.set_xlim(left=0)
 
         # Flight mode timeline
-        if 'state' in self.data and self.data['state']['timestamps']:
+        if 'state' in self.data and len(self.data['state']['timestamps']) > 0:
             times = np.array(self.data['state']['timestamps'])
             modes = [msg.get('mode', 'UNKNOWN') for msg in self.data['state']['messages']]
 
@@ -965,6 +968,7 @@ class FlightPlotter:
 
         if not _has_plotly:
             # Matplotlib fallback: 3D scatter plot
+            from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers '3d' projection
             fig = Figure(figsize=(8, 6))
             ax = fig.add_subplot(111, projection='3d')
             if slam_vs_ekf['available']:
