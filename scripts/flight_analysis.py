@@ -40,7 +40,7 @@ FLIGHT_DATA_ROOT = Path("/home/dev/slam-agent/flights")
 
 # Topic names
 TOPICS = {
-    'slam_odom': '/fast_lio_gpu/odometry',
+    'slam_odom': '/Odometry',
     'ekf_pose': '/mavros/local_position/pose',
     'state': '/mavros/state',
     'battery': '/mavros/battery',
@@ -97,41 +97,55 @@ class Message:
 # ==============================================================================
 
 class BagReader:
-    """Unified interface for reading ROS 1 .bag and ROS 2 .mcap files"""
+    """Unified interface for reading ROS 1 .bag, ROS 2 .mcap, and ROS 2 .db3 files"""
 
     def __init__(self, bag_path: str):
         self.bag_path = Path(bag_path)
-        self.is_ros2 = self._detect_format()
+        self._format = self._detect_format()  # 'ros1', 'mcap', or 'db3'
         self._reader = None
         self._topics = set()
+        # db3-specific
+        self._db3_conn = None
+        self._db3_typestore = None
 
-    def _detect_format(self) -> bool:
-        """Auto-detect bag format from file extension"""
+    def _detect_format(self) -> str:
+        """Auto-detect bag format: 'ros1', 'mcap', or 'db3'"""
+        if self.bag_path.suffix == '.bag':
+            return 'ros1'
+        if self.bag_path.suffix == '.mcap':
+            return 'mcap'
+        if self.bag_path.suffix == '.db3':
+            return 'db3'
         if self.bag_path.is_dir():
-            # ROS 2 directory-based bag
-            return True
-        elif self.bag_path.suffix == '.mcap':
-            return True
-        elif self.bag_path.suffix == '.bag':
-            return False
-        else:
-            raise ValueError(f"Unknown bag format: {self.bag_path}")
+            # ROS 2 directory bag — check contents
+            if list(self.bag_path.glob('*.db3')):
+                return 'db3'
+            if list(self.bag_path.glob('*.mcap')):
+                return 'mcap'
+            # metadata.yaml present → rosbags Reader can handle it
+            return 'db3'
+        raise ValueError(f"Unknown bag format: {self.bag_path}")
+
+    @property
+    def is_ros2(self) -> bool:
+        return self._format in ('mcap', 'db3')
 
     def open(self):
         """Open the bag file"""
-        if self.is_ros2:
-            self._open_ros2()
-        else:
+        if self._format == 'ros1':
             self._open_ros1()
+        elif self._format == 'mcap':
+            self._open_ros2_mcap()
+        else:
+            self._open_ros2_db3()
 
     def close(self):
         """Close the bag file"""
-        if self._reader is not None:
-            if self.is_ros2:
-                # mcap reader doesn't need explicit close
-                pass
-            else:
-                self._reader.close()
+        if self._db3_conn is not None:
+            self._db3_conn.close()
+            self._db3_conn = None
+        if self._reader is not None and self._format == 'ros1':
+            self._reader.close()
 
     def _open_ros1(self):
         """Open ROS 1 .bag file"""
@@ -139,68 +153,136 @@ class BagReader:
             import rosbag
         except ImportError:
             raise ImportError("rosbag not available. Install with: pip install rosbag roslz4")
-
         self._reader = rosbag.Bag(str(self.bag_path))
         self._topics = set(self._reader.get_type_and_topic_info()[1].keys())
 
-    def _open_ros2(self):
+    def _open_ros2_mcap(self):
         """Open ROS 2 .mcap file"""
         try:
             from mcap.reader import make_reader
         except ImportError:
-            raise ImportError("mcap libraries not available. Install with: pip install mcap mcap-ros2-support")
-
-        # Resolve mcap file path (ROS 2 bags can be directories containing .mcap)
+            raise ImportError("mcap not available. Install with: pip install mcap mcap-ros2-support")
         if self.bag_path.is_dir():
             mcap_files = list(self.bag_path.glob("*.mcap"))
             if not mcap_files:
-                raise FileNotFoundError(f"No .mcap files found in {self.bag_path}")
+                raise FileNotFoundError(f"No .mcap files in {self.bag_path}")
             self._mcap_path = mcap_files[0]
         else:
             self._mcap_path = self.bag_path
-
-        # Quick scan for topics
         with open(self._mcap_path, 'rb') as f:
             reader = make_reader(f)
             summary = reader.get_summary()
             if summary and summary.channels:
                 self._topics = {ch.topic for ch in summary.channels.values()}
 
+    def _open_ros2_db3(self):
+        """Open ROS 2 sqlite3 .db3 bag (with or without metadata.yaml)"""
+        import sqlite3 as _sqlite3
+        # Resolve path to the .db3 file
+        if self.bag_path.is_dir():
+            db3_files = sorted(self.bag_path.glob("*.db3"))
+            if not db3_files:
+                raise FileNotFoundError(f"No .db3 files in {self.bag_path}")
+            self._db3_path = db3_files[0]
+        else:
+            self._db3_path = self.bag_path
+
+        self._db3_conn = _sqlite3.connect(str(self._db3_path))
+        rows = self._db3_conn.execute("SELECT name, type FROM topics").fetchall()
+        self._db3_topic_map = {name: msgtype for name, msgtype in rows}
+        self._topics = set(self._db3_topic_map.keys())
+
+        # Build rosbags typestore for CDR deserialization
+        try:
+            from rosbags.typesys import Stores, get_typestore
+            self._db3_typestore = get_typestore(Stores.ROS2_HUMBLE)
+        except ImportError:
+            raise ImportError("rosbags not available. Install with: pip install rosbags")
+
     def get_topics(self) -> List[str]:
         """Get list of available topics"""
         return sorted(self._topics)
 
     def read_messages(self, topics: Optional[List[str]] = None) -> Iterator[Message]:
-        """
-        Read messages from bag file
-
-        Args:
-            topics: List of topics to read (None = all topics)
-
-        Yields:
-            Message objects with normalized data
-        """
-        if self.is_ros2:
-            yield from self._read_ros2_messages(topics)
-        else:
+        """Read messages from bag file, yielding normalized Message objects."""
+        if self._format == 'ros1':
             yield from self._read_ros1_messages(topics)
+        elif self._format == 'mcap':
+            yield from self._read_ros2_mcap_messages(topics)
+        else:
+            yield from self._read_ros2_db3_messages(topics)
 
     def _read_ros1_messages(self, topics: Optional[List[str]]) -> Iterator[Message]:
         """Read ROS 1 messages"""
         for topic, msg, t in self._reader.read_messages(topics=topics):
-            timestamp = t.to_sec()
-            data = self._ros1_msg_to_dict(msg)
-            yield Message(topic=topic, timestamp=timestamp, data=data)
+            yield Message(topic=topic, timestamp=t.to_sec(),
+                          data=self._ros1_msg_to_dict(msg))
 
-    def _read_ros2_messages(self, topics: Optional[List[str]]) -> Iterator[Message]:
+    def _read_ros2_mcap_messages(self, topics: Optional[List[str]]) -> Iterator[Message]:
         """Read ROS 2 messages from mcap"""
         from mcap_ros2.reader import read_ros2_messages
-
         for msg in read_ros2_messages(str(self._mcap_path), topics=topics):
-            # mcap Message.log_time is nanoseconds since epoch
             timestamp = msg.message.log_time * 1e-9
-            data = self._ros2_msg_to_dict(msg.ros_msg)
-            yield Message(topic=msg.channel.topic, timestamp=timestamp, data=data)
+            yield Message(topic=msg.channel.topic, timestamp=timestamp,
+                          data=self._ros2_msg_to_dict(msg.ros_msg))
+
+    def _read_ros2_db3_messages(self, topics: Optional[List[str]]) -> Iterator[Message]:
+        """Read ROS 2 messages from sqlite3 .db3 using rosbags CDR deserialization."""
+        import sqlite3 as _sqlite3
+
+        filter_topics = set(topics) if topics else None
+
+        # Build topic_id → (name, msgtype) map filtered to requested topics
+        topic_rows = self._db3_conn.execute("SELECT id, name, type FROM topics").fetchall()
+        wanted = {}
+        for tid, name, msgtype in topic_rows:
+            if filter_topics is None or name in filter_topics:
+                wanted[tid] = (name, msgtype)
+
+        if not wanted:
+            return
+
+        placeholders = ",".join("?" * len(wanted))
+        for ts, tid, data in self._db3_conn.execute(
+            f"SELECT timestamp, topic_id, data FROM messages "
+            f"WHERE topic_id IN ({placeholders}) ORDER BY timestamp",
+            list(wanted.keys()),
+        ):
+            name, msgtype = wanted[tid]
+            try:
+                msg = self._db3_typestore.deserialize_cdr(bytes(data), msgtype)
+                yield Message(topic=name, timestamp=ts / 1e9,
+                              data=self._rosbags_msg_to_dict(msg))
+            except Exception:
+                pass
+
+    def _rosbags_msg_to_dict(self, msg) -> Dict[str, Any]:
+        """Recursively convert a rosbags deserialized message to a plain dict."""
+        result = {}
+        # rosbags messages expose fields via __dataclass_fields__ or __slots__
+        fields = getattr(msg, '__dataclass_fields__', None)
+        if fields is not None:
+            for field_name in fields:
+                value = getattr(msg, field_name, None)
+                result[field_name] = self._rosbags_value_to_plain(value)
+        elif hasattr(msg, '__slots__'):
+            for slot in msg.__slots__:
+                value = getattr(msg, slot, None)
+                result[slot] = self._rosbags_value_to_plain(value)
+        return result
+
+    def _rosbags_value_to_plain(self, value) -> Any:
+        """Convert a rosbags field value to a JSON-serializable type."""
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (int, float, str, bool, type(None))):
+            return value
+        if isinstance(value, (list, tuple)):
+            return [self._rosbags_value_to_plain(v) for v in value]
+        # Nested rosbags message
+        if hasattr(value, '__dataclass_fields__') or hasattr(value, '__slots__'):
+            return self._rosbags_msg_to_dict(value)
+        return value
 
     def _ros1_msg_to_dict(self, msg) -> Dict[str, Any]:
         """Convert ROS 1 message to dictionary"""
