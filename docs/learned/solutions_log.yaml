@@ -1,46 +1,84 @@
-# SLAM Agent Solutions Log
-# Auto-populated by the SLAM agent after resolving issues during Phases 5-6.
-# Each entry records a problem, root cause, and fix so future sessions can check here first.
-#
-# Format:
-#   - id: unique identifier (auto-increment)
-#     date: YYYY-MM-DD
-#     phase: which phase the issue occurred in
-#     hardware: relevant hardware (platform, sensor, algorithm)
-#     symptom: what the user reported
-#     root_cause: why it happened
-#     fix: what resolved it
-#     files_changed: list of files modified to fix
-#     tags: searchable keywords
-#
-# Example:
-#   - id: 1
-#     date: 2026-02-06
-#     phase: 5
-#     hardware: {platform: jetson_orin, lidar: ouster_os1_64, slam: fast_lio2}
-#     symptom: "SLAM publishes odometry but drone flies in wrong direction"
-#     root_cause: "LiDAR mounted 90° rotated, extrinsic yaw offset missing"
-#     fix: "Added -1.5708 rad yaw to extrinsicRot in FAST-LIO config"
-#     files_changed: [config/fast_lio2.yaml]
-#     tags: [coordinate_frames, extrinsics, rotation, fast_lio2]
-
 solutions:
 - id: 1
   date: '2026-02-16'
   phase: 5
-  hardware: {platform: jetson_orin_nx, lidar: ouster_os1_64, slam: fast_lio2_gpu, autopilot: ardupilot, fcu: cube_orange}
-  symptom: "local_position lags behind or floats around vision_pose"
-  root_cause: "VISO_DELAY_MS=250 but actual pipeline latency was ~50ms. EKF over-compensates for 200ms of delay that doesn't exist, causing overshoot and oscillation."
-  fix: "Set VISO_DELAY_MS=60 (measured p95 latency + 10ms margin). Also set VISO_POS_Z=0.06 from URDF for lever arm compensation."
-  measurement: "Use run_diagnostic('measure_vision_latency', '--duration 30 --json') to measure actual latency and get suggested value."
-  files_changed: [ardupilot_viso.yaml]
-  tags: [viso_delay, ekf, floaty, laggy, local_position, vision_pose, ardupilot, latency]
+  hardware:
+    platform: jetson_orin_nx
+    lidar: ouster_os1_64
+    slam: fast_lio2_gpu
+    autopilot: ardupilot
+    fcu: cube_orange
+  symptom: local_position lags behind or floats around vision_pose
+  root_cause: VISO_DELAY_MS=250 but actual pipeline latency was ~50ms. EKF over-compensates
+    for 200ms of delay that doesn't exist, causing overshoot and oscillation.
+  fix: Set VISO_DELAY_MS=60 (measured p95 latency + 10ms margin). Also set VISO_POS_Z=0.06
+    from URDF for lever arm compensation.
+  measurement: Use run_diagnostic('measure_vision_latency', '--duration 30 --json')
+    to measure actual latency and get suggested value.
+  files_changed:
+  - ardupilot_viso.yaml
+  tags:
+  - viso_delay
+  - ekf
+  - floaty
+  - laggy
+  - local_position
+  - vision_pose
+  - ardupilot
+  - latency
 - id: 2
   date: '2026-02-16'
   phase: 5
-  hardware: {platform: jetson_orin_nx, lidar: ouster_os1_64, slam: fast_lio2_gpu, autopilot: ardupilot}
-  symptom: "Duplicate vision_bridge ROS 2 nodes causing doubled publish rate"
-  root_cause: "Vision bridge restarted without killing old process; stale DDS registration persisted."
-  fix: "Kill process and restart cleanly. Full container restart also clears stale DDS registrations."
+  hardware:
+    platform: jetson_orin_nx
+    lidar: ouster_os1_64
+    slam: fast_lio2_gpu
+    autopilot: ardupilot
+  symptom: Duplicate vision_bridge ROS 2 nodes causing doubled publish rate
+  root_cause: Vision bridge restarted without killing old process; stale DDS registration
+    persisted.
+  fix: Kill process and restart cleanly. Full container restart also clears stale
+    DDS registrations.
   files_changed: []
-  tags: [vision_bridge, duplicate, dds, restart, mavros]
+  tags:
+  - vision_bridge
+  - duplicate
+  - dds
+  - restart
+  - mavros
+- id: 3
+  date: '2026-02-21'
+  phase: 5
+  hardware:
+    platform: jetson_orin_nx
+    lidar: ouster_os1_64
+    slam: fast_lio_gpu
+    autopilot: ardupilot_cube_orange
+    ros: humble
+    container: slam_gpu_system + slam_mavros
+  symptom: "SLAM yaw sign flipped \u2014 clockwise rotation reports positive yaw instead\
+    \ of negative in FLU/ENU convention. Causes drone to fly in wrong direction when\
+    \ using vision position estimates."
+  root_cause: LiDAR mounted with yaw axis inverted relative to body frame. Default
+    extrinsic_R identity matrix and URDF rpy=(0,0,0) did not account for the 180-degree
+    yaw offset between LiDAR and body frames.
+  fix: "Applied 180-degree pitch flip to correct yaw sign:\n1. URDF: Set base_link_to_os_sensor\
+    \ origin rpy to (0, 3.14159, 0)\n2. FAST-LIO config: Set extrinsic_R to [-1,0,0,\
+    \ 0,-1,0, 0,0,1]\n3. No vision bridge changes needed \u2014 ArduPilot EKF accepts\
+    \ the corrected frame directly.\nNote: After correction, CW rotation reports positive\
+    \ yaw which is correct for NED/FRD convention that ArduPilot uses. The transform_calibrator\
+    \ analyzer may report this as \"still flipped\" because it assumes ENU/FLU convention\
+    \ \u2014 this is a false positive."
+  files_changed:
+  - config/robot.urdf
+  - config/fast_lio_gpu.yaml
+  tags:
+  - yaw_sign_flip
+  - coordinate_frames
+  - extrinsics
+  - fast_lio_gpu
+  - ouster
+  - transform_calibration
+  - urdf
+  - NED
+  - FRD
