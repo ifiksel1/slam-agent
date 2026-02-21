@@ -869,7 +869,8 @@ class ConfigUpdater:
             return "ERROR: Could not find joint base_link_to_os_sensor in URDF"
         if dry_run:
             return f"[DRY RUN] Would update URDF rpy to: {new_rpy_str}"
-        ET.indent(tree, space="  ")
+        if hasattr(ET, "indent"):
+            ET.indent(tree, space="  ")
         tree.write(self.urdf_path, xml_declaration=True, encoding="unicode")
         return f"Updated URDF rpy → {new_rpy_str}"
 
@@ -976,7 +977,7 @@ class ReportGenerator:
             "steps": steps,
             "corrections": corrections,
         }
-        report_path_json.write_text(json.dumps(report_data, indent=2))
+        report_path_json.write_text(json.dumps(report_data, indent=2, default=str))
 
         return report_data
 
