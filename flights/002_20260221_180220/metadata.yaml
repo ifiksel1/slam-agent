@@ -1,0 +1,5 @@
+flight_number: "002"
+start_time: "2026-02-21T18:02:20+00:00"
+notes: "LP vs VP tracking test - 512x20 mode"
+mode: manual
+topics_recorded: [/mavros/local_position/pose, /mavros/vision_pose/pose, /mavros/state, /Odometry]
