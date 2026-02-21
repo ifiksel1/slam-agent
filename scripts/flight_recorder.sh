@@ -4,6 +4,7 @@
 
 FLIGHTS_ROOT="/home/dev/slam-agent/flights"
 PID_FILE="/tmp/flight_recorder.pid"
+LOCK_FILE="/tmp/flight_recorder.lock"
 CURRENT_FLIGHT_FILE="/tmp/flight_recorder_current"
 INDEX_FILE="$FLIGHTS_ROOT/flight_index.yaml"
 
@@ -68,7 +69,6 @@ detect_ros_version() {
 # Function to detect SLAM odometry topic for ROS1
 detect_slam_odometry_ros1() {
     local container=$1
-    # Try common topic patterns
     for topic in /Odometry /lio_sam/mapping/odometry /fast_lio/odometry /lio/odometry; do
         if docker exec "$container" bash -c "rostopic list 2>/dev/null | grep -q '^${topic}$'" 2>/dev/null; then
             echo "$topic"
@@ -78,13 +78,13 @@ detect_slam_odometry_ros1() {
     echo "/Odometry"  # Fallback default
 }
 
-# Function to generate next flight number
+# Function to generate next flight number (fix: force base-10 to avoid octal parsing)
 get_next_flight_number() {
     local max_num=0
     if [ -d "$FLIGHTS_ROOT" ]; then
         for dir in "$FLIGHTS_ROOT"/[0-9]*_*; do
             if [ -d "$dir" ]; then
-                local num=$(basename "$dir" | cut -d_ -f1)
+                local num=$((10#$(basename "$dir" | cut -d_ -f1)))
                 if [ "$num" -gt "$max_num" ]; then
                     max_num=$num
                 fi
@@ -107,33 +107,32 @@ snapshot_configs() {
 
     # Copy SLAM config based on ROS version
     if [ "$ros_version" = "ros2" ]; then
-        # ROS 2 configs from slam_mavros
         docker exec "$container" bash -c "[ -f /opt/slam_ws/config/fast_lio_gpu.yaml ]" 2>/dev/null && \
             docker cp "$container:/opt/slam_ws/config/fast_lio_gpu.yaml" "$snapshot_dir/" 2>/dev/null || true
         docker exec "$container" bash -c "[ -f /ws/config/fast_lio_gpu.yaml ]" 2>/dev/null && \
             docker cp "$container:/ws/config/fast_lio_gpu.yaml" "$snapshot_dir/" 2>/dev/null || true
     else
         # ROS 1 configs from slam_system
-        docker exec "$container" bash -c "find /root/slam_ws/src -name '*.yaml' -path '*/config/*'" 2>/dev/null | while read -r config; do
-            docker cp "$container:$config" "$snapshot_dir/" 2>/dev/null || true
-        done
+        while IFS= read -r config; do
+            [ -n "$config" ] && docker cp "$container:$config" "$snapshot_dir/" 2>/dev/null || true
+        done < <(docker exec "$container" bash -c "find /root/slam_ws/src -name '*.yaml' -path '*/config/*'" 2>/dev/null)
     fi
 
     # Copy Ouster driver config
     for container_check in slam_mavros slam_system slam_gpu_system; do
         if docker ps --format '{{.Names}}' | grep -q "^${container_check}$"; then
-            docker exec "$container_check" bash -c "find /opt/slam_ws/config /ws/config /root/slam_ws/src -name '*ouster*.yaml' 2>/dev/null" 2>/dev/null | while read -r config; do
-                docker cp "$container_check:$config" "$snapshot_dir/$(basename $config)" 2>/dev/null || true
-            done
+            while IFS= read -r config; do
+                [ -n "$config" ] && docker cp "$container_check:$config" "$snapshot_dir/$(basename "$config")" 2>/dev/null || true
+            done < <(docker exec "$container_check" bash -c "find /opt/slam_ws/config /ws/config /root/slam_ws/src -name '*ouster*.yaml' 2>/dev/null" 2>/dev/null)
         fi
     done
 
     # Copy URDF/robot description
     for container_check in slam_mavros slam_system; do
         if docker ps --format '{{.Names}}' | grep -q "^${container_check}$"; then
-            docker exec "$container_check" bash -c "find /ws/config /opt/slam_ws/config -name '*.urdf' 2>/dev/null" 2>/dev/null | while read -r urdf; do
-                docker cp "$container_check:$urdf" "$snapshot_dir/$(basename $urdf)" 2>/dev/null || true
-            done
+            while IFS= read -r urdf; do
+                [ -n "$urdf" ] && docker cp "$container_check:$urdf" "$snapshot_dir/$(basename "$urdf")" 2>/dev/null || true
+            done < <(docker exec "$container_check" bash -c "find /ws/config /opt/slam_ws/config -name '*.urdf' 2>/dev/null" 2>/dev/null)
         fi
     done
 
@@ -147,7 +146,9 @@ snapshot_configs() {
         fi
     fi
 
-    echo "Config snapshot saved to $snapshot_dir"
+    local count
+    count=$(ls "$snapshot_dir" 2>/dev/null | wc -l)
+    echo "Config snapshot saved to $snapshot_dir ($count files)"
 }
 
 # Function to create flight metadata
@@ -156,79 +157,89 @@ create_metadata() {
     local notes=$2
     local ros_version=$3
     local full_mode=$4
-    local topics=$5
+    shift 4
+    local topics=("$@")   # receive topics as individual array elements
 
-    cat > "$flight_dir/metadata.yaml" <<EOF
-flight_number: $(basename "$flight_dir" | cut -d_ -f1)
-timestamp: $(date -Iseconds)
-ros_version: $ros_version
-recording_mode: $([ "$full_mode" = "true" ] && echo "full" || echo "default")
-notes: "$notes"
-topics_recorded:
-$(echo "$topics" | tr ' ' '\n' | sed 's/^/  - /')
-status: recording
-start_time: $(date -Iseconds)
-EOF
+    {
+        echo "flight_number: $(basename "$flight_dir" | cut -d_ -f1)"
+        echo "timestamp: $(date -Iseconds)"
+        echo "ros_version: $ros_version"
+        echo "recording_mode: $([ "$full_mode" = "true" ] && echo "full" || echo "default")"
+        echo "notes: \"$notes\""
+        echo "topics_recorded:"
+        for t in "${topics[@]}"; do
+            echo "  - $t"
+        done
+        echo "status: recording"
+        echo "start_time: $(date -Iseconds)"
+    } > "$flight_dir/metadata.yaml"
 }
 
-# Function to update metadata on stop
+# Function to update metadata on stop (replaces status line, appends stop fields)
 update_metadata() {
     local flight_dir=$1
     local bag_dir="$flight_dir/bag"
 
-    # Calculate duration from bag file
     local duration="unknown"
     local bag_size="unknown"
 
     if [ -d "$bag_dir" ]; then
-        # Calculate total size
         bag_size=$(du -sh "$bag_dir" | cut -f1)
 
-        # Try to get duration from bag info (ROS 2 mcap or ROS 1 bag)
-        if ls "$bag_dir"/*.mcap &>/dev/null; then
-            # ROS 2 mcap - extract duration if ros2 bag info is available
-            local flight_name=$(basename "$flight_dir")
+        # Try to get duration via ros2 bag info on the bag *directory*
+        if ls "$bag_dir"/*.mcap &>/dev/null || ls "$bag_dir"/*.db3 &>/dev/null; then
+            local flight_name
+            flight_name=$(basename "$flight_dir")
             local container_bag_dir="/ws/flights/${flight_name}/bag"
-            local bag_filename=$(basename $(ls "$bag_dir"/*.mcap | head -1))
-            local container_bag_path="${container_bag_dir}/${bag_filename}"
-            duration=$(timeout 10 docker exec slam_mavros bash -c "source /opt/ros/humble/setup.bash && ros2 bag info '$container_bag_path' 2>/dev/null | grep 'Duration:' | awk '{print \$2}'" 2>/dev/null || echo "unknown")
-        elif ls "$bag_dir"/*.bag &>/dev/null; then
-            # ROS 1 bag - Note: slam_system container doesn't have flights mount yet
-            # Fall back to host-side rosbag info if available, or skip
-            duration="unknown"
+            duration=$(timeout 10 docker exec slam_mavros bash -c \
+                "source /opt/ros/humble/setup.bash && ros2 bag info '${container_bag_dir}' 2>/dev/null | grep 'Duration:' | awk '{print \$2}'" \
+                2>/dev/null || echo "unknown")
         fi
     fi
 
-    cat >> "$flight_dir/metadata.yaml" <<EOF
-stop_time: $(date -Iseconds)
-duration: $duration
-bag_size: $bag_size
-status: completed
-EOF
+    # Replace the status line in-place, then append stop fields
+    sed -i 's/^status: recording$/status: completed/' "$flight_dir/metadata.yaml"
+    {
+        echo "stop_time: $(date -Iseconds)"
+        echo "duration: $duration"
+        echo "bag_size: $bag_size"
+    } >> "$flight_dir/metadata.yaml"
 }
 
 # Function to update flight index
 update_flight_index() {
     local flight_dir=$1
-    local flight_num=$(basename "$flight_dir" | cut -d_ -f1)
-    local timestamp=$(date -Iseconds)
+    local flight_num
+    flight_num=$(basename "$flight_dir" | cut -d_ -f1)
+    local timestamp
+    timestamp=$(date -Iseconds)
 
-    # Create index if it doesn't exist
     if [ ! -f "$INDEX_FILE" ]; then
         echo "flights:" > "$INDEX_FILE"
     fi
 
-    # Append flight entry
-    cat >> "$INDEX_FILE" <<EOF
-- flight_number: $flight_num
-  directory: $(basename "$flight_dir")
-  timestamp: $timestamp
-  path: $flight_dir
-EOF
+    {
+        echo "- flight_number: $flight_num"
+        echo "  directory: $(basename "$flight_dir")"
+        echo "  timestamp: $timestamp"
+        echo "  path: $flight_dir"
+    } >> "$INDEX_FILE"
+}
+
+# Check available disk space (returns available GB)
+check_disk_space() {
+    df --output=avail "$FLIGHTS_ROOT" 2>/dev/null | tail -1 | awk '{printf "%d", $1 / 1048576}'
 }
 
 # Start recording
 do_start() {
+    # Acquire exclusive lock to prevent concurrent start invocations (fix: race condition)
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        echo "Error: Another flight_recorder instance is already running"
+        return 1
+    fi
+
     # Parse arguments
     local notes=""
     local full_mode=false
@@ -248,6 +259,10 @@ do_start() {
                 ros_version="ros1"
                 shift
                 ;;
+            --ros2)
+                ros_version="ros2"
+                shift
+                ;;
             *)
                 echo "Unknown option: $1"
                 return 1
@@ -257,7 +272,8 @@ do_start() {
 
     # Check if already recording
     if [ -f "$PID_FILE" ]; then
-        local container_pid=$(cat "$PID_FILE")
+        local container_pid
+        container_pid=$(cat "$PID_FILE")
         local container="${container_pid%%:*}"
         local recorder_pid="${container_pid##*:}"
 
@@ -265,12 +281,24 @@ do_start() {
             echo "Recording already in progress"
             echo "  Container: $container"
             echo "  Recorder PID: $recorder_pid"
-            [ -f "$CURRENT_FLIGHT_FILE" ] && echo "  Flight: $(cat $CURRENT_FLIGHT_FILE)"
+            [ -f "$CURRENT_FLIGHT_FILE" ] && echo "  Flight: $(cat "$CURRENT_FLIGHT_FILE")"
             return 1
         else
             echo "Stale PID file found, removing..."
             rm -f "$PID_FILE" "$CURRENT_FLIGHT_FILE"
         fi
+    fi
+
+    # Disk space check before allocating anything
+    mkdir -p "$FLIGHTS_ROOT"
+    local avail_gb
+    avail_gb=$(check_disk_space)
+    if [ "$full_mode" = "true" ] && [ "$avail_gb" -lt 10 ]; then
+        echo "Error: Only ${avail_gb}GB free. Full mode requires at least 10GB."
+        return 1
+    elif [ "$avail_gb" -lt 2 ]; then
+        echo "Error: Only ${avail_gb}GB free. Need at least 2GB to start recording."
+        return 1
     fi
 
     # Auto-detect ROS version if not specified
@@ -291,30 +319,36 @@ do_start() {
         echo "Detected ROS version: $ros_version"
     fi
 
-    # Set container and topics based on ROS version
+    # Set container and topics array based on ROS version
     local container
-    local topics
+    local topics   # this will be an array
     if [ "$ros_version" = "ros2" ]; then
         container="slam_mavros"
-        topics="${ROS2_TOPICS_DEFAULT[*]}"
+        topics=("${ROS2_TOPICS_DEFAULT[@]}")
     else
         container="slam_system"
-        # Auto-detect SLAM odometry topic
-        local slam_odom=$(detect_slam_odometry_ros1 "$container")
-        topics="${ROS1_TOPICS_DEFAULT[*]}"
-        # Replace /Odometry with detected topic
-        topics="${topics/\/Odometry/$slam_odom}"
+        # Auto-detect SLAM odometry topic and substitute in-array (fix: exact element match, not substr)
+        local slam_odom
+        slam_odom=$(detect_slam_odometry_ros1 "$container")
+        topics=()
+        for t in "${ROS1_TOPICS_DEFAULT[@]}"; do
+            if [ "$t" = "/Odometry" ]; then
+                topics+=("$slam_odom")
+            else
+                topics+=("$t")
+            fi
+        done
     fi
 
     # Add point cloud if full mode
     if [ "$full_mode" = "true" ]; then
-        topics="$topics /ouster/points"
+        topics+=("/ouster/points")
         echo "Full mode enabled - recording point cloud data"
     fi
 
     # Create flight directory
-    mkdir -p "$FLIGHTS_ROOT"
-    local flight_num=$(get_next_flight_number)
+    local flight_num
+    flight_num=$(get_next_flight_number)
     local flight_name="${flight_num}_$(date +%Y%m%d_%H%M%S)"
     local flight_dir="$FLIGHTS_ROOT/$flight_name"
     local bag_dir="$flight_dir/bag"
@@ -330,8 +364,8 @@ do_start() {
     # Snapshot configurations
     snapshot_configs "$flight_dir" "$container" "$ros_version"
 
-    # Create metadata
-    create_metadata "$flight_dir" "$notes" "$ros_version" "$full_mode" "$topics"
+    # Create metadata (pass topics as individual args)
+    create_metadata "$flight_dir" "$notes" "$ros_version" "$full_mode" "${topics[@]}"
 
     # Compute container-side bag directory path
     local container_bag_dir
@@ -345,49 +379,38 @@ do_start() {
             return 1
         fi
     else
-        # ROS 1 slam_system - doesn't have flights mount yet, would need to add volume mount
+        # ROS 1 slam_system - requires volume mount for flights directory
         echo "Error: ROS 1 container doesn't support flight recording yet (no volume mount)"
         return 1
     fi
 
-    # Start recording in background
-    set +e  # Disable exit-on-error for this section
-    if [ "$ros_version" = "ros2" ]; then
-        # ROS 2 bag record (mcap format)
-        docker exec -d "$container" bash -c "
-            source /opt/ros/humble/setup.bash && \
-            export ROS_DOMAIN_ID=1 && \
-            cd $container_bag_dir && \
-            ros2 bag record -o recording $topics > /tmp/recorder.log 2>&1
-        "
-    else
-        # ROS 1 bag record
-        docker exec -d "$container" bash -c "
-            source /opt/ros/noetic/setup.bash && \
-            cd $container_bag_dir && \
-            rosbag record -O recording.bag $topics > /tmp/recorder.log 2>&1
-        "
-    fi
-    set -e  # Re-enable exit-on-error
+    # Build topic string for the bash -c command (topics array is safe — no spaces or metacharacters)
+    local topics_str="${topics[*]}"
 
-    # Wait for recorder to start and find its PID inside container
+    # Write the recorder PID from *inside* the container so we get the actual process, not the wrapper
+    docker exec "$container" bash -c "
+        source /opt/ros/humble/setup.bash
+        export ROS_DOMAIN_ID=1
+        mkdir -p '${container_bag_dir}'
+        cd '${container_bag_dir}'
+        ros2 bag record -o recording ${topics_str} >/tmp/recorder.log 2>&1 &
+        echo \$! > /tmp/recorder.pid
+    "
+
+    # Wait for recorder to start, then read the authoritative PID written by the process itself
     sleep 3
 
     local recorder_pid
-    if [ "$ros_version" = "ros2" ]; then
-        recorder_pid=$(docker exec "$container" bash -c "pgrep -f 'ros2 bag record' | head -1" 2>/dev/null)
-    else
-        recorder_pid=$(docker exec "$container" bash -c "pgrep -f 'rosbag record' | head -1" 2>/dev/null)
-    fi
+    recorder_pid=$(docker exec "$container" cat /tmp/recorder.pid 2>/dev/null | tr -d '[:space:]')
 
-    if [ -z "$recorder_pid" ]; then
+    if [ -z "$recorder_pid" ] || ! docker exec "$container" bash -c "kill -0 $recorder_pid" 2>/dev/null; then
         echo "✗ Recording failed to start"
         docker exec "$container" tail -20 /tmp/recorder.log 2>/dev/null || true
         rm -f "$PID_FILE" "$CURRENT_FLIGHT_FILE"
         return 1
     fi
 
-    # Save container:PID and current flight
+    # Atomically save container:PID and current flight
     echo "$container:$recorder_pid" > "$PID_FILE"
     echo "$flight_dir" > "$CURRENT_FLIGHT_FILE"
 
@@ -395,7 +418,7 @@ do_start() {
     echo "  Flight directory: $flight_dir"
     echo "  Container: $container"
     echo "  Recorder PID (in container): $recorder_pid"
-    echo "  Stop with: $(basename $0) stop"
+    echo "  Stop with: $(basename "$0") stop"
 }
 
 # Stop recording
@@ -405,8 +428,18 @@ do_stop() {
         return 1
     fi
 
-    local container_pid=$(cat "$PID_FILE")
-    local flight_dir=$(cat "$CURRENT_FLIGHT_FILE")
+    local container_pid
+    container_pid=$(cat "$PID_FILE")
+
+    # Guard: CURRENT_FLIGHT_FILE must exist (fix: missing existence check)
+    if [ ! -f "$CURRENT_FLIGHT_FILE" ]; then
+        echo "Warning: No current flight file found, cannot update metadata"
+        rm -f "$PID_FILE"
+        return 1
+    fi
+
+    local flight_dir
+    flight_dir=$(cat "$CURRENT_FLIGHT_FILE")
 
     # Parse container:pid format
     local container="${container_pid%%:*}"
@@ -429,14 +462,21 @@ do_stop() {
     echo "Stopping recording..."
     echo "  Container: $container"
     echo "  Recorder PID: $recorder_pid"
-    echo "  Flight: $(basename $flight_dir)"
+    echo "  Flight: $(basename "$flight_dir")"
 
-    # Send SIGINT to stop recording gracefully (inside container)
-    docker exec "$container" kill -INT "$recorder_pid" 2>/dev/null || true
+    # Send SIGINT to process group so the recorder finalises the bag (fix: kill may hit wrapper only)
+    local pgid
+    pgid=$(docker exec "$container" bash -c "ps -o pgid= -p $recorder_pid 2>/dev/null | tr -d ' '")
+    if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+        docker exec "$container" bash -c "kill -INT -$pgid" 2>/dev/null || \
+            docker exec "$container" kill -INT "$recorder_pid" 2>/dev/null || true
+    else
+        docker exec "$container" kill -INT "$recorder_pid" 2>/dev/null || true
+    fi
 
     # Wait for process to finish (up to 10 seconds)
     local timeout=10
-    while [ $timeout -gt 0 ] && docker exec "$container" bash -c "kill -0 $recorder_pid" 2>/dev/null; do
+    while [ "$timeout" -gt 0 ] && docker exec "$container" bash -c "kill -0 $recorder_pid" 2>/dev/null; do
         sleep 1
         timeout=$((timeout - 1))
     done
@@ -446,20 +486,16 @@ do_stop() {
         docker exec "$container" kill -9 "$recorder_pid" 2>/dev/null || true
     fi
 
-    # Update metadata
+    # Update metadata and flight index
     update_metadata "$flight_dir"
-
-    # Update flight index
     update_flight_index "$flight_dir"
 
-    # Clean up
     rm -f "$PID_FILE" "$CURRENT_FLIGHT_FILE"
 
     echo "✓ Recording stopped"
     echo "  Flight directory: $flight_dir"
-
-    # Show bag file info
-    local bag_size=$(du -sh "$flight_dir/bag" | cut -f1)
+    local bag_size
+    bag_size=$(du -sh "$flight_dir/bag" 2>/dev/null | cut -f1)
     echo "  Bag size: $bag_size"
 }
 
@@ -470,10 +506,11 @@ do_status() {
         return 0
     fi
 
-    local container_pid=$(cat "$PID_FILE")
-    local flight_dir=$(cat "$CURRENT_FLIGHT_FILE")
+    local container_pid
+    container_pid=$(cat "$PID_FILE")
+    local flight_dir=""
+    [ -f "$CURRENT_FLIGHT_FILE" ] && flight_dir=$(cat "$CURRENT_FLIGHT_FILE")
 
-    # Parse container:pid format
     local container="${container_pid%%:*}"
     local recorder_pid="${container_pid##*:}"
 
@@ -481,19 +518,18 @@ do_status() {
         echo "Recording in progress"
         echo "  Container: $container"
         echo "  Recorder PID: $recorder_pid"
-        echo "  Flight: $(basename $flight_dir)"
-        echo "  Directory: $flight_dir"
+        [ -n "$flight_dir" ] && echo "  Flight: $(basename "$flight_dir")"
+        [ -n "$flight_dir" ] && echo "  Directory: $flight_dir"
 
-        # Calculate recording duration
-        if [ -f "$flight_dir/metadata.yaml" ]; then
-            local start_time=$(grep "start_time:" "$flight_dir/metadata.yaml" | cut -d' ' -f2)
-            local now=$(date -Iseconds)
+        if [ -n "$flight_dir" ] && [ -f "$flight_dir/metadata.yaml" ]; then
+            local start_time
+            start_time=$(grep "^start_time:" "$flight_dir/metadata.yaml" | cut -d' ' -f2)
             echo "  Started: $start_time"
         fi
 
-        # Show current bag size
-        if [ -d "$flight_dir/bag" ]; then
-            local bag_size=$(du -sh "$flight_dir/bag" | cut -f1)
+        if [ -n "$flight_dir" ] && [ -d "$flight_dir/bag" ]; then
+            local bag_size
+            bag_size=$(du -sh "$flight_dir/bag" | cut -f1)
             echo "  Current size: $bag_size"
         fi
     else
@@ -504,7 +540,7 @@ do_status() {
 
 # List all flights
 do_list() {
-    if [ ! -d "$FLIGHTS_ROOT" ] || [ -z "$(ls -A $FLIGHTS_ROOT/[0-9]*_* 2>/dev/null)" ]; then
+    if [ ! -d "$FLIGHTS_ROOT" ] || [ -z "$(ls -A "$FLIGHTS_ROOT"/[0-9]*_* 2>/dev/null)" ]; then
         echo "No flights recorded"
         return 0
     fi
@@ -515,19 +551,18 @@ do_list() {
 
     for dir in "$FLIGHTS_ROOT"/[0-9]*_*/; do
         if [ -d "$dir" ]; then
-            local num=$(basename "$dir" | cut -d_ -f1)
-            local date_part=$(basename "$dir" | cut -d_ -f2)
-            local time_part=$(basename "$dir" | cut -d_ -f3)
-            local date_fmt="${date_part:0:4}-${date_part:4:2}-${date_part:6:2}"
-            local time_fmt="${time_part:0:2}:${time_part:2:2}:${time_part:4:2}"
+            local num date_part time_part date_fmt time_fmt size duration notes
+            num=$(basename "$dir" | cut -d_ -f1)
+            date_part=$(basename "$dir" | cut -d_ -f2)
+            time_part=$(basename "$dir" | cut -d_ -f3)
+            date_fmt="${date_part:0:4}-${date_part:4:2}-${date_part:6:2}"
+            time_fmt="${time_part:0:2}:${time_part:2:2}:${time_part:4:2}"
 
-            local size="-"
-            local duration="-"
-            local notes="-"
+            size="-"
+            duration="-"
+            notes="-"
 
-            if [ -d "$dir/bag" ]; then
-                size=$(du -sh "$dir/bag" | cut -f1)
-            fi
+            [ -d "$dir/bag" ] && size=$(du -sh "$dir/bag" | cut -f1)
 
             if [ -f "$dir/metadata.yaml" ]; then
                 duration=$(grep "^duration:" "$dir/metadata.yaml" | cut -d' ' -f2 || echo "-")
@@ -542,14 +577,15 @@ do_list() {
 
 # Show last flight info
 do_last() {
-    local last_dir=$(ls -dt "$FLIGHTS_ROOT"/[0-9]*_*/ 2>/dev/null | head -1)
+    local last_dir
+    last_dir=$(ls -dt "$FLIGHTS_ROOT"/[0-9]*_*/ 2>/dev/null | head -1)
 
     if [ -z "$last_dir" ]; then
         echo "No flights recorded"
         return 1
     fi
 
-    echo "Last flight: $(basename $last_dir)"
+    echo "Last flight: $(basename "$last_dir")"
     echo ""
 
     if [ -f "$last_dir/metadata.yaml" ]; then
@@ -563,21 +599,28 @@ do_last() {
     ls -lh "$last_dir/bag/" 2>/dev/null || echo "  No bag files"
 }
 
-# Clean old flights
+# Clean old flights (fix: use find+process substitution instead of ls parsing)
 do_clean() {
-    local keep_last=5
+    local keep_last
 
     if [ "$1" = "--keep-last" ] && [ -n "$2" ]; then
         keep_last=$2
+    elif [ -n "$1" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        # Also accept positional: flight_recorder.sh clean 5
+        keep_last=$1
     else
         echo "Usage: $0 clean --keep-last N"
         return 1
     fi
 
-    local flights=($(ls -dt "$FLIGHTS_ROOT"/[0-9]*_*/ 2>/dev/null))
+    local -a flights=()
+    while IFS= read -r -d '' dir; do
+        flights+=("$dir")
+    done < <(find "$FLIGHTS_ROOT" -maxdepth 1 -name '[0-9]*_*' -type d -print0 | sort -rz)
+
     local total=${#flights[@]}
 
-    if [ $total -le $keep_last ]; then
+    if [ "$total" -le "$keep_last" ]; then
         echo "Only $total flights exist, keeping all (threshold: $keep_last)"
         return 0
     fi
@@ -587,7 +630,7 @@ do_clean() {
 
     for ((i=keep_last; i<total; i++)); do
         local dir="${flights[$i]}"
-        echo "  Removing: $(basename $dir)"
+        echo "  Removing: $(basename "$dir")"
         rm -rf "$dir"
     done
 
@@ -622,11 +665,13 @@ case "${1:-}" in
         echo "Usage: $0 <command> [options]"
         echo ""
         echo "Commands:"
-        echo "  start [--notes \"text\"] [--full] [--ros1]"
+        echo "  start [--notes \"text\"] [--full] [--ros1|--ros2]"
         echo "      Start recording a new flight"
         echo "      --notes: Optional notes about the flight"
-        echo "      --full:  Record point cloud data (high bandwidth)"
-        echo "      --ros1:  Force ROS 1 mode (auto-detects by default)"
+        echo "      --full:  Record point cloud data (high bandwidth, requires 10GB free)"
+        echo "      --ros1:  Force ROS 1 mode"
+        echo "      --ros2:  Force ROS 2 mode"
+        echo "      (auto-detects ROS version by default)"
         echo ""
         echo "  stop"
         echo "      Stop current recording and finalize metadata"
