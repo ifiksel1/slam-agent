@@ -62,9 +62,6 @@ VIBRATION_CRITICAL_THRESHOLD = 100.0
 HOVER_PCT_MIN = 40.0
 HOVER_PCT_MAX = 60.0
 
-# Typical quadcopter motor KV for RPM estimation fallback
-DEFAULT_MOTOR_KV = 2400
-
 # ==============================================================================
 # Data Structures
 # ==============================================================================
@@ -122,8 +119,9 @@ class BagReader:
                 return 'db3'
             if list(self.bag_path.glob('*.mcap')):
                 return 'mcap'
-            # metadata.yaml present → rosbags Reader can handle it
-            return 'db3'
+            raise ValueError(
+                f"Directory contains no recognized bag files (*.db3 or *.mcap): {self.bag_path}"
+            )
         raise ValueError(f"Unknown bag format: {self.bag_path}")
 
     @property
@@ -243,18 +241,28 @@ class BagReader:
             return
 
         placeholders = ",".join("?" * len(wanted))
+        failed = 0
+        total = 0
         for ts, tid, data in self._db3_conn.execute(
             f"SELECT timestamp, topic_id, data FROM messages "
             f"WHERE topic_id IN ({placeholders}) ORDER BY timestamp",
             list(wanted.keys()),
         ):
             name, msgtype = wanted[tid]
+            total += 1
             try:
                 msg = self._db3_typestore.deserialize_cdr(bytes(data), msgtype)
                 yield Message(topic=name, timestamp=ts / 1e9,
                               data=self._rosbags_msg_to_dict(msg))
-            except Exception:
-                pass
+            except Exception as e:
+                failed += 1
+                if failed == 1:
+                    # Log the first failure for diagnostics
+                    print(f"[WARN] db3 deserialization failed for {name} ({msgtype}): {e}",
+                          file=sys.stderr)
+        if failed > 0:
+            print(f"[WARN] {failed}/{total} messages failed to deserialize from db3",
+                  file=sys.stderr)
 
     def _rosbags_msg_to_dict(self, msg) -> Dict[str, Any]:
         """Recursively convert a rosbags deserialized message to a plain dict."""
@@ -349,6 +357,9 @@ class FlightDataExtractor:
         with BagReader(self.bag_path) as bag:
             available_topics = bag.get_topics()
 
+            # Build reverse-lookup: topic_name → topic_key (O(1) per message)
+            topic_name_to_key = {v: k for k, v in TOPICS.items()}
+
             # Initialize data structures for available topics
             for topic_key, topic_name in TOPICS.items():
                 if topic_name in available_topics:
@@ -362,11 +373,10 @@ class FlightDataExtractor:
                 self.end_time = msg.timestamp
 
                 # Store message if it's a topic we care about
-                for topic_key, topic_name in TOPICS.items():
-                    if msg.topic == topic_name:
-                        self.data[topic_key]['timestamps'].append(msg.timestamp)
-                        self.data[topic_key]['messages'].append(msg.data)
-                        break
+                topic_key = topic_name_to_key.get(msg.topic)
+                if topic_key and topic_key in self.data:
+                    self.data[topic_key]['timestamps'].append(msg.timestamp)
+                    self.data[topic_key]['messages'].append(msg.data)
 
         # Convert lists to numpy arrays where appropriate
         self._process_extracted_data()
@@ -395,8 +405,10 @@ class FlightAnalyzer:
 
     def analyze_all(self) -> Dict[str, Any]:
         """Run all analysis sections"""
+        # summary must be set first — _analyze_power uses self.summary for efficiency
+        self.summary = self._analyze_summary()
         results = {
-            'summary': self._analyze_summary(),
+            'summary': self.summary,
             'slam_vs_ekf': self._analyze_slam_vs_ekf(),
             'motors': self._analyze_motors(),
             'atc': self._analyze_atc_performance(),
@@ -404,8 +416,6 @@ class FlightAnalyzer:
             'vibration': self._analyze_vibration(),
             'topic_rates': self._analyze_topic_rates(),
         }
-
-        self.summary = results['summary']
         return results
 
     def _analyze_summary(self) -> Dict[str, Any]:
@@ -462,9 +472,10 @@ class FlightAnalyzer:
             msgs = self.data['battery']['messages']
 
             # Battery percentage
+            # ROS 2 BatteryState.percentage is [0.0, 1.0]; scale to [0, 100]
             if 'percentage' in msgs[0]:
-                summary['battery_start_pct'] = float(msgs[0]['percentage'])
-                summary['battery_end_pct'] = float(msgs[-1]['percentage'])
+                summary['battery_start_pct'] = float(msgs[0]['percentage']) * 100.0
+                summary['battery_end_pct'] = float(msgs[-1]['percentage']) * 100.0
             elif 'remaining' in msgs[0]:
                 summary['battery_start_pct'] = float(msgs[0]['remaining'] * 100)
                 summary['battery_end_pct'] = float(msgs[-1]['remaining'] * 100)
@@ -567,32 +578,37 @@ class FlightAnalyzer:
         result['available'] = True
         times = self.data['rc_out']['timestamps']
 
-        # Extract PWM values for motors 1-4 (typically channels 0-3)
-        motor_pwms = [[], [], [], []]
-        for msg in self.data['rc_out']['messages']:
+        # Extract PWM values for motors 1-4 (channels 0-3).
+        # Track per-message timestamps alongside values so lengths always match
+        # even when some messages are skipped due to parse errors.
+        motor_pwm_ts = [[], [], [], []]
+        motor_pwms   = [[], [], [], []]
+        for ts, msg in zip(times, self.data['rc_out']['messages']):
             try:
                 channels = msg.get('channels', [])
                 for i in range(min(4, len(channels))):
+                    motor_pwm_ts[i].append(float(ts))
                     motor_pwms[i].append(channels[i])
             except (KeyError, TypeError):
                 continue
 
-        # Convert to numpy arrays
         for i in range(4):
             if motor_pwms[i]:
                 result['motor_pwm'][f'motor_{i+1}'] = {
-                    'timestamps': times.tolist(),
+                    'timestamps': motor_pwm_ts[i],
                     'pwm': motor_pwms[i],
                 }
 
-        # Calculate motor balance (std dev across motors)
-        if all(motor_pwms):
-            motor_array = np.array(motor_pwms)
+        # Motor balance: only valid when all 4 motors have the same number of samples
+        lengths = [len(p) for p in motor_pwms if p]
+        if len(lengths) == 4 and len(set(lengths)) == 1:
+            motor_array = np.array(motor_pwms)        # shape (4, N) — guaranteed rectangular
+            bal_times   = motor_pwm_ts[0]
             avg_pwm = np.mean(motor_array, axis=0)
             std_pwm = np.std(motor_array, axis=0)
 
             result['motor_balance'] = {
-                'timestamps': times.tolist(),
+                'timestamps': bal_times,
                 'average_pwm': avg_pwm.tolist(),
                 'std_pwm': std_pwm.tolist(),
             }
@@ -600,20 +616,22 @@ class FlightAnalyzer:
             # Hover percentage: (avg_pwm - 1000) / 1000 * 100
             hover_pct = (avg_pwm - 1000) / 1000 * 100
             result['hover_percentage'] = {
-                'timestamps': times.tolist(),
+                'timestamps': bal_times,
                 'percentage': hover_pct.tolist(),
             }
 
         # RPM from ESC telemetry if available
         if 'esc_telemetry' in self.data:
             result['rpm_available'] = True
-            rpm_times = self.data['esc_telemetry']['timestamps']
-            motor_rpms = [[], [], [], []]
+            rpm_times_src = self.data['esc_telemetry']['timestamps']
+            motor_rpm_ts = [[], [], [], []]
+            motor_rpms   = [[], [], [], []]
 
-            for msg in self.data['esc_telemetry']['messages']:
+            for ts, msg in zip(rpm_times_src, self.data['esc_telemetry']['messages']):
                 try:
                     esc_data = msg.get('esc_telemetry', [])
                     for i in range(min(4, len(esc_data))):
+                        motor_rpm_ts[i].append(float(ts))
                         motor_rpms[i].append(esc_data[i].get('rpm', 0))
                 except (KeyError, TypeError, AttributeError):
                     continue
@@ -621,7 +639,7 @@ class FlightAnalyzer:
             for i in range(4):
                 if motor_rpms[i]:
                     result['motor_rpm'][f'motor_{i+1}'] = {
-                        'timestamps': rpm_times.tolist(),
+                        'timestamps': motor_rpm_ts[i],
                         'rpm': motor_rpms[i],
                     }
 
@@ -828,7 +846,11 @@ class FlightAnalyzer:
         result = {}
 
         for topic_key, topic_data in self.data.items():
-            if not topic_data['timestamps']:
+            timestamps = topic_data['timestamps']
+            if isinstance(timestamps, np.ndarray):
+                if timestamps.size == 0:
+                    continue
+            elif not timestamps:
                 continue
 
             times = topic_data['timestamps']
@@ -932,13 +954,37 @@ class FlightPlotter:
         return self._fig_to_base64(fig)
 
     def _plot_slam_vs_ekf_3d(self) -> str:
-        """Plot 3D trajectory comparison using Plotly"""
-        import plotly.graph_objects as go
-
+        """Plot 3D trajectory comparison using Plotly (falls back to matplotlib if unavailable)"""
         slam_vs_ekf = self.analysis['slam_vs_ekf']
 
+        try:
+            import plotly.graph_objects as go
+            _has_plotly = True
+        except ImportError:
+            _has_plotly = False
+
+        if not _has_plotly:
+            # Matplotlib fallback: 3D scatter plot
+            fig = Figure(figsize=(8, 6))
+            ax = fig.add_subplot(111, projection='3d')
+            if slam_vs_ekf['available']:
+                slam_traj = np.array(slam_vs_ekf['slam_trajectory'])
+                ekf_traj = np.array(slam_vs_ekf['ekf_trajectory'])
+                ax.plot(slam_traj[:, 0], slam_traj[:, 1], slam_traj[:, 2],
+                        'b-', label='SLAM', linewidth=2)
+                ax.plot(ekf_traj[:, 0], ekf_traj[:, 1], ekf_traj[:, 2],
+                        'r-', label='EKF', linewidth=2)
+                ax.legend()
+            else:
+                ax.text(0.5, 0.5, 0.5, 'SLAM vs EKF data not available',
+                        transform=ax.transAxes, ha='center')
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
+            ax.set_zlabel('Z (m)')
+            ax.set_title('3D Trajectory: SLAM vs EKF')
+            return self._fig_to_base64(fig)
+
         if not slam_vs_ekf['available']:
-            # Return empty plot
             fig = go.Figure()
             fig.add_annotation(text="SLAM vs EKF data not available",
                              xref="paper", yref="paper",
@@ -1701,6 +1747,11 @@ def find_flight_bag(flight_id: str) -> Path:
         mcap_files = list(search_dir.glob("**/*.mcap"))
         if mcap_files:
             return mcap_files[0]
+
+        # ROS 2 sqlite3 db3 files
+        db3_files = list(search_dir.glob("**/*.db3"))
+        if db3_files:
+            return db3_files[0]
 
         # ROS 1 .bag files
         bag_files = list(search_dir.glob("**/*.bag"))
