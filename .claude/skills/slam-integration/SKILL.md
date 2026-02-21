@@ -150,6 +150,13 @@ If the user accepts:
 
 ## Safety Rules
 
+- **PROP REMOVAL WARNING**: Before ANY test that may arm motors, display this warning clearly:
+  > **WARNING: The following test can ARM the vehicle motors. REMOVE ALL PROPELLERS before proceeding.**
+  >
+  > Type **start** to confirm props are removed and proceed.
+
+  Wait for the user to type "start" before continuing. Do NOT proceed on "ok", "yes", "sure", or any other confirmation — only the exact word "start".
+
 - NEVER authorize flight testing in Loiter/Guided mode until `check_tf_tree` confirms a valid `map -> odom -> base_link` transform chain.
 - Always run `verify_installation` after Phase 4 before proceeding to Phase 5.
 - Progressive testing order: bench (motors disarmed) -> ground (wheels/hand-held) -> hover -> flight.
