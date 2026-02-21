@@ -43,7 +43,12 @@ import yaml
 FLIGHTS_DIR = Path("/home/dev/slam-agent/flights")
 DEFAULT_CONFIG_DIR = Path("/home/dev/slam-gpu/config")
 DEFAULT_CONTAINER = "slam_gpu_system"
-SLAM_ODOM_TOPIC = "/fast_lio_gpu/odometry"
+SLAM_ODOM_TOPIC = "/Odometry"
+
+# Bag recording uses the container's mounted bags directory.
+# Detected at runtime via docker inspect; these are defaults for slam-gpu setup.
+CONTAINER_BAGS_DIR = "/opt/slam_ws/bags"
+HOST_BAGS_DIR = Path("/home/dev/slam-gpu/bags")
 
 STEP_DURATIONS = {
     "baseline": 5,
@@ -159,15 +164,22 @@ class CalibrationSession:
                 "error": f"Container '{self.container}' is not running. Start SLAM first.",
             }
 
-        # Check SLAM topic availability
-        check = subprocess.run(
-            ["docker", "exec", self.container, "bash", "-c",
-             "source /opt/ros/humble/setup.bash 2>/dev/null; "
-             "source /opt/slam_ws/install/setup.bash 2>/dev/null; "
-             f"timeout 3 ros2 topic hz {SLAM_ODOM_TOPIC} --window 5 2>&1 | head -5"],
-            capture_output=True, text=True, timeout=10
+        # Check SLAM topic availability (inject ROS env from container process)
+        _, _, ros_env = _inspect_container(self.container)
+        env_flags = []
+        for k, v in ros_env.items():
+            env_flags += ["-e", f"{k}={v}"]
+        ros_setup = (
+            "source /opt/ros/humble/install/setup.bash 2>/dev/null || "
+            "source /opt/ros/humble/setup.bash 2>/dev/null; "
+            "source /opt/slam_ws/install/setup.bash 2>/dev/null; "
         )
-        slam_available = "average rate" in check.stdout or "no new messages" not in check.stdout.lower()
+        check = subprocess.run(
+            ["docker", "exec"] + env_flags + [self.container, "bash", "-c",
+             ros_setup + f"timeout 4 ros2 topic echo {SLAM_ODOM_TOPIC} 2>/dev/null"],
+            capture_output=True, text=True, timeout=12
+        )
+        slam_available = "header" in check.stdout or "position" in check.stdout
 
         # Create session dir
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,22 +230,80 @@ class CalibrationSession:
 
 # ── DataRecorder ───────────────────────────────────────────────────────────────
 
+def _inspect_container(container: str) -> Tuple[str, Path, Dict[str, str]]:
+    """Return (container_bags_dir, host_bags_dir, ros_env) for a running container."""
+    container_bags = CONTAINER_BAGS_DIR
+    host_bags = HOST_BAGS_DIR
+    ros_env: Dict[str, str] = {}
+
+    try:
+        # Get mounts
+        result = subprocess.run(
+            ["docker", "inspect", container,
+             "--format", "{{range .Mounts}}{{.Source}}|{{.Destination}}\n{{end}}"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) == 2:
+                src, dst = parts
+                if "bags" in dst:
+                    container_bags, host_bags = dst, Path(src)
+
+        # Get ROS_DOMAIN_ID from container's PID 1 environment.
+        # Only inject domain ID — setting RMW_IMPLEMENTATION explicitly breaks Fast RTPS.
+        env_result = subprocess.run(
+            ["docker", "exec", container, "bash", "-c",
+             "cat /proc/1/environ 2>/dev/null | tr '\\0' '\\n' | "
+             "grep -E '^ROS_DOMAIN_ID='"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in env_result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                ros_env[k.strip()] = v.strip()
+    except Exception:
+        pass
+
+    return container_bags, host_bags, ros_env
+
+
+def _detect_bags_dir(container: str) -> Tuple[str, Path]:
+    """Return (container_bags_dir, host_bags_dir) by inspecting docker mounts."""
+    container_bags, host_bags, _ = _inspect_container(container)
+    return container_bags, host_bags
+
+
 class DataRecorder:
-    """Records short bags via docker exec, reads back odometry from mcap."""
+    """Records short bags via docker exec, reads back odometry from mcap or live echo."""
 
     def __init__(self, session: CalibrationSession):
         self.session = session
+        self._container_bags_dir, self._host_bags_dir, self._ros_env = \
+            _inspect_container(session.container)
+
+    def _docker_exec(self, container: str, cmd: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        """Run bash -c cmd inside container with correct ROS env vars injected."""
+        env_flags = []
+        for k, v in self._ros_env.items():
+            env_flags += ["-e", f"{k}={v}"]
+        ros_setup = (
+            "source /opt/ros/humble/install/setup.bash 2>/dev/null || "
+            "source /opt/ros/humble/setup.bash 2>/dev/null; "
+            "source /opt/slam_ws/install/setup.bash 2>/dev/null; "
+        )
+        return subprocess.run(
+            ["docker", "exec"] + env_flags + [container, "bash", "-c", ros_setup + cmd],
+            capture_output=True, text=True, timeout=timeout
+        )
 
     def record(self, step: str) -> Dict[str, Any]:
         duration = STEP_DURATIONS[step]
         instructions = STEP_INSTRUCTIONS[step]
-        session_dir = self.session.session_dir
-        step_dir = session_dir / step
-        step_dir.mkdir(parents=True, exist_ok=True)
-
         container = self.session.container
-        # Container-side path mirrors host path (volume mount assumed)
-        container_step_path = str(step_dir).replace("/home/dev/slam-agent", "/opt/slam_ws")
+        session_ts = self.session.session_dir.name
+        container_step = f"{self._container_bags_dir}/{session_ts}/{step}"
+        host_step = self._host_bags_dir / session_ts / step
 
         print(f"\n{'='*60}")
         print(f"STEP: {step.upper()}")
@@ -247,33 +317,29 @@ class DataRecorder:
             time.sleep(1)
         print("  RECORDING NOW!")
 
-        bag_dir = str(step_dir / "recording")
+        # Record bag in background, send SIGINT after N seconds for clean shutdown
         record_cmd = (
-            f"source /opt/ros/humble/setup.bash 2>/dev/null; "
-            f"source /opt/slam_ws/install/setup.bash 2>/dev/null; "
-            f"mkdir -p {container_step_path} && "
-            f"cd {container_step_path} && "
-            f"ros2 bag record -o recording --max-duration {duration} "
-            f"{SLAM_ODOM_TOPIC} /tf 2>&1"
+            f"mkdir -p {container_step} && cd {container_step} && "
+            f"ros2 bag record -o recording {SLAM_ODOM_TOPIC} &"
+            f"RECPID=$! && sleep {duration} && kill -INT $RECPID && wait $RECPID 2>/dev/null"
         )
         try:
-            subprocess.run(
-                ["docker", "exec", container, "bash", "-c", record_cmd],
-                timeout=duration + 15, capture_output=True, text=True
-            )
+            self._docker_exec(container, record_cmd, timeout=duration + 10)
         except subprocess.TimeoutExpired:
-            pass  # Recording may have self-terminated via max-duration
+            pass
 
-        print(f"  Recording complete.")
+        print("  Recording complete.")
 
-        # Try to read odometry from the recorded bag
-        messages = self._read_odometry_via_docker(container, container_step_path)
+        # Read back: try bag first, then live-echo snapshot
+        messages = self._read_from_bag(host_step)
+        if len(messages) < 2:
+            print("  Bag empty/unreadable — using live snapshot fallback...")
+            messages = self._read_live_echo(container, duration=3)
 
         if len(messages) < 2:
-            # Fallback: read by echoing topic (simulate from session state if testing)
             return {
                 "status": "warn",
-                "message": f"Only {len(messages)} messages recorded. May be insufficient.",
+                "message": f"Only {len(messages)} messages captured. May be insufficient.",
                 "message_count": len(messages),
                 "displacement": [0.0, 0.0, 0.0],
                 "rotation_euler": [0.0, 0.0, 0.0],
@@ -287,29 +353,109 @@ class DataRecorder:
         print(f"  Displacement: x={result['displacement'][0]:.3f}  y={result['displacement'][1]:.3f}  z={result['displacement'][2]:.3f} m")
         return result
 
-    def _read_odometry_via_docker(self, container: str, container_path: str) -> List[Dict]:
-        """Extract odometry from recorded bag via docker exec ros2 bag info + play."""
-        # Try reading via mcap Python reader on the host side
-        host_recording = Path(container_path.replace("/opt/slam_ws", "/home/dev/slam-agent")) / "recording"
-        mcap_files = list(host_recording.glob("*.mcap")) if host_recording.exists() else []
+    def _read_from_bag(self, host_step: Path) -> List[Dict]:
+        """Read odometry from rosbag2 sqlite3 (.db3) directly, bypassing metadata.yaml."""
+        recording_dir = host_step / "recording"
+        if not recording_dir.exists():
+            return []
 
+        # Find .db3 file
+        db3_files = sorted(recording_dir.glob("*.db3"))
+        if db3_files:
+            return self._parse_db3(db3_files[0])
+
+        # Try mcap if present
+        mcap_files = list(recording_dir.glob("*.mcap"))
         if mcap_files:
             return self._parse_mcap(mcap_files[0])
 
-        # Fallback: use docker exec to extract to JSON
+        # Try rosbags Reader (needs metadata.yaml)
+        if (recording_dir / "metadata.yaml").exists():
+            return self._parse_rosbags(recording_dir)
+
+        return []
+
+    def _parse_db3(self, db3_path: Path) -> List[Dict]:
+        """Read nav_msgs/Odometry from rosbag2 sqlite3 db3 file via rosbags CDR deserializer."""
+        try:
+            import sqlite3 as _sqlite3
+            from rosbags.typesys import Stores, get_typestore
+            typestore = get_typestore(Stores.ROS2_HUMBLE)
+
+            db = _sqlite3.connect(str(db3_path))
+            # Find topic id for our odometry topic
+            row = db.execute(
+                "SELECT id, type FROM topics WHERE name=?", (SLAM_ODOM_TOPIC,)
+            ).fetchone()
+            if not row:
+                db.close()
+                return []
+            topic_id, msgtype = row
+
+            messages = []
+            for ts, data in db.execute(
+                "SELECT timestamp, data FROM messages WHERE topic_id=? ORDER BY timestamp",
+                (topic_id,)
+            ):
+                try:
+                    msg = typestore.deserialize_cdr(bytes(data), msgtype)
+                    pos = msg.pose.pose.position
+                    ori = msg.pose.pose.orientation
+                    messages.append({
+                        "t": ts / 1e9,
+                        "x": float(pos.x), "y": float(pos.y), "z": float(pos.z),
+                        "qx": float(ori.x), "qy": float(ori.y),
+                        "qz": float(ori.z), "qw": float(ori.w),
+                    })
+                except Exception:
+                    pass
+            db.close()
+            return messages
+        except ImportError:
+            return []
+        except Exception:
+            return []
+
+    def _parse_rosbags(self, recording_dir: Path) -> List[Dict]:
+        """Read via rosbags.rosbag2.Reader (needs metadata.yaml)."""
+        try:
+            from rosbags.rosbag2 import Reader
+            messages = []
+            with Reader(str(recording_dir)) as reader:
+                connections = [c for c in reader.connections if c.topic == SLAM_ODOM_TOPIC]
+                if not connections:
+                    return []
+                conn = connections[0]
+                for c, timestamp, rawdata in reader.messages(connections=connections):
+                    msg = reader.deserialize(rawdata, conn.msgtype)
+                    pos = msg.pose.pose.position
+                    ori = msg.pose.pose.orientation
+                    messages.append({
+                        "t": timestamp / 1e9,
+                        "x": float(pos.x), "y": float(pos.y), "z": float(pos.z),
+                        "qx": float(ori.x), "qy": float(ori.y),
+                        "qz": float(ori.z), "qw": float(ori.w),
+                    })
+            return messages
+        except Exception:
+            return []
+
+    def _read_live_echo(self, container: str, duration: int = 5) -> List[Dict]:
+        """Capture live odometry by echoing the topic for N seconds."""
+        cmd = f"timeout {duration} ros2 topic echo {SLAM_ODOM_TOPIC} 2>/dev/null"
+        result = self._docker_exec(container, cmd, timeout=duration + 8)
+        return self._parse_echo_output(result.stdout)
+
+    def _read_odometry_via_docker(self, container: str, container_path: str) -> List[Dict]:
+        """Legacy: read from bag via docker exec play."""
         bag_path = f"{container_path}/recording"
         cmd = (
-            f"source /opt/ros/humble/setup.bash 2>/dev/null; "
-            f"source /opt/slam_ws/install/setup.bash 2>/dev/null; "
             f"ros2 bag play {bag_path} --topics {SLAM_ODOM_TOPIC} & "
             f"sleep 2; "
-            f"timeout 15 ros2 topic echo {SLAM_ODOM_TOPIC} --no-daemon 2>/dev/null | "
+            f"timeout 15 ros2 topic echo {SLAM_ODOM_TOPIC} 2>/dev/null | "
             f"grep -A3 'position:' | head -120"
         )
-        result = subprocess.run(
-            ["docker", "exec", container, "bash", "-c", cmd],
-            capture_output=True, text=True, timeout=25
-        )
+        result = self._docker_exec(container, cmd, timeout=25)
         return self._parse_echo_output(result.stdout)
 
     def _parse_mcap(self, mcap_path: Path) -> List[Dict]:
@@ -337,22 +483,69 @@ class DataRecorder:
             return []
 
     def _parse_echo_output(self, text: str) -> List[Dict]:
-        """Parse ros2 topic echo output (best-effort)."""
+        """Parse ros2 topic echo output for nav_msgs/Odometry messages.
+
+        Tracks context (position vs orientation section) to correctly
+        assign x/y/z/w fields.
+        """
         messages = []
         lines = text.splitlines()
-        msg: Dict[str, float] = {}
+
+        # State machine: track which section we're in
+        in_position = False
+        in_orientation = False
+        pos: Dict[str, float] = {}
+        ori: Dict[str, float] = {}
+
         for line in lines:
-            line = line.strip()
-            for field in ("x:", "y:", "z:"):
-                if line.startswith(field):
+            stripped = line.strip()
+
+            # Section markers
+            if stripped == "position:":
+                in_position = True
+                in_orientation = False
+                pos = {}
+                continue
+            if stripped == "orientation:":
+                in_position = False
+                in_orientation = True
+                ori = {}
+                continue
+            # New message starts with "---" or "header:"
+            if stripped in ("---", "header:"):
+                if len(pos) == 3 and len(ori) == 4:
+                    messages.append({
+                        "t": 0.0,
+                        "x": pos["x"], "y": pos["y"], "z": pos["z"],
+                        "qx": ori["x"], "qy": ori["y"], "qz": ori["z"], "qw": ori["w"],
+                    })
+                in_position = in_orientation = False
+                pos = {}
+                ori = {}
+                continue
+
+            # Parse scalar fields (x: val, y: val, z: val, w: val)
+            if ":" in stripped:
+                key, _, val_str = stripped.partition(":")
+                key = key.strip()
+                val_str = val_str.strip()
+                if key in ("x", "y", "z", "w") and val_str:
                     try:
-                        msg[field[:-1]] = float(line.split(":")[-1].strip())
+                        val = float(val_str)
+                        if in_position and key in ("x", "y", "z"):
+                            pos[key] = val
+                        elif in_orientation and key in ("x", "y", "z", "w"):
+                            ori[key] = val
                     except ValueError:
                         pass
-            if len(msg) == 3:
-                messages.append({"t": 0.0, "x": msg.get("x", 0), "y": msg.get("y", 0),
-                                  "z": msg.get("z", 0), "qx": 0, "qy": 0, "qz": 0, "qw": 1})
-                msg = {}
+
+        # Flush last message
+        if len(pos) == 3 and len(ori) == 4:
+            messages.append({
+                "t": 0.0,
+                "x": pos["x"], "y": pos["y"], "z": pos["z"],
+                "qx": ori["x"], "qy": ori["y"], "qz": ori["z"], "qw": ori["w"],
+            })
         return messages
 
     def _compute_displacement(self, messages: List[Dict]) -> Dict[str, Any]:
@@ -555,16 +748,31 @@ class TransformSolver:
 
     def _map_to_urdf(self, c: Dict) -> Dict[str, Any]:
         """Compute new URDF RPY for base_link_to_os_sensor."""
-        # Current: rpy="0 π 0"
-        current_rpy = (0.0, math.pi, 0.0)
-        yaw_corr_rad = math.radians(c["yaw_correction_deg"])
-        pitch_corr_rad = math.radians(c["pitch_correction_deg"])
-        roll_corr_rad = math.radians(c.get("roll_correction_deg", 0.0))
+        # Read actual current URDF if possible; fall back to known default
+        try:
+            from pathlib import Path as _P
+            updater = ConfigUpdater()
+            _, current_rpy_list = updater.read_current_urdf()
+            current_rpy = tuple(current_rpy_list)
+        except Exception:
+            current_rpy = (0.0, math.pi, 0.0)
+        yaw_corr_deg = c["yaw_correction_deg"]
+        pitch_corr_deg = c["pitch_correction_deg"]
+        roll_corr_deg = c.get("roll_correction_deg", 0.0)
 
-        R_current = euler_to_rotation_matrix(*current_rpy)
-        R_corr = euler_to_rotation_matrix(roll_corr_rad, pitch_corr_rad, yaw_corr_rad)
-        R_new = R_corr @ R_current
-        new_rpy = rotation_matrix_to_euler(R_new)
+        # If corrections are negligible, preserve the current URDF values as-is
+        # to avoid Euler decomposition ambiguity (e.g. (0,π,0) ≡ (π,0,π))
+        if abs(yaw_corr_deg) < 0.5 and abs(pitch_corr_deg) < 0.5 and abs(roll_corr_deg) < 0.5:
+            new_rpy = list(current_rpy)
+        else:
+            yaw_corr_rad = math.radians(yaw_corr_deg)
+            pitch_corr_rad = math.radians(pitch_corr_deg)
+            roll_corr_rad = math.radians(roll_corr_deg)
+            R_current = euler_to_rotation_matrix(*current_rpy)
+            R_corr = euler_to_rotation_matrix(roll_corr_rad, pitch_corr_rad, yaw_corr_rad)
+            R_new = R_corr @ R_current
+            new_rpy = list(rotation_matrix_to_euler(R_new))
+
         return {
             "rpy": [round(v, 6) for v in new_rpy],
             "rpy_deg": [round(math.degrees(v), 2) for v in new_rpy],
@@ -908,31 +1116,42 @@ def cmd_apply(args) -> int:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Interactive Transform Calibrator for SLAM drone systems"
-    )
-    parser.add_argument("--container", default=DEFAULT_CONTAINER,
+    # Shared parent parser so --json and common flags work before OR after subcommand
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--container", default=DEFAULT_CONTAINER,
                         help="Docker container name (default: slam_gpu_system)")
-    parser.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR),
+    common.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR),
                         help="Path to config directory (default: /home/dev/slam-gpu/config)")
-    parser.add_argument("--session", default=None,
+    common.add_argument("--session", default=None,
                         help="Path to specific session directory (default: latest)")
-    parser.add_argument("--json", action="store_true",
+    common.add_argument("--json", action="store_true",
                         help="Output JSON format for MCP compatibility")
+
+    parser = argparse.ArgumentParser(
+        description="Interactive Transform Calibrator for SLAM drone systems",
+        parents=[common],
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("start", help="Initialize a new calibration session")
+    sub.add_parser("start", parents=[common], add_help=False,
+                   help="Initialize a new calibration session")
 
-    rec = sub.add_parser("record", help="Record a calibration step")
+    rec = sub.add_parser("record", parents=[common], add_help=False,
+                         help="Record a calibration step")
     rec.add_argument("step", choices=list(STEP_DURATIONS),
                      help="Which movement to record")
 
-    sub.add_parser("analyze", help="Analyze recorded steps and compute corrections")
+    sub.add_parser("analyze", parents=[common], add_help=False,
+                   help="Analyze recorded steps and compute corrections")
 
-    apply_p = sub.add_parser("apply", help="Apply computed corrections to config files")
+    apply_p = sub.add_parser("apply", parents=[common], add_help=False,
+                             help="Apply computed corrections to config files")
     apply_p.add_argument("--dry-run", action="store_true",
                          help="Preview changes without writing files")
+
+    # Ensure --dry-run has a default on all subcommands
+    parser.set_defaults(dry_run=False)
 
     args = parser.parse_args()
 
