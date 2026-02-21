@@ -1,0 +1,20 @@
+analysis: null
+config_dir: /home/dev/slam-gpu/config
+container: slam_gpu_system
+created: '20260221_080814'
+slam_available: true
+slam_topic: /Odometry
+steps:
+  baseline:
+    displacement:
+    - 0.0
+    - 0.0
+    - 0.0
+    message: Only 0 messages captured. May be insufficient.
+    message_count: 0
+    noise_rms: 0.0
+    rotation_euler:
+    - 0.0
+    - 0.0
+    - 0.0
+    status: warn

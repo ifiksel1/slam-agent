@@ -1,0 +1,31 @@
+flight_number: 001
+timestamp: 2026-02-21T17:03:59+00:00
+ros_version: ros2
+recording_mode: default
+notes: "LP-vs-VP-tracking-test"
+topics_recorded:
+  - /ouster/imu
+  - /fast_lio_gpu/odometry
+  - /fast_lio_gpu/path
+  - /tf
+  - /tf_static
+  - /mavros/vision_pose/pose
+  - /mavros/local_position/pose
+  - /mavros/local_position/velocity_local
+  - /mavros/state
+  - /mavros/battery
+  - /mavros/imu/data
+  - /mavros/imu/data_raw
+  - /mavros/rc/in
+  - /mavros/rc/out
+  - /mavros/setpoint_raw/target_attitude
+  - /mavros/target_actuator_control
+  - /mavros/esc_telemetry/telemetry
+  - /mavros/esc_status/status
+  - /mavros/global_position/global
+  - /mavros/mission/waypoints
+status: completed
+start_time: 2026-02-21T17:03:59+00:00
+stop_time: 2026-02-21T17:05:08+00:00
+duration: unknown
+bag_size: 3.0M

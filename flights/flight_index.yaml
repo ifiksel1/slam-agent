@@ -1,0 +1,5 @@
+flights:
+- flight_number: 001
+  directory: 001_20260221_170351
+  timestamp: 2026-02-21T17:05:08+00:00
+  path: /home/dev/slam-agent/flights/001_20260221_170351

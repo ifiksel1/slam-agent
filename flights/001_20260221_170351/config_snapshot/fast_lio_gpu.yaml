@@ -1,0 +1,65 @@
+/**:
+  ros__parameters:
+    # Publishing control
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: false
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: true
+
+    # Algorithm parameters (tuned for small indoor room)
+    max_iteration: 8
+    map_file_path: ""
+
+    # Topics and synchronization
+    common:
+      lid_topic: "/ouster/points"
+      imu_topic: "/ouster/imu"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+
+    # Filtering (tuned for 12'x12' indoor room)
+    filter_size_corner: 0.15
+    filter_size_surf: 0.15
+    filter_size_map: 0.15
+    cube_side_length: 50.0
+
+    # Mapping parameters
+    mapping:
+      det_range: 15.0
+      fov_degree: 180.0
+      gyr_cov: 0.1
+      acc_cov: 0.1
+      b_gyr_cov: 0.0001
+      b_acc_cov: 0.0001
+      extrinsic_est_en: false
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [-1.0, 0.0, 0.0,
+                    0.0, -1.0, 0.0,
+                    0.0, 0.0, 1.0]
+
+    # Preprocessing (Ouster OS1-64)
+    preprocess:
+      blind: 0.3
+      lidar_type: 3
+      scan_line: 64
+      timestamp_unit: 3
+      scan_rate: 10
+
+    # Additional filters
+    point_filter_num: 1
+    feature_extract_enable: false
+    runtime_pos_log_enable: false
+
+    # PCD save
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+
+    # Frame IDs
+    frames:
+      map_frame: "map"
+      odom_frame: "camera_init"
+      body_frame: "base_link"

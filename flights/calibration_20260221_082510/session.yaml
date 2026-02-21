@@ -1,0 +1,7 @@
+analysis: null
+config_dir: /home/dev/slam-gpu/config
+container: slam_gpu_system
+created: '20260221_082510'
+slam_available: false
+slam_topic: /Odometry
+steps: {}

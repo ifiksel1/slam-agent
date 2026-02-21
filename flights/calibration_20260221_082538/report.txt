@@ -1,0 +1,40 @@
+============================================================
+  TRANSFORM CALIBRATION REPORT
+  Session: 20260221_082538
+============================================================
+
+── BASELINE ──
+  Drift: [-9.35991600970864e-05, -0.0016921444401665747, -0.0006945550363031856]
+  Noise RMS: 0.0020 m
+
+── OBSERVED DISPLACEMENTS ──
+  forward : xyz=[-0.001, -0.000, 0.002]  yaw=0.0°
+  right   : xyz=[0.014, 0.010, 0.021]  yaw=0.1°
+  up      : xyz=[-0.001, -0.004, 0.001]  yaw=0.0°
+  yaw     : xyz=[0.004, -0.004, 0.001]  yaw=-0.1°
+
+── ISSUES DETECTED ──
+  ✓ No significant transform errors detected
+
+── CORRECTIONS ──
+  Yaw correction:   0.00°
+  Pitch correction: 0.00°
+  Z sign flip:      False
+  Yaw sign flip:    False
+  Confidence:       low
+
+── CORRECTED URDF ──
+  <origin xyz="0.0 0.0 -0.060" rpy="0.000000 3.141590 0.000000"/>
+
+── CORRECTED FAST-LIO extrinsic_R ──
+  extrinsic_R: [-1.0, 0.0, 0.0,
+              0.0, -1.0, 0.0,
+              0.0, 0.0, 1.0]
+
+── VISION BRIDGE ──
+  No vision bridge changes needed
+
+To apply corrections:
+  transform_calibrator.py apply --dry-run   # preview
+  transform_calibrator.py apply             # apply
+============================================================

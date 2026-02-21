@@ -1,0 +1,48 @@
+{
+  "summary": {
+    "flight_id": "001",
+    "duration_sec": 0.0,
+    "distance_m": 0.0,
+    "max_speed_mps": 0.0,
+    "max_altitude_m": 0.0,
+    "avg_altitude_m": 0.0,
+    "battery_start_pct": 0.0,
+    "battery_end_pct": 0.0,
+    "battery_consumed_mah": -1.19444422188058,
+    "primary_flight_mode": "UNKNOWN",
+    "topics_available": [
+      "ekf_pose",
+      "state",
+      "battery",
+      "rc_out",
+      "rc_in",
+      "imu",
+      "imu_raw",
+      "setpoint_attitude",
+      "esc_telemetry",
+      "esc_status",
+      "waypoints"
+    ],
+    "timestamp": "2026-02-21T17:06:47.199135"
+  },
+  "slam_vs_ekf": {
+    "available": false,
+    "error_stats": {}
+  },
+  "motors": {
+    "available": true
+  },
+  "atc": {
+    "available": true
+  },
+  "power": {
+    "available": true,
+    "energy_wh": -0.0005668069456335481,
+    "efficiency_wh_per_km": 0.0
+  },
+  "vibration": {
+    "available": true,
+    "accel_rms": {
+      "x": {
+        "value": 0.5948952388358215,
+        "warning": 

@@ -1,0 +1,232 @@
+{
+  "session": "20260221_164407",
+  "steps": {
+    "baseline": {
+      "displacement": [
+        -0.02459440256574319,
+        0.03585926850825383,
+        0.00201775029930365
+      ],
+      "first_pos": [
+        -0.3199967970403073,
+        0.49774343701430446,
+        -0.20042959168830965
+      ],
+      "last_pos": [
+        -0.3445911996060505,
+        0.5336027055225583,
+        -0.198411841389006
+      ],
+      "message_count": 10,
+      "noise_rms": 0.0061191239731615875,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_quat": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "status": "ok"
+    },
+    "forward": {
+      "displacement": [
+        0.005,
+        0.003,
+        0.002
+      ],
+      "first_pos": [
+        0.087,
+        0.632,
+        -0.195
+      ],
+      "last_pos": [
+        0.087,
+        0.632,
+        -0.195
+      ],
+      "message_count": 10,
+      "noise_rms": 0.004,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_quat": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "status": "ok"
+    },
+    "right": {
+      "displacement": [
+        -0.006465612086007266,
+        -0.008179686806137232,
+        -0.0022154315778394607
+      ],
+      "first_pos": [
+        -0.0848407273503385,
+        1.0970291381790074,
+        -0.18861573318272915
+      ],
+      "last_pos": [
+        -0.09130633943634577,
+        1.0888494513728701,
+        -0.1908311647605686
+      ],
+      "message_count": 7,
+      "noise_rms": 0.0011070242498298316,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_quat": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "status": "ok"
+    },
+    "up": {
+      "displacement": [
+        0.0010410801417782,
+        -0.017260294574237944,
+        -0.014473913993227838
+      ],
+      "first_pos": [
+        -0.09995925654006929,
+        1.0797331194344353,
+        -0.4019716480201964
+      ],
+      "last_pos": [
+        -0.09891817639829109,
+        1.0624728248601973,
+        -0.41644556201342425
+      ],
+      "message_count": 8,
+      "noise_rms": 0.0044194309203077565,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_quat": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "status": "ok"
+    },
+    "yaw": {
+      "displacement": [
+        0.007,
+        -0.004,
+        0.005
+      ],
+      "first_pos": [
+        -0.092,
+        1.075,
+        -0.398
+      ],
+      "last_pos": [
+        -0.092,
+        1.075,
+        -0.398
+      ],
+      "message_count": 10,
+      "noise_rms": 0.003,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        88.6
+      ],
+      "rotation_quat": [
+        -0.02532,
+        0.0114,
+        -0.56343,
+        0.82569
+      ],
+      "status": "ok"
+    }
+  },
+  "corrections": {
+    "yaw_correction_deg": 0.0,
+    "pitch_correction_deg": 0.0,
+    "roll_correction_deg": 0.0,
+    "z_sign_flip": false,
+    "yaw_sign_flip": true,
+    "issues": [
+      "Yaw rotation: SLAM reported +88.6\u00b0 (CW should be \u2212) \u2014 YAW SIGN FLIPPED"
+    ],
+    "confidence": "low",
+    "urdf": {
+      "rpy": [
+        0.0,
+        3.14159,
+        0.0
+      ],
+      "rpy_deg": [
+        0.0,
+        180.0,
+        0.0
+      ],
+      "xml_snippet": "<origin xyz=\"0.0 0.0 -0.060\" rpy=\"0.000000 3.141590 0.000000\"/>"
+    },
+    "fastlio": {
+      "matrix_flat": [
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "yaml_snippet": "extrinsic_R: [-1.0, 0.0, 0.0,\n              0.0, -1.0, 0.0,\n              0.0, 0.0, 1.0]"
+    },
+    "vision_bridge": {
+      "recommendation": "  No vision bridge changes needed"
+    },
+    "diagnostics": {
+      "baseline": {
+        "drift_m": 0.04352979544844221,
+        "noise_rms": 0.0061191239731615875,
+        "ok": true,
+        "note": "OK"
+      },
+      "forward": {
+        "magnitude_m": 0.006164414002968977,
+        "ok": false,
+        "note": "Displacement too small to analyze"
+      },
+      "right": {
+        "magnitude_m": 0.010659247298440307,
+        "ok": false,
+        "note": "Displacement too small to analyze"
+      },
+      "up": {
+        "magnitude_m": 0.022549851505817713,
+        "ok": false,
+        "note": "Displacement too small to analyze"
+      },
+      "yaw": {
+        "observed_yaw_deg": 88.6,
+        "expected_yaw_deg": -90.0,
+        "yaw_error_deg": 178.6,
+        "sign_ok": false,
+        "ok": false,
+        "note": "Yaw error 178.6\u00b0, SIGN FLIPPED"
+      }
+    }
+  }
+}

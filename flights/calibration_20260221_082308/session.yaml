@@ -1,0 +1,32 @@
+analysis: null
+config_dir: /home/dev/slam-gpu/config
+container: slam_gpu_system
+created: '20260221_082308'
+slam_available: true
+slam_topic: /Odometry
+steps:
+  baseline:
+    displacement:
+    - 0.0022898919464458233
+    - -0.0010869450860859064
+    - -0.01009655060961631
+    first_pos:
+    - -0.012272501923532348
+    - 0.009384331244576693
+    - 0.015205581345397465
+    last_pos:
+    - -0.009982609977086524
+    - 0.008297386158490787
+    - 0.005109030735781155
+    message_count: 15
+    noise_rms: 0.001869826305264063
+    rotation_euler:
+    - 0.0
+    - 0.0
+    - 0.0
+    rotation_quat:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+    status: ok
