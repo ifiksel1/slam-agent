@@ -2,6 +2,38 @@
 
 ## Progressive Testing Protocol
 
+### Pre-Test: Transform Calibration
+
+**Before any test**, verify the LiDAR-to-body transform is correct using the interactive calibrator:
+
+```bash
+# Via MCP (preferred):
+run_diagnostic("transform_calibrator", "start --json")
+# --- Hold drone still for 5 seconds ---
+run_diagnostic("transform_calibrator", "record baseline --json")
+# --- Move drone forward ~1m along its nose ---
+run_diagnostic("transform_calibrator", "record forward --json")
+# --- Move drone right ~1m ---
+run_diagnostic("transform_calibrator", "record right --json")
+# --- Lift drone up ~0.5m ---
+run_diagnostic("transform_calibrator", "record up --json")
+# --- Rotate drone 90° clockwise ---
+run_diagnostic("transform_calibrator", "record yaw --json")
+# Review analysis and proposed corrections:
+run_diagnostic("transform_calibrator", "analyze --json")
+# Preview changes without writing:
+run_diagnostic("transform_calibrator", "apply --dry-run --json")
+# Apply corrections if they look correct:
+run_diagnostic("transform_calibrator", "apply --json")
+```
+
+If corrections are applied, restart FAST-LIO before proceeding:
+```bash
+control_node("/home/dev/slam-gpu", "fastlio", "restart")
+```
+
+Then re-run `analyze` to verify residual errors are near zero.
+
 ### Test 1: Bench Test (Props OFF)
 - [ ] LiDAR publishing point clouds (`rostopic hz /LIDAR_TOPIC` → 10-20 Hz)
 - [ ] SLAM publishing odometry (`rostopic hz /slam/odometry` → 10-20 Hz)

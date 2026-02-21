@@ -52,6 +52,11 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | List recorded flights | `run_diagnostic` | `run_diagnostic("flight_recorder", "list")` |
 | Analyze flight data | `run_diagnostic` | `run_diagnostic("flight_analysis", "001 --json")` |
 | Full flight report | `run_diagnostic` | `run_diagnostic("flight_analysis", "001")` |
+| Start transform calibration | `run_diagnostic` | `run_diagnostic("transform_calibrator", "start --json")` |
+| Record calibration step | `run_diagnostic` | `run_diagnostic("transform_calibrator", "record forward --json")` |
+| Analyze calibration data | `run_diagnostic` | `run_diagnostic("transform_calibrator", "analyze --json")` |
+| Preview transform corrections | `run_diagnostic` | `run_diagnostic("transform_calibrator", "apply --dry-run --json")` |
+| Apply transform corrections | `run_diagnostic` | `run_diagnostic("transform_calibrator", "apply --json")` |
 | Deploy Docker SLAM | `run_deploy_script` | `run_deploy_script("deploy_docker_slam", "--build")` |
 
 ### Node Control

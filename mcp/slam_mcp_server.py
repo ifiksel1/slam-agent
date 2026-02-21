@@ -54,6 +54,7 @@ DIAGNOSTIC_SCRIPTS = {
     "measure_vision_latency": ("measure_vision_latency.py", "python3"),
     "flight_recorder": ("flight_recorder.sh", "bash"),
     "flight_analysis": ("flight_analysis.py", "python3"),
+    "transform_calibrator": ("transform_calibrator.py", "python3"),
 }
 
 DEPLOY_SCRIPTS = {
@@ -174,6 +175,7 @@ def run_diagnostic(
     - measure_vision_latency [--duration SEC --json --container NAME] — measure SLAM→MAVROS vision pipeline latency and suggest optimal VISO_DELAY_MS
     - flight_recorder start [--notes "text"] [--full] [--ros1] | stop | status | list | last | clean --keep-last N
     - flight_analysis <flight_number> [--json] | --bag /path/to/bag
+    - transform_calibrator start [--container NAME --config-dir PATH --json] | record <baseline|forward|right|up|yaw> [--json] | analyze [--json] | apply [--dry-run --json]
 
     Args:
         diagnostic_name: Name without extension (e.g., "check_tf_tree")
