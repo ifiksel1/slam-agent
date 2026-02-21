@@ -47,6 +47,11 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Analyze flight log | `run_diagnostic` | `run_diagnostic("analyze_slam_bag", "/path/to/bag --plot --report")` |
 | Docker health check | `run_diagnostic` | `run_diagnostic("docker_diagnostics")` |
 | Preflight check | `run_diagnostic` | `run_diagnostic("preflight_check_docker")` |
+| Start flight recording | `run_diagnostic` | `run_diagnostic("flight_recorder", "start --notes 'hover test'")` |
+| Stop flight recording | `run_diagnostic` | `run_diagnostic("flight_recorder", "stop")` |
+| List recorded flights | `run_diagnostic` | `run_diagnostic("flight_recorder", "list")` |
+| Analyze flight data | `run_diagnostic` | `run_diagnostic("flight_analysis", "001 --json")` |
+| Full flight report | `run_diagnostic` | `run_diagnostic("flight_analysis", "001")` |
 | Deploy Docker SLAM | `run_deploy_script` | `run_deploy_script("deploy_docker_slam", "--build")` |
 
 ### Node Control
@@ -91,9 +96,10 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 1. **Before Phase 1**: Call `search_profiles()` with user's hardware. If match found with `integration_complete: true`, offer to skip to Phase 4/5.
 2. **After Phase 1**: Call `save_hardware_profile()` to persist the assessment.
 3. **After Phase 2**: Call `update_profile_status(fingerprint, validated=true)`.
-4. **After Phase 5 success**: Call `update_profile_status(fingerprint, integration_complete=true)`, then `save_known_good_config()` with all generated config files, then `commit_learning("validated: <fingerprint>")`.
-5. **After Phase 6 fix**: Call `save_solution()` with symptom, root cause, fix, and tags, then `commit_learning("solution: <symptom>")`.
-6. **During troubleshooting**: Call `search_solutions()` BEFORE loading troubleshooting guide files.
+4. **During Phase 5 testing**: Start `run_diagnostic("flight_recorder", "start --notes '<test description>'")` before each test, stop after. Generate analysis report with `run_diagnostic("flight_analysis", "<flight_id>")` to review results.
+5. **After Phase 5 success**: Call `update_profile_status(fingerprint, integration_complete=true)`, then `save_known_good_config()` with all generated config files, then `commit_learning("validated: <fingerprint>")`.
+6. **After Phase 6 fix**: Call `save_solution()` with symptom, root cause, fix, and tags, then `commit_learning("solution: <symptom>")`.
+7. **During troubleshooting**: Call `search_solutions()` BEFORE loading troubleshooting guide files.
 
 ## Hardware Fingerprint Format
 

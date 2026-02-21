@@ -43,14 +43,61 @@
 - Drift: < 5% of distance traveled
 - CPU: < 60%, RAM: < 10GB
 
-## Post-Flight Analysis
+## Flight Data Recording
+
+**Before each test**, start the flight recorder to capture all telemetry:
+
 ```bash
-rosbag record -O flight_test.bag /slam/odometry /mavros/vision_pose/pose \
-  /mavros/local_position/pose /mavros/imu/data /LIDAR_TOPIC /mavros/state
-./scripts/analyze_slam_bag.py flight_test.bag --plot
+# Via MCP (preferred):
+run_diagnostic("flight_recorder", "start --notes 'bench test 1'")
+
+# Or directly:
+./scripts/flight_recorder.sh start --notes "bench test 1"
+
+# For full point cloud recording (high bandwidth):
+run_diagnostic("flight_recorder", "start --notes 'full capture' --full")
 ```
 
+**After each test**, stop recording:
+```bash
+run_diagnostic("flight_recorder", "stop")
+```
+
+The recorder automatically:
+- Creates a structured flight directory (`flights/NNN_YYYYMMDD_HHMMSS/`)
+- Snapshots all config files (SLAM, Ouster, URDF, ArduPilot params)
+- Records 20 default topics: odometry, IMU, RC, battery, ESC telemetry, motor outputs, etc.
+- Updates `flight_index.yaml` master index on stop
+
+## Post-Flight Analysis
+
+**Generate an HTML dashboard** after each test:
+
+```bash
+# Via MCP (preferred):
+run_diagnostic("flight_analysis", "001 --json")   # JSON summary
+run_diagnostic("flight_analysis", "001")           # Full HTML report
+
+# Or directly:
+./scripts/flight_analysis.py 001
+```
+
+The analysis report includes:
+- **SLAM vs EKF**: Position comparison, drift analysis, 3D trajectory overlay
+- **Motor Analysis**: PWM time-series, motor balance, hover percentage, RPM
+- **ATC Performance**: Desired vs actual rates, tracking error, step response
+- **Power Analysis**: Voltage/current curves, energy consumption, efficiency (Wh/km)
+- **Vibration**: Accel FFT spectrum, RMS vs ArduPilot thresholds, clipping detection
+- **Topic Rates**: Rate heatmap, gap detection for critical topics
+
 Drift interpretation: <5% good, 5-15% needs tuning, >15% investigate.
+
+**Manage flight data:**
+```bash
+run_diagnostic("flight_recorder", "list")              # List all flights
+run_diagnostic("flight_recorder", "last")              # Show last flight
+run_diagnostic("flight_recorder", "clean --keep-last 10")  # Clean old flights
+```
 
 ## Save to Learning System
 After ALL tests pass:
