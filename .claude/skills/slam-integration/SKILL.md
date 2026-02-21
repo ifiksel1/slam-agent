@@ -68,6 +68,10 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Check node status | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "status")` |
 | View node logs | `control_node` | `control_node("/home/dev/slam-gpu", "fastlio", "logs", "50")` |
 | Foxglove control | `control_node` | `control_node("/home/dev/slam-gpu", "foxglove", "start")` |
+| Start arm monitor | `control_node` | `control_node("/home/dev/slam-gpu", "arm-monitor", "start")` |
+| Stop arm monitor | `control_node` | `control_node("/home/dev/slam-gpu", "arm-monitor", "stop")` |
+| Arm monitor status | `control_node` | `control_node("/home/dev/slam-gpu", "arm-monitor", "status")` |
+| Arm monitor logs | `control_node` | `control_node("/home/dev/slam-gpu", "arm-monitor", "logs", "50")` |
 
 ### Topic Inspection
 | Action | MCP Tool | Example |
@@ -101,7 +105,7 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 1. **Before Phase 1**: Call `search_profiles()` with user's hardware. If match found with `integration_complete: true`, offer to skip to Phase 4/5.
 2. **After Phase 1**: Call `save_hardware_profile()` to persist the assessment.
 3. **After Phase 2**: Call `update_profile_status(fingerprint, validated=true)`.
-4. **During Phase 5 testing**: Start `run_diagnostic("flight_recorder", "start --notes '<test description>'")` before each test, stop after. Generate analysis report with `run_diagnostic("flight_analysis", "<flight_id>")` to review results.
+4. **During Phase 5 testing**: For bench tests, use manual recording: `run_diagnostic("flight_recorder", "start --notes '<test description>'")` before each test, stop after. For actual flights, start the arm monitor: `control_node("/home/dev/slam-gpu", "arm-monitor", "start")` — it auto-records on arm/disarm with 3s debounce. Generate analysis report with `run_diagnostic("flight_analysis", "<flight_id>")` to review results.
 5. **After Phase 5 success**: Call `update_profile_status(fingerprint, integration_complete=true)`, then `save_known_good_config()` with all generated config files, then `commit_learning("validated: <fingerprint>")`.
 6. **After Phase 6 fix**: Call `save_solution()` with symptom, root cause, fix, and tags, then `commit_learning("solution: <symptom>")`.
 7. **During troubleshooting**: Call `search_solutions()` BEFORE loading troubleshooting guide files.

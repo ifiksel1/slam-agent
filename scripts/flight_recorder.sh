@@ -289,6 +289,17 @@ do_start() {
         fi
     fi
 
+    # Check if auto-recording is active
+    if [ -f "/tmp/flight_recorder_mode" ]; then
+        local current_mode
+        current_mode=$(cat /tmp/flight_recorder_mode 2>/dev/null)
+        if [ "$current_mode" = "auto" ]; then
+            echo "Error: Auto-recording is active (arm_monitor is managing recordings)"
+            echo "  Stop the arm monitor first, or wait for disarm"
+            return 1
+        fi
+    fi
+
     # Disk space check before allocating anything
     mkdir -p "$FLIGHTS_ROOT"
     local avail_gb
@@ -412,6 +423,7 @@ do_start() {
 
     # Atomically save container:PID and current flight
     echo "$container:$recorder_pid" > "$PID_FILE"
+    echo "manual" > /tmp/flight_recorder_mode
     echo "$flight_dir" > "$CURRENT_FLIGHT_FILE"
 
     echo "✓ Recording started successfully"
@@ -490,7 +502,7 @@ do_stop() {
     update_metadata "$flight_dir"
     update_flight_index "$flight_dir"
 
-    rm -f "$PID_FILE" "$CURRENT_FLIGHT_FILE"
+    rm -f "$PID_FILE" "$CURRENT_FLIGHT_FILE" /tmp/flight_recorder_mode
 
     echo "✓ Recording stopped"
     echo "  Flight directory: $flight_dir"
@@ -531,6 +543,10 @@ do_status() {
             local bag_size
             bag_size=$(du -sh "$flight_dir/bag" | cut -f1)
             echo "  Current size: $bag_size"
+        fi
+
+        if [ -f "/tmp/flight_recorder_mode" ]; then
+            echo "  Mode: $(cat /tmp/flight_recorder_mode)"
         fi
     else
         echo "Recording process not found (container: $container, PID: $recorder_pid)"
