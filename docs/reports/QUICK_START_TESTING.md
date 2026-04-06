@@ -5,7 +5,7 @@
 On your **Jetson Orin NX**, run:
 
 ```bash
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 ```
 
 That's it! The script will:
@@ -227,8 +227,8 @@ After running, check:
 1. Identify which test failed
 2. Check the detailed report for error message
 3. Run individual diagnostic to debug
-4. Consult `/home/dev/slam-agent/DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md`
-5. See `/home/dev/slam-agent/MCP_SCRIPTS_REFERENCE.md` for detailed options
+4. Consult `/home/dev/slam-agent/docs/reports/DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md`
+5. See `/home/dev/slam-agent/docs/guides/MCP_SCRIPTS_REFERENCE.md` for detailed options
 
 ### Common Issues & Fixes
 
@@ -257,16 +257,16 @@ Your SLAM system is **ready to fly** when:
 ## Support
 
 For issues, refer to:
-- `~/slam-agent/MCP_SCRIPTS_REFERENCE.md` - Detailed script documentation
-- `~/slam-agent/DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md` - Previous test results
-- `~/slam-agent/SCRIPT_FIXES_SUMMARY.md` - Script improvements and fixes
+- `~/slam-agent/docs/guides/MCP_SCRIPTS_REFERENCE.md` - Detailed script documentation
+- `~/slam-agent/docs/reports/DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md` - Previous test results
+- `~/slam-agent/docs/reports/SCRIPT_FIXES_SUMMARY.md` - Script improvements and fixes
 - `~/slam_ws/PHASE6_SUCCESS.md` - Complete system documentation
 
 ---
 
 **Ready to test? Run:**
 ```bash
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 ```
 
 Happy testing! 🚀

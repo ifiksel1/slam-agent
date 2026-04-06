@@ -232,8 +232,8 @@ Quality: All changes are preprocessor directives
 ### Files Created
 ```
 Scripts & Configuration:
-  - setup_python310.sh (Miniforge setup)
-  - RUN_FULL_SYSTEM_TEST.sh (Test automation)
+  - scripts/setup_python310.sh (Miniforge setup)
+  - scripts/RUN_FULL_SYSTEM_TEST.sh (Test automation)
 
 Documentation:
   - SYSTEM_BUILD_COMPLETE.md
@@ -316,7 +316,7 @@ Documentation:
 ### Quick Diagnostics
 ```bash
 # Full system check (30 seconds)
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 
 # Individual checks
 bash ~/slam-agent/scripts/verify_installation.sh ROS1 noetic ~/slam_ws
@@ -360,7 +360,7 @@ System is **ready for hardware integration and testing**. All software component
 ---
 
 ## Quick Links
-- 📋 [Deployment Guide](./DEPLOYMENT_GUIDE.md)
+- 📋 [Deployment Guide](../guides/DEPLOYMENT_GUIDE.md)
 - 🔧 [System Configuration](./SYSTEM_BUILD_COMPLETE.md)
-- 📚 [Script Reference](./MCP_SCRIPTS_REFERENCE.md)
+- 📚 [Script Reference](../guides/MCP_SCRIPTS_REFERENCE.md)
 - 🚀 [Quick Start](./QUICK_START_TESTING.md)

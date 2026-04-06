@@ -15,7 +15,7 @@ Complete SLAM system with FAST-LIO2, STD loop-closure, Ouster OS1-64, and ArduPi
 
 ```bash
 # 1. Run setup script (creates all Docker files in ~/slam_ws)
-bash /home/dev/slam-agent/DOCKER_SLAM_SETUP.sh
+bash /home/dev/slam-agent/scripts/DOCKER_SLAM_SETUP.sh
 
 # 2. Navigate to slam_ws
 cd /home/dev/slam_ws

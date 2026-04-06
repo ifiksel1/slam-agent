@@ -95,8 +95,8 @@ rostopic echo /Odometry -n 1
 
 ### Step 4: Run Pre-Flight Check
 ```bash
-chmod +x /home/dev/slam-agent/preflight_check.sh
-/home/dev/slam-agent/preflight_check.sh
+chmod +x /home/dev/slam-agent/scripts/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 ```
 
 ---
@@ -143,7 +143,7 @@ Publishes to: /Odometry, /cloud_registered, /path
    rosnode list | grep laserMapping
 
 5. Run pre-flight check:
-   /home/dev/slam-agent/preflight_check.sh
+   /home/dev/slam-agent/scripts/preflight_check.sh
 ```
 
 ### Issue: Wrong topics in config
@@ -202,7 +202,7 @@ SLAM Output
 
 ### Before Starting Any Test
 ```bash
-/home/dev/slam-agent/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 ```
 
 ### Add to System Documentation
@@ -231,7 +231,7 @@ SLAM Output
 
 **Verify Before Flight:**
 ```bash
-/home/dev/slam-agent/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 ```
 
 ---

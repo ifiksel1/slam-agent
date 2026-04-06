@@ -248,14 +248,14 @@ These are auto-populated from real integrations. Always prefer learned data over
 
 | When to load | File | What it contains |
 |-------------|------|-----------------|
-| Phase 0 or Docker setup | `DOCKER_README.md` | Docker deployment overview |
-| Phase 0 or Docker setup | `DOCKER_DEPLOYMENT_CHECKLIST.md` | Step-by-step deployment checklist |
+| Phase 0 or Docker setup | `docs/docker/DOCKER_README.md` | Docker deployment overview |
+| Phase 0 or Docker setup | `docs/docker/DOCKER_DEPLOYMENT_CHECKLIST.md` | Step-by-step deployment checklist |
 | Docker build issues | `docs/DOCKER_BUILD_LESSONS_LEARNED.md` | ARM64 build fixes, dependency issues |
-| Docker network issues | `DOCKER_NETWORK_GUIDE.md` | Ouster UDP, DDS discovery, host networking |
+| Docker network issues | `docs/docker/DOCKER_NETWORK_GUIDE.md` | Ouster UDP, DDS discovery, host networking |
 | Docker runtime issues | `docs/DOCKER_OPERATIONS_RUNBOOK.md` | ROS1 Docker operations |
 | Docker runtime issues | `docs/DOCKER_OPERATIONS_RUNBOOK_ROS2.md` | ROS2 Docker operations |
 | ROS1+ROS2 coexistence | `docs/DOCKER_MULTI_ROS_ARCHITECTURE.md` | Multi-ROS Docker architecture |
-| Running SLAM in Docker | `DOCKER_SLAM_EXECUTION_GUIDE.md` | Starting services, verifying data flow |
+| Running SLAM in Docker | `docs/docker/DOCKER_SLAM_EXECUTION_GUIDE.md` | Starting services, verifying data flow |
 
 ### ROS1 Configs — Load when user has ROS1/Noetic
 

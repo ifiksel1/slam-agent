@@ -19,8 +19,8 @@ You have three ways to ensure the preflight check runs before each flight:
 
 ### Usage
 ```bash
-chmod +x /home/dev/slam-agent/start_slam_with_preflight.sh
-/home/dev/slam-agent/start_slam_with_preflight.sh
+chmod +x /home/dev/slam-agent/scripts/start_slam_with_preflight.sh
+/home/dev/slam-agent/scripts/start_slam_with_preflight.sh
 ```
 
 ### What It Does
@@ -60,8 +60,8 @@ Press ENTER to start SLAM, or Ctrl+C to cancel...
 
 ### Usage
 ```bash
-chmod +x /home/dev/slam-agent/flight_startup.py
-/home/dev/slam-agent/flight_startup.py
+chmod +x /home/dev/slam-agent/scripts/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 ```
 
 ### What It Does
@@ -135,7 +135,7 @@ Wants=ros.service
 Type=simple
 User=dev
 WorkingDirectory=/home/dev/slam_ws
-ExecStartPre=/home/dev/slam-agent/preflight_check.sh
+ExecStartPre=/home/dev/slam-agent/scripts/preflight_check.sh
 ExecStart=/bin/bash -c 'source devel/setup.bash && roslaunch fast_lio mapping_ouster64.launch rviz:=false'
 Restart=on-failure
 RestartSec=10
@@ -176,13 +176,13 @@ sudo systemctl stop slam-flight
 ### For Development/Testing ⭐ SIMPLEST
 ```bash
 # Launches SLAM, waits for initialization, verifies, then keeps running
-/home/dev/slam-agent/start_slam_with_preflight.sh
+/home/dev/slam-agent/scripts/start_slam_with_preflight.sh
 ```
 
 ### For Regular Operations ⭐ RECOMMENDED
 ```bash
 # Same as above but with better logging and control
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 ```
 
 ### For Autonomous Deployment (Drone/Robot)
@@ -214,13 +214,13 @@ sudo systemctl start slam-flight
 ssh dev@<jetson-ip>
 
 # Run startup script
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 ```
 
 ### On Jetson (Direct)
 ```bash
 # Terminal 1: Run preflight + SLAM
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 
 # Terminal 2: Monitor odometry
 rostopic hz /Odometry
@@ -269,7 +269,7 @@ This combines everything in one command.
 ### Create an Alias for Quick Launch
 ```bash
 # Add to ~/.bashrc
-alias start-slam='/home/dev/slam-agent/flight_startup.py'
+alias start-slam='/home/dev/slam-agent/scripts/flight_startup.py'
 
 # Then just type:
 start-slam
@@ -278,7 +278,7 @@ start-slam
 ### Monitor Multiple Terminals
 ```bash
 # Terminal 1: Start SLAM with preflight
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 
 # Terminal 2: Monitor data
 watch -n 0.1 'rostopic hz /Odometry'
@@ -291,10 +291,10 @@ rosbag record -o flight_$(date +%Y%m%d_%H%M%S) \
 ### Scheduled Flights
 ```bash
 # Run preflight at specific time
-(crontab -l 2>/dev/null; echo "0 9 * * * /home/dev/slam-agent/preflight_check.sh") | crontab -
+(crontab -l 2>/dev/null; echo "0 9 * * * /home/dev/slam-agent/scripts/preflight_check.sh") | crontab -
 
 # Or use at command
-echo "/home/dev/slam-agent/flight_startup.py" | at 9:00 AM tomorrow
+echo "/home/dev/slam-agent/scripts/flight_startup.py" | at 9:00 AM tomorrow
 ```
 
 ---
@@ -303,7 +303,7 @@ echo "/home/dev/slam-agent/flight_startup.py" | at 9:00 AM tomorrow
 
 **Recommended for You:** Option 2 (Python Script)
 ```bash
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 ```
 
 **Why:**
@@ -319,7 +319,7 @@ echo "/home/dev/slam-agent/flight_startup.py" | at 9:00 AM tomorrow
 ssh dev@<jetson-ip>
 
 # Start flight
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 
 # Wait for preflight to pass
 # Type "yes" to confirm

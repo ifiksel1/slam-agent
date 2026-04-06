@@ -12,10 +12,12 @@ This directory contains everything needed to integrate SLAM algorithms with Ardu
 slam_integration/
 ├── README.md                              # This file
 ├── QUICK_START.md                         # One-page quick reference
-├── docs/AGENT_FLOWCHART.md                # Visual workflow diagram (Mermaid)
+├── CONTRIBUTING.md                        # Contribution guidelines
+├── LICENSE
+├── docker-compose.yml
+├── Dockerfile
 ├── .mcp.json                              # MCP server config (Claude Code + Cursor)
 ├── .cursorrules                           # Cursor workspace rules
-├── .cursor/agents/slam_integration_agent.md   # Cursor agent
 ├── .claude/
 │   ├── slam_integration_agent.md          # Claude agent dispatcher
 │   └── skills/slam-integration/           # Claude Code Skill
@@ -29,6 +31,7 @@ slam_integration/
 ├── docs/
 │   ├── COORDINATOR.md                     # Entry point for AI - phase routing & rules
 │   ├── AGENT_TEAM.md                      # Agent team architecture documentation
+│   ├── AGENT_FLOWCHART.md                 # Visual workflow diagram (Mermaid)
 │   │
 │   ├── phases/                            # Phase-specific files (load one at a time)
 │   │   ├── phase1_assessment.md           #   Hardware assessment (3 batched Q groups)
@@ -50,6 +53,40 @@ slam_integration/
 │   │   ├── hardware_data_quality.md      #   Vibration, mounting, environment
 │   │   └── dependencies_flowchart.md     #   Build failures, diagnostic tree
 │   │
+│   ├── docker/                            # Docker deployment documentation
+│   │   ├── DOCKER_README.md              #   Docker setup overview
+│   │   ├── DOCKER_DEPLOYMENT_CHECKLIST.md #  Pre-deployment checklist
+│   │   ├── DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md
+│   │   ├── DOCKER_NETWORK_GUIDE.md       #   Networking configuration
+│   │   ├── DOCKER_KNOWLEDGE_INDEX.md     #   Docker knowledge index
+│   │   ├── DOCKER_KNOWLEDGE_MAP.txt      #   Docker knowledge map
+│   │   └── DOCKER_SLAM_EXECUTION_GUIDE.md #  Runtime execution guide
+│   │
+│   ├── guides/                            # Operational guides
+│   │   ├── DEPLOYMENT_GUIDE.md           #   Full deployment walkthrough
+│   │   ├── OUSTER_CONNECTION_TROUBLESHOOTING.md
+│   │   ├── FLIGHT_STARTUP_OPTIONS.md     #   Flight startup procedures
+│   │   ├── TOPIC_CONFIGURATION_GUIDE.md  #   ROS topic configuration
+│   │   ├── FAST_LIO_GPU_INTEGRATION_CHECKLIST.md
+│   │   └── MCP_SCRIPTS_REFERENCE.md      #   MCP tool/script reference
+│   │
+│   ├── reports/                           # Test results and build reports
+│   │   ├── AGENT_TEST_SUMMARY.md
+│   │   ├── DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md
+│   │   ├── HARDWARE_TEST_RESULTS.md
+│   │   ├── QUICK_START_TESTING.md
+│   │   ├── SYSTEM_BUILD_COMPLETE.md
+│   │   ├── FINAL_BUILD_REPORT.md
+│   │   ├── SYSTEM_READINESS_SUMMARY.md
+│   │   ├── SCRIPT_FIXES_SUMMARY.md
+│   │   ├── GIT_COMMIT_SUMMARY.md
+│   │   ├── SYSTEM_DOCUMENTATION_SUMMARY.md
+│   │   ├── MCP_EXECUTIVE_SUMMARY.md
+│   │   ├── MCP_SETUP_SUCCESS.md
+│   │   ├── VOXL_VALIDATION_REPORT.md
+│   │   ├── OUSTER_CURRENT_STATUS.md
+│   │   └── PHASE2_FAST_LIO_GPU_VALIDATION.md
+│   │
 │   ├── learned/                           # Learning system (auto-updated, git-backed)
 │   │   ├── hardware_profiles.yaml        #   Cached Phase 1 configs by hardware
 │   │   ├── solutions_log.yaml            #   Resolved issues for future reference
@@ -65,22 +102,31 @@ slam_integration/
 │   └── archive/                           # Archived meta-docs (not for AI runtime)
 │
 ├── scripts/                               # Automation & diagnostics (called via MCP)
-│   ├── install_slam_integration.sh        #   Main installation orchestrator
-│   ├── install_core_ros_packages.sh       #   Core ROS packages
-│   ├── install_mavros.sh                  #   MAVROS installer
-│   ├── install_dds_bridge.sh              #   DDS/micro-ROS installer
-│   ├── install_lidar_driver.sh            #   LiDAR driver installer
-│   ├── install_camera_driver.sh           #   Camera driver installer
-│   ├── install_slam_algorithm.sh          #   SLAM algorithm installer
-│   ├── install_vision_to_mavros.sh        #   Vision bridge installer
-│   ├── verify_installation.sh             #   Post-install verification
-│   ├── slam_diagnostics.sh               #   Automated health checks
-│   ├── check_sensor_time_sync.py          #   Sensor timestamp validator
-│   ├── check_tf_tree.py                   #   TF tree validator
-│   ├── check_autopilot_params.py          #   Autopilot parameter validator
-│   ├── check_topic_pipeline.py            #   ROS topic pipeline validator
-│   ├── check_urdf.py                      #   URDF plausibility validator
-│   └── analyze_slam_bag.py               #   Post-flight bag analysis
+│   ├── build_slam_system.sh              #   Full system build script
+│   ├── setup_python310.sh                #   Python 3.10 environment setup
+│   ├── start_slam_with_preflight.sh      #   Launch SLAM with preflight checks
+│   ├── preflight_check.sh                #   Pre-flight safety checks
+│   ├── RUN_FULL_SYSTEM_TEST.sh           #   End-to-end system test runner
+│   ├── troubleshoot_ouster_connection.sh #   Ouster network diagnostics
+│   ├── DOCKER_SLAM_SETUP.sh              #   Docker SLAM environment setup
+│   ├── flight_startup.py                 #   Flight startup automation
+│   ├── diagnose_ouster_data.py           #   Ouster data diagnostics
+│   ├── install_slam_integration.sh       #   Main installation orchestrator
+│   ├── install_core_ros_packages.sh      #   Core ROS packages
+│   ├── install_mavros.sh                 #   MAVROS installer
+│   ├── install_dds_bridge.sh             #   DDS/micro-ROS installer
+│   ├── install_lidar_driver.sh           #   LiDAR driver installer
+│   ├── install_camera_driver.sh          #   Camera driver installer
+│   ├── install_slam_algorithm.sh         #   SLAM algorithm installer
+│   ├── install_vision_to_mavros.sh       #   Vision bridge installer
+│   ├── verify_installation.sh            #   Post-install verification
+│   ├── slam_diagnostics.sh              #   Automated health checks
+│   ├── check_sensor_time_sync.py         #   Sensor timestamp validator
+│   ├── check_tf_tree.py                  #   TF tree validator
+│   ├── check_autopilot_params.py         #   Autopilot parameter validator
+│   ├── check_topic_pipeline.py           #   ROS topic pipeline validator
+│   ├── check_urdf.py                     #   URDF plausibility validator
+│   └── analyze_slam_bag.py              #   Post-flight bag analysis
 │
 └── examples/                              # Example configurations
 ```

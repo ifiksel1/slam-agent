@@ -240,7 +240,7 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 - **select_ros_version.sh** - Version switching script
 
 ### Scripts
-- **preflight_check.sh** - Enhanced with container detection
+- **scripts/preflight_check.sh** - Enhanced with container detection
 
 ---
 
@@ -248,12 +248,13 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 
 ```
 /home/dev/slam-agent/
-├── DOCKER_KNOWLEDGE_MAP.txt                    ← Start here (visual overview)
-├── DOCKER_KNOWLEDGE_INDEX.md                   ← This file (navigation guide)
-├── DOCKER_DEPLOYMENT_CHECKLIST.md              ← Pre-build checklist
-├── DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md     ← High-level summary
-├── DOCKER_README.md                            (original setup guide)
-├── DOCKER_NETWORK_GUIDE.md                     (network configuration)
+├── docs/docker/
+│   ├── DOCKER_KNOWLEDGE_MAP.txt                    ← Start here (visual overview)
+│   ├── DOCKER_KNOWLEDGE_INDEX.md                   ← This file (navigation guide)
+│   ├── DOCKER_DEPLOYMENT_CHECKLIST.md              ← Pre-build checklist
+│   ├── DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md     ← High-level summary
+│   ├── DOCKER_README.md                            (original setup guide)
+│   └── DOCKER_NETWORK_GUIDE.md                     (network configuration)
 │
 ├── docs/
 │   ├── DOCKER_BUILD_LESSONS_LEARNED.md         ← Deep dive into all 9 issues
@@ -433,7 +434,7 @@ python3 /home/dev/slam-agent/scripts/docker_diagnostics.py
 
 ### I want to understand what slam-agent learned
 ```bash
-cat /home/dev/slam-agent/DOCKER_KNOWLEDGE_MAP.txt
+cat /home/dev/slam-agent/docs/docker/DOCKER_KNOWLEDGE_MAP.txt
 less /home/dev/slam-agent/.claude/projects/slam-docker-deployment/MEMORY.md
 ```
 
@@ -443,7 +444,7 @@ less /home/dev/slam-agent/.claude/projects/slam-docker-deployment/MEMORY.md
 python3 /home/dev/slam-agent/scripts/docker_diagnostics.py
 
 # 2. Look up your error
-less /home/dev/slam-agent/DOCKER_DEPLOYMENT_CHECKLIST.md  # Common Issues section
+less /home/dev/slam-agent/docs/docker/DOCKER_DEPLOYMENT_CHECKLIST.md  # Common Issues section
 
 # 3. Read detailed explanation
 less /home/dev/slam-agent/docs/DOCKER_BUILD_LESSONS_LEARNED.md  # Issue #X

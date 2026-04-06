@@ -39,7 +39,7 @@ echo ""
 echo "[STEP 3] Running Pre-Flight Verification Check..."
 echo ""
 
-/home/dev/slam-agent/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 PREFLIGHT_RESULT=$?
 
 echo ""

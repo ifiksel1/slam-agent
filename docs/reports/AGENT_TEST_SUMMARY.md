@@ -94,7 +94,7 @@ Hardware Readiness           ✓ Ready     For SLAM operation
 ### **Option 1: Full Automated Test (Recommended)**
 
 ```bash
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 ```
 
 **Features**:
@@ -171,13 +171,13 @@ Pass Rate:  75-100%
 All resources are in `/home/dev/slam-agent/`:
 
 ```
-RUN_FULL_SYSTEM_TEST.sh          - Master test script (8.5 KB)
-QUICK_START_TESTING.md           - How to run tests
-MCP_SCRIPTS_REFERENCE.md         - Script documentation
-DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md - Previous results
-SCRIPT_FIXES_SUMMARY.md          - Sonnet 4.5 fixes
-SYSTEM_DOCUMENTATION_SUMMARY.md  - Complete system docs
-SLAM_INTEGRATION_DOCS/           - Full integration guide
+scripts/RUN_FULL_SYSTEM_TEST.sh                    - Master test script (8.5 KB)
+docs/reports/QUICK_START_TESTING.md                - How to run tests
+docs/guides/MCP_SCRIPTS_REFERENCE.md               - Script documentation
+docs/reports/DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md    - Previous results
+docs/reports/SCRIPT_FIXES_SUMMARY.md               - Sonnet 4.5 fixes
+docs/reports/SYSTEM_DOCUMENTATION_SUMMARY.md       - Complete system docs
+SLAM_INTEGRATION_DOCS/                             - Full integration guide
 ```
 
 ---
@@ -210,7 +210,7 @@ Your system is **ready for flight** when:
 
 ### **Immediate**: Run Tests
 ```bash
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 ```
 
 ### **After**: Flight Stages
@@ -224,8 +224,8 @@ bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
 ## 📞 Support Resources
 
 If issues occur:
-- `QUICK_START_TESTING.md` - Troubleshooting guide
-- `MCP_SCRIPTS_REFERENCE.md` - Script details
+- `docs/reports/QUICK_START_TESTING.md` - Troubleshooting guide
+- `docs/guides/MCP_SCRIPTS_REFERENCE.md` - Script details
 - `SLAM_INTEGRATION_DOCS/` - Full system reference
 - `~/slam_ws/PHASE6_SUCCESS.md` - System documentation
 

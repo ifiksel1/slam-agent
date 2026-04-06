@@ -173,7 +173,7 @@ rostopic echo /os_cloud_node/points -n 1
 ## Contact
 For detailed troubleshooting, see:
 - `/home/dev/slam-agent/OUSTER_CONNECTION_TROUBLESHOOTING.md`
-- `/home/dev/slam-agent/troubleshoot_ouster_connection.sh`
-- `/home/dev/slam-agent/diagnose_ouster_data.py`
+- `/home/dev/slam-agent/scripts/troubleshoot_ouster_connection.sh`
+- `/home/dev/slam-agent/scripts/diagnose_ouster_data.py`
 
 Last Updated: 2026-02-07 11:55 UTC

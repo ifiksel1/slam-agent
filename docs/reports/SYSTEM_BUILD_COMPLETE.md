@@ -209,7 +209,7 @@ det_range: 150  # Detection range in meters
 - `ardupilot_mavlink_stream_rate_issue.yaml` - Common issues & fixes
 
 ### Quick References
-- `MCP_SCRIPTS_REFERENCE.md` - All available scripts and usage
+- `docs/guides/MCP_SCRIPTS_REFERENCE.md` - All available scripts and usage
 - `QUICK_START_TESTING.md` - Testing procedures
 - `RUN_FULL_SYSTEM_TEST.sh` - Automated testing suite
 

@@ -39,7 +39,7 @@ if [ -d ~/slam_ws/devel/lib/fast_lio ]; then
     echo ""
     echo "Next steps:"
     echo "1. Source environment: source ~/slam_ws/devel/setup.bash"
-    echo "2. Run tests: bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh"
+    echo "2. Run tests: bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh"
 else
     echo "❌ Build FAILED - check errors above"
     exit 1

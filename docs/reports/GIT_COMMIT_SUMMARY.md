@@ -14,9 +14,9 @@ Critical Fixes:
 - System now generates x,y,z odometry from LiDAR data at 10 Hz
 
 New Safety Systems:
-- preflight_check.sh: Automated verification before each flight
-- flight_startup.py: Flight startup with post-launch verification (RECOMMENDED)
-- start_slam_with_preflight.sh: Simple bash wrapper for quick startups
+- scripts/preflight_check.sh: Automated verification before each flight
+- scripts/flight_startup.py: Flight startup with post-launch verification (RECOMMENDED)
+- scripts/start_slam_with_preflight.sh: Simple bash wrapper for quick startups
 - FLIGHT_STARTUP_OPTIONS.md: Complete integration guide
 - TOPIC_CONFIGURATION_GUIDE.md: Topic reference and troubleshooting
 
@@ -26,8 +26,8 @@ Documentation:
 - OUSTER_CURRENT_STATUS.md: Current hardware status
 
 Diagnostic Tools:
-- diagnose_ouster_data.py: Python-based data flow verification
-- troubleshoot_ouster_connection.sh: Network connectivity script
+- scripts/diagnose_ouster_data.py: Python-based data flow verification
+- scripts/troubleshoot_ouster_connection.sh: Network connectivity script
 
 Key Achievement:
 ✅ System operational: Ouster LiDAR → SLAM (FAST-LIO2) → Odometry (x,y,z @ 10Hz)
@@ -40,21 +40,21 @@ Key Achievement:
 ## Files Added (11 new files, 2,192 insertions)
 
 ### Safety & Automation Scripts
-- **`preflight_check.sh`** - Automated pre-flight verification (executable)
-- **`flight_startup.py`** - RECOMMENDED: Flight startup with post-launch checks (executable)
-- **`start_slam_with_preflight.sh`** - Simple bash wrapper for quick startups (executable)
-- **`diagnose_ouster_data.py`** - Python data flow verification tool
+- **`scripts/preflight_check.sh`** - Automated pre-flight verification (executable)
+- **`scripts/flight_startup.py`** - RECOMMENDED: Flight startup with post-launch checks (executable)
+- **`scripts/start_slam_with_preflight.sh`** - Simple bash wrapper for quick startups (executable)
+- **`scripts/diagnose_ouster_data.py`** - Python data flow verification tool
 
 ### Documentation
-- **`FLIGHT_STARTUP_OPTIONS.md`** - Complete guide to startup options and automation
-- **`TOPIC_CONFIGURATION_GUIDE.md`** - Topic reference and troubleshooting
-- **`SYSTEM_READINESS_SUMMARY.md`** - Complete system overview and architecture
-- **`OUSTER_CONNECTION_TROUBLESHOOTING.md`** - Network diagnostics and fixes
-- **`OUSTER_CURRENT_STATUS.md`** - Current hardware status report
+- **`docs/guides/FLIGHT_STARTUP_OPTIONS.md`** - Complete guide to startup options and automation
+- **`docs/guides/TOPIC_CONFIGURATION_GUIDE.md`** - Topic reference and troubleshooting
+- **`docs/reports/SYSTEM_READINESS_SUMMARY.md`** - Complete system overview and architecture
+- **`docs/guides/OUSTER_CONNECTION_TROUBLESHOOTING.md`** - Network diagnostics and fixes
+- **`docs/reports/OUSTER_CURRENT_STATUS.md`** - Current hardware status report
 
 ### Configuration Tools
-- **`troubleshoot_ouster_connection.sh`** - Network connectivity diagnostics (executable)
-- **`HARDWARE_TEST_RESULTS.md`** - Hardware verification results
+- **`scripts/troubleshoot_ouster_connection.sh`** - Network connectivity diagnostics (executable)
+- **`docs/reports/HARDWARE_TEST_RESULTS.md`** - Hardware verification results
 
 ---
 
@@ -106,18 +106,18 @@ Added:
 
 ### For Quick Testing
 ```bash
-/home/dev/slam-agent/flight_startup.py
+/home/dev/slam-agent/scripts/flight_startup.py
 ```
 
 ### Before Every Flight
 ```bash
-/home/dev/slam-agent/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 ```
 
 ### For Troubleshooting
 ```bash
-/home/dev/slam-agent/TOPIC_CONFIGURATION_GUIDE.md
-/home/dev/slam-agent/OUSTER_CONNECTION_TROUBLESHOOTING.md
+/home/dev/slam-agent/docs/guides/TOPIC_CONFIGURATION_GUIDE.md
+/home/dev/slam-agent/docs/guides/OUSTER_CONNECTION_TROUBLESHOOTING.md
 ```
 
 ---
@@ -134,7 +134,7 @@ Added:
    ```
 3. Before flight: Run preflight check
    ```bash
-   /home/dev/slam-agent/flight_startup.py
+   /home/dev/slam-agent/scripts/flight_startup.py
    ```
 
 ---

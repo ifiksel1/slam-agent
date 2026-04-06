@@ -252,7 +252,7 @@ docker compose down
 
 ### Source Code Fixes
 - `src/FAST_LIO_SLAM/FAST-LIO/CMakeLists.txt`: Added message generation dependency
-- `preflight_check.sh`: Added container-aware path detection (/.dockerenv)
+- `scripts/preflight_check.sh`: Added container-aware path detection (/.dockerenv)
 
 ### Documentation
 - `.dockerignore`: Optimized exclusions

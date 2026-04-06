@@ -224,7 +224,7 @@ healthcheck: test: ["CMD-SHELL", "rosnode list"]  # Fails without ROS Master
 ## Where to Find Everything
 
 ### For Quick Answers
-📌 Start here: `/home/dev/slam-agent/DOCKER_DEPLOYMENT_CHECKLIST.md`
+📌 Start here: `/home/dev/slam-agent/docs/docker/DOCKER_DEPLOYMENT_CHECKLIST.md`
 - Quick reference for all decisions
 - Common issues with instant fixes
 - Success criteria checklist

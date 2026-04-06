@@ -13,7 +13,7 @@ import signal
 class FlightStartup:
     def __init__(self):
         self.slam_workspace = "/home/dev/slam_ws"
-        self.preflight_script = "/home/dev/slam-agent/preflight_check.sh"
+        self.preflight_script = "/home/dev/slam-agent/scripts/preflight_check.sh"
         self.slam_process = None
         self.slam_ready = False
 

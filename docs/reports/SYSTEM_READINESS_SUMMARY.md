@@ -122,7 +122,7 @@ Results:
 
 ```
 Verification Command:
-  /home/dev/slam-agent/preflight_check.sh
+  /home/dev/slam-agent/scripts/preflight_check.sh
 
 What It Checks:
   [1] Network Connectivity
@@ -157,14 +157,14 @@ What It Checks:
 
 ### Immediate Actions (Done ✓)
 1. Updated SLAM config file with correct topic names
-2. Created pre-flight check script (`preflight_check.sh`)
+2. Created pre-flight check script (`scripts/preflight_check.sh`)
 3. Created topic configuration guide (`TOPIC_CONFIGURATION_GUIDE.md`)
 4. Documented lesson learned in memory file
 
 ### Operational Procedures
 **Before every test/mission:**
 ```bash
-/home/dev/slam-agent/preflight_check.sh
+/home/dev/slam-agent/scripts/preflight_check.sh
 # Should complete with ✅ ALL CHECKS PASSED
 ```
 
@@ -197,10 +197,10 @@ rostopic echo /Odometry -n 1
 
 | File | Purpose |
 |------|---------|
-| `/home/dev/slam-agent/preflight_check.sh` | Automated pre-flight verification |
-| `/home/dev/slam-agent/TOPIC_CONFIGURATION_GUIDE.md` | Topic names and configuration reference |
-| `/home/dev/slam-agent/OUSTER_CONNECTION_TROUBLESHOOTING.md` | Network/connection troubleshooting |
-| `/home/dev/slam-agent/OUSTER_CURRENT_STATUS.md` | Current system status and diagnostics |
+| `/home/dev/slam-agent/scripts/preflight_check.sh` | Automated pre-flight verification |
+| `/home/dev/slam-agent/docs/guides/TOPIC_CONFIGURATION_GUIDE.md` | Topic names and configuration reference |
+| `/home/dev/slam-agent/docs/guides/OUSTER_CONNECTION_TROUBLESHOOTING.md` | Network/connection troubleshooting |
+| `/home/dev/slam-agent/docs/reports/OUSTER_CURRENT_STATUS.md` | Current system status and diagnostics |
 | `/home/dev/.claude/projects/-home-dev-slam-agent/memory/MEMORY.md` | Lesson learned: Topic configuration |
 
 ---
@@ -232,7 +232,7 @@ rostopic echo /Odometry -n 1
 ## Next Steps
 
 ### Immediate
-- [ ] Run preflight check: `/home/dev/slam-agent/preflight_check.sh`
+- [ ] Run preflight check: `/home/dev/slam-agent/scripts/preflight_check.sh`
 - [ ] Confirm odometry is stable for 5+ minutes
 - [ ] Test with actual motion if available
 
@@ -269,9 +269,9 @@ rostopic echo /Odometry -n 1
 ## Contact & Support
 
 **For issues, check in this order:**
-1. Run: `/home/dev/slam-agent/preflight_check.sh`
-2. Read: `/home/dev/slam-agent/TOPIC_CONFIGURATION_GUIDE.md`
-3. Review: `/home/dev/slam-agent/OUSTER_CONNECTION_TROUBLESHOOTING.md`
+1. Run: `/home/dev/slam-agent/scripts/preflight_check.sh`
+2. Read: `/home/dev/slam-agent/docs/guides/TOPIC_CONFIGURATION_GUIDE.md`
+3. Review: `/home/dev/slam-agent/docs/guides/OUSTER_CONNECTION_TROUBLESHOOTING.md`
 4. Check logs: `~/.ros/log/latest/laserMapping*`
 
 **Common Issues:**

@@ -111,7 +111,7 @@ rostopic echo /mavros/state -n 5
 
 ```bash
 # Automated test suite
-bash ~/slam-agent/RUN_FULL_SYSTEM_TEST.sh
+bash ~/slam-agent/scripts/RUN_FULL_SYSTEM_TEST.sh
 
 # This will:
 # 1. Launch SLAM system
@@ -320,7 +320,7 @@ df -h ~/slam_ws
 ## ✅ Completion Checklist
 
 Before first flight:
-- [ ] SYSTEM_BUILD_COMPLETE.md reviewed
+- [ ] ../reports/SYSTEM_BUILD_COMPLETE.md reviewed
 - [ ] All diagnostic tests passing
 - [ ] Odometry test recorded and analyzed
 - [ ] MAVROS integration tested

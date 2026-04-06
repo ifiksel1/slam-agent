@@ -248,7 +248,7 @@ ROS Topics (When Working):
 
 Run this diagnostic again to check status:
 ```bash
-/home/dev/slam-agent/troubleshoot_ouster_connection.sh
+/home/dev/slam-agent/scripts/troubleshoot_ouster_connection.sh
 ```
 
 If issues persist, check:

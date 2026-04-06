@@ -117,7 +117,7 @@ All documentation is in `/home/dev/slam-agent/mcp/`:
 - **ARCHITECTURE.txt** - Visual diagram
 - **USER_CHECKLIST.md** - This file
 
-And in `/home/dev/slam-agent/`:
+And in `/home/dev/slam-agent/docs/reports/`:
 - **MCP_SETUP_SUCCESS.md** - Complete success report
 - **MCP_EXECUTIVE_SUMMARY.md** - High-level overview
 
