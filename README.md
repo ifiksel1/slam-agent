@@ -12,6 +12,7 @@ This directory contains everything needed to integrate SLAM algorithms with Ardu
 slam_integration/
 ├── README.md                              # This file
 ├── QUICK_START.md                         # One-page quick reference
+├── docs/AGENT_FLOWCHART.md                # Visual workflow diagram (Mermaid)
 ├── .mcp.json                              # MCP server config (Claude Code + Cursor)
 ├── .cursorrules                           # Cursor workspace rules
 ├── .cursor/agents/slam_integration_agent.md   # Cursor agent

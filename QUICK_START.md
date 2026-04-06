@@ -15,6 +15,10 @@ Integrate SLAM algorithm with ArduPilot/PX4 for autonomous indoor/GPS-denied fli
 pip3 install -r mcp/requirements.txt   # Enables MCP tools for Claude/Cursor
 ```
 
+## How the Agent Works
+
+See [docs/AGENT_FLOWCHART.md](docs/AGENT_FLOWCHART.md) for a visual diagram of the full agent workflow (phases, skip logic, testing, troubleshooting loops).
+
 ## 3-Minute Decision Tree
 
 ```
