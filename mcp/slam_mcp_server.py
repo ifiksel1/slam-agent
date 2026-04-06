@@ -274,6 +274,7 @@ def search_profiles(
                 "source": "learned",
                 "fingerprint": profile.get("fingerprint"),
                 "date": profile.get("date"),
+                "last_verified": profile.get("last_verified", profile.get("date")),
                 "validated": profile.get("validated", False),
                 "integration_complete": profile.get("integration_complete", False),
             })
@@ -303,6 +304,7 @@ def search_profiles(
         return f"No profiles match: {search_terms}. Start Phase 1 to create a new profile."
 
     lines = [f"Found {len(matches)} matching profile(s):\n"]
+    today = datetime.now()
     for m in matches:
         status = []
         if m.get("integration_complete"):
@@ -311,10 +313,24 @@ def search_profiles(
             status.append("VALIDATED")
         else:
             status.append("unvalidated")
+
+        # Staleness check
+        last_verified = m.get("last_verified") or m.get("date")
+        stale_warning = ""
+        if last_verified:
+            try:
+                verified_date = datetime.strptime(last_verified, "%Y-%m-%d")
+                days_ago = (today - verified_date).days
+                if days_ago > 90:
+                    stale_warning = f" ⚠ STALE ({days_ago}d since last verified — re-validate before use)"
+            except ValueError:
+                pass
+
         lines.append(
             f"- [{m['source']}] {m['fingerprint']} "
             f"({', '.join(status)}) "
-            f"date={m.get('date', 'unknown')}"
+            f"date={m.get('date', 'unknown')} last_verified={last_verified or 'unknown'}"
+            f"{stale_warning}"
         )
         if m.get("description"):
             lines.append(f"  {m['description']}")
@@ -410,9 +426,11 @@ def save_hardware_profile(
             return f"Profile already exists for fingerprint: {fingerprint}. Use update_profile_status() to modify."
 
     next_id = max((p.get("id", 0) for p in profiles), default=0) + 1
+    today = datetime.now().strftime("%Y-%m-%d")
     new_profile = {
         "id": next_id,
-        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date": today,
+        "last_verified": today,
         "fingerprint": fingerprint,
         "hardware": hardware,
         "phase1_config": phase1_config,
@@ -449,9 +467,10 @@ def update_profile_status(
                 p["validated"] = validated
             if integration_complete is not None:
                 p["integration_complete"] = integration_complete
+            p["last_verified"] = datetime.now().strftime("%Y-%m-%d")
             data["profiles"] = profiles
             _write_yaml_atomic(HARDWARE_PROFILES_FILE, data)
-            return f"Updated profile {fingerprint}: validated={p.get('validated')}, integration_complete={p.get('integration_complete')}"
+            return f"Updated profile {fingerprint}: validated={p.get('validated')}, integration_complete={p.get('integration_complete')}, last_verified={p['last_verified']}"
     return f"No profile found with fingerprint: {fingerprint}"
 
 

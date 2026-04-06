@@ -361,8 +361,8 @@ Examples:
     )
     parser.add_argument("--planner",     choices=list(PLANNERS.keys()), required=True)
     parser.add_argument("--ros-version", choices=["ROS1", "ROS2"], default="ROS2")
-    parser.add_argument("--ros-distro",  default="humble",
-                        help="ROS distro, e.g. humble, noetic (default: humble)")
+    parser.add_argument("--ros-distro",  default=os.environ.get("ROS_DISTRO", "humble"),
+                        help="ROS distro, e.g. humble, jazzy, noetic (default: $ROS_DISTRO or humble)")
     parser.add_argument("--container",   default=None,
                         help="Docker container name (optional)")
     parser.add_argument("--verbose", "-v", action="store_true",

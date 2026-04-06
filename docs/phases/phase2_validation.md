@@ -32,24 +32,39 @@
 | LVI-SAM | Any PointCloud2 | Mono | Yes |
 | R3LIVE | Any PointCloud2 | Mono | Yes |
 
+### ROS Distribution Lifecycle
+| Distro | Ubuntu | EOL | Status |
+|--------|--------|-----|--------|
+| Noetic (ROS 1) | 20.04 | May 2025 | Final ROS 1 release |
+| Humble (ROS 2) | 22.04 | May 2027 | **Recommended** — widest ecosystem |
+| Jazzy (ROS 2) | 24.04 | May 2029 | Recommended for new Ubuntu 24.04 systems |
+| Iron (ROS 2) | 22.04 | Nov 2024 | **EOL** — migrate to Humble |
+| Foxy (ROS 2) | 20.04 | May 2023 | **EOL** — migrate to Humble or Jazzy |
+
+If user selects an EOL distro, warn them and recommend the active alternative for their Ubuntu version.
+
 ### ROS Compatibility
-| Algorithm | ROS1 Noetic | ROS2 Humble | ROS2 Foxy |
-|-----------|-------------|-------------|-----------|
-| FAST-LIO2 | Yes | Yes | Yes |
-| LIO-SAM | Yes | Yes | Yes |
-| COIN-LIO | Yes | Partial | No |
-| Cartographer | Yes | Yes | Yes |
-| ORB-SLAM3 | Yes | Community | No |
-| OpenVINS | Yes | Yes | Yes |
-| VINS-Fusion | Yes | Community | No |
+| Algorithm | ROS1 Noetic | ROS2 Humble | ROS2 Jazzy | Notes |
+|-----------|-------------|-------------|------------|-------|
+| FAST-LIO2 | Yes | Yes | Yes (builds clean) | Same colcon process on all ROS 2 |
+| FAST-LIO2 GPU | Yes | Yes (tested) | Untested | CUDA-dependent, not distro-dependent |
+| LIO-SAM | Yes | Yes | Yes | GTSAM available on both |
+| COIN-LIO | Yes | Partial | Untested | May need C++17 flag adjustments |
+| Cartographer | Yes | Yes (binary) | Yes (binary) | `ros-{distro}-cartographer-ros` |
+| ORB-SLAM3 | Yes | Community | Untested | Depends on OpenCV/Pangolin version |
+| OpenVINS | Yes | Yes | Yes | Pure CMake, distro-independent |
+| VINS-Fusion | Yes | Community | Untested | cv_bridge API may differ on Jazzy |
+| Point-LIO | Yes | Yes | Yes (builds clean) | Same as FAST-LIO2 |
 
 ### Communication Method
 | ROS + FC | Method | Package |
 |----------|--------|---------|
-| ROS1 + ArduPilot | MAVROS | ros-noetic-mavros |
-| ROS1 + PX4 | MAVROS | ros-noetic-mavros |
-| ROS2 + ArduPilot | MAVROS (default) or DDS | ros-humble-mavros or micro-ros-agent |
-| ROS2 + PX4 | DDS (native) | micro-ros-agent |
+| ROS1 + ArduPilot | MAVROS | `ros-noetic-mavros` |
+| ROS1 + PX4 | MAVROS | `ros-noetic-mavros` |
+| ROS2 + ArduPilot | MAVROS (default) or DDS | `ros-{distro}-mavros` or `ros-{distro}-micro-ros-agent` |
+| ROS2 + PX4 | DDS (native) | `ros-{distro}-micro-ros-agent` |
+
+Replace `{distro}` with `humble` or `jazzy` as appropriate. MAVROS and micro-ROS Agent are available in both Humble and Jazzy repos.
 
 ## Validation Checks
 
@@ -57,7 +72,12 @@ Run these checks against the config:
 
 1. **Compute**: config.platform.ram_gb >= algorithm.min_ram? Warn if not.
 2. **Sensor**: Does algorithm support config.lidar.model type? (Almost all support PointCloud2)
-3. **ROS**: Is algorithm available for config.ros.version?
+3. **ROS distro compatibility** (critical):
+   - Check the algorithm's row in the ROS Compatibility matrix above
+   - Check the sensor driver's distro support (see `references/ros2_distributions.md`)
+   - If user chose Noetic but algorithm + drivers support ROS 2 → recommend switching to ROS 2
+   - If user chose Jazzy but algorithm is "Untested" or "Community" → recommend Humble instead
+   - If user chose Foxy or Iron → warn EOL, recommend Humble or Jazzy
 4. **Camera**: If VIO algorithm, is camera present?
 5. **IMU**: If LIO algorithm, is IMU source configured?
 6. **LiDAR**: If LiDAR algorithm, is LiDAR present?

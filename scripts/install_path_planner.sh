@@ -36,9 +36,16 @@ if [[ -z "$ROS_DISTRO" ]]; then
     if [[ "$ROS_VERSION" == "ROS1" ]]; then
         ROS_DISTRO="noetic"
     else
-        ROS_DISTRO="humble"
+        # Auto-detect installed ROS 2 distro
+        for _candidate in humble jazzy iron foxy; do
+            if [[ -d "/opt/ros/${_candidate}" ]]; then
+                ROS_DISTRO="${_candidate}"
+                break
+            fi
+        done
+        ROS_DISTRO="${ROS_DISTRO:-humble}"
     fi
-    log_warn "ROS_DISTRO not set, assuming ${ROS_DISTRO}"
+    log_warn "ROS_DISTRO not set, detected/assuming ${ROS_DISTRO}"
 fi
 
 if [[ -z "$PLANNER_TYPE" ]]; then

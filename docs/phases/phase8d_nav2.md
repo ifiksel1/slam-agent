@@ -7,8 +7,9 @@ Nav2 works for drones in linear environments by managing altitude separately. **
 ## Install
 
 ```bash
-sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
-                 ros-humble-nav2-costmap-2d
+# Replace ${ROS_DISTRO} with humble, jazzy, etc.
+sudo apt install ros-${ROS_DISTRO}-navigation2 ros-${ROS_DISTRO}-nav2-bringup \
+                 ros-${ROS_DISTRO}-nav2-costmap-2d
 ```
 
 Via MCP:

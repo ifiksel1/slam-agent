@@ -1,6 +1,7 @@
 profiles:
 - id: 1
   date: '2026-02-11'
+  last_verified: '2026-02-11'
   fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-noetic
   hardware:
     system_name: FAST-GPU
@@ -87,6 +88,7 @@ profiles:
   integration_complete: false
 - id: 2
   date: '2026-02-11'
+  last_verified: '2026-02-22'
   fingerprint: jetson_orin_nx-ouster_os1_64-fast_lio2_gpu-ardupilot-humble
   hardware:
     system_name: FAST-GPU

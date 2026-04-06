@@ -37,6 +37,54 @@ Load ONE phase reference file at a time. Never load multiple phases simultaneous
 | 8d | [phase8d_nav2.md](references/phase8d_nav2.md) | Nav2 for drones (ROS 2) | Costmap + altitude adapter |
 | 9 | [phase9_voxl.md](references/phase9_voxl.md) | VOXL/ModalAI systems (load if VOXL detected) | VOXL validated |
 
+### Phase Output Schemas
+
+These are the key output formats. Generate these directly — don't load phase docs just to learn the schema.
+
+**Phase 1 → `hardware_config.yaml`** (keep as ~200-token summary after generation):
+```yaml
+platform: {model, ram_gb, cpu_cores, gpu, os}
+lidar: {model, channels, connection, ip, computer_ip, interface, has_imu, imu_model}
+camera: {model, type, resolution, fps, connection}  # type: mono/stereo/rgbd/event/none
+flight_controller: {model, autopilot, firmware_version, connection, device_path, baud_rate, imu_model}
+slam: {algorithm, repo_url}
+ros: {version, comm_method}  # version: noetic/humble/jazzy; comm_method: mavros/dds
+imu_source: lidar|fc
+imu_topic: ""
+imu_reasoning: ""
+physical:
+  base_frame: base_link
+  lidar_offset: [x, y, z]      # meters
+  lidar_rotation: [r, p, y]    # degrees
+  camera_offset: [x, y, z]
+  camera_rotation: [r, p, y]
+  urdf_status: exists|create|static_tf
+environment: {type, area_size, features}  # type: indoor/outdoor/both; features: rich/moderate/sparse
+mission: {max_speed, duration_minutes, loop_closure, drift_tolerance}
+docker: false
+```
+
+**Phase 2 → `install_config.yaml`** (consumed by install scripts):
+```yaml
+ros_version: "ROS1"        # or "ROS2"
+ros_distro: "noetic"       # or "humble", "foxy", etc.
+workspace_path: "~/catkin_ws"  # or "~/ros2_ws"
+flight_controller: "ardupilot" # or "px4"
+use_dds: false             # true if ROS2+PX4 or user chose DDS
+lidar_type: "ouster"       # sensor brand
+camera_type: "none"        # or "realsense", "zed", etc.
+slam_algorithm: "fast_lio" # algorithm identifier
+```
+
+**Phase 3 → Generated files** (7 files, all with ACTUAL values):
+1. `config/slam_params.yaml` — SLAM algorithm config (topics, extrinsics, tuning)
+2. `urdf/drone.urdf` — Transform tree (base_link → lidar_link, camera_link)
+3. `launch/slam.launch` or `launch/slam_launch.py` — SLAM node launch
+4. `launch/master.launch` or `launch/master_launch.py` — Full stack (MAVROS + URDF + SLAM + vision bridge)
+5. Vision bridge config (vision_to_mavros for ArduPilot, DDS publisher for PX4)
+6. `config/ardupilot_params.parm` or `config/px4_params.txt` — Autopilot EKF/VISO params
+7. `package.xml` + `CMakeLists.txt` — ROS package config
+
 For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_index.md) first, then load only the specific file matching the symptom.
 
 ## MCP Tool Usage
@@ -127,38 +175,14 @@ Examples:
 - `nuc12-realsense_d435i-orb_slam3-ardupilot-humble`
 - `raspberry_pi5-livox_mid360-lio_sam-px4-humble`
 
-## Foxglove Visualization (Optional — Offer During Phase 4)
+## Profile Staleness
 
-After core SLAM installation is complete, offer the user Foxglove Bridge setup. Present it like this:
+Every profile tracks a `last_verified` date, updated automatically by `save_hardware_profile()` and `update_profile_status()`. `search_profiles()` warns when a profile is >90 days stale. If a profile is stale, re-run Phase 2 validation before trusting its configs (package versions and driver APIs may have changed).
 
-> **Optional: Foxglove Studio Visualization**
->
-> Foxglove Studio is a free, browser-based robotics visualization tool (like RViz but runs on any device with a browser — laptop, tablet, phone). It connects to your SLAM system over WebSocket and lets you visualize:
-> - Live 3D point clouds from your LiDAR
-> - SLAM odometry/trajectory in real-time
-> - TF tree, IMU data, diagnostics
-> - All without installing anything on the viewing device
->
-> It's especially useful for field testing — you can monitor SLAM from your laptop while the drone is running, without needing X11 forwarding or a display attached to the companion computer.
->
-> **Would you like to set up Foxglove Bridge?**
+## Foxglove Visualization (Optional)
 
-If the user accepts:
-
-1. **ROS 2 (Humble/Jazzy)**: Build the C++ `foxglove_bridge` from `foxglove/foxglove-sdk` repo (not the deprecated `ros-foxglove-bridge`)
-   - Dependencies: `rosx_introspection` (build from source), `rapidjson-dev`, `nlohmann-json3-dev`, `libasio-dev`
-   - Fix required: Add `find_package(sensor_msgs REQUIRED)` to foxglove_bridge CMakeLists.txt
-   - Service introspection errors are non-fatal — topic bridging works fine
-   - Add to launch file with `enable_foxglove:=true` argument (default: true)
-   - Note: The Python `foxglove-websocket` 0.1.4 package is protocol-incompatible with modern Foxglove Studio — always use the C++ bridge
-
-2. **ROS 1 (Noetic)**: Use `apt install ros-noetic-rosbridge-server` and Foxglove Studio's rosbridge connection mode
-
-3. **Docker**: Expose port 8765 (already done if using host networking). Add to launch file so it starts automatically with SLAM.
-
-4. **Generate control script**: Create `scripts/foxglove.sh` with start/stop/restart/status/logs commands following the node control script pattern.
-
-5. **Tell the user**: Open Foxglove Studio at https://app.foxglove.dev, click "Open connection", enter `ws://<jetson-ip>:8765`.
+After Phase 4 installation, offer Foxglove Studio setup: "Would you like browser-based visualization (Foxglove)? It lets you monitor SLAM from any device without installing anything."
+If accepted, load [foxglove_setup.md](references/foxglove_setup.md).
 
 ## Behavioral Rules
 
@@ -170,6 +194,7 @@ If the user accepts:
 6. If user mentions VOXL/ModalAI, load phase9_voxl.md immediately.
 7. After each phase, offer to save a progress YAML for resume capability.
 8. After Phase 4 installation, offer Foxglove Bridge setup (see section above).
+9. **Default to ROS 2.** Recommend ROS 2 (Humble or Jazzy) unless the user has a specific reason for ROS 1. Choose the distro based on algorithm + driver compatibility first, Ubuntu version second. Load `references/ros2_distributions.md` when the user is undecided.
 
 ## Safety Rules
 
@@ -209,8 +234,10 @@ These are auto-populated from real integrations. Always prefer learned data over
 
 | When to load | File | What it contains |
 |-------------|------|-----------------|
+| Phase 1 (ROS version choice) | `references/ros2_distributions.md` | Distro EOL dates, Ubuntu pairing, algorithm support per distro |
 | Phase 3 (config generation) | `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` | EKF params, frame conventions, MAVLink setup |
 | Phase 3 (config generation) | `docs/SLAM_INTEGRATION_TEMPLATE.md` | Config file templates for all SLAM algorithms |
+| Phase 4 (user accepts Foxglove) | `references/foxglove_setup.md` | Foxglove Bridge setup (ROS 1/2, Docker) |
 | Phase 5-6 (testing/debug) | `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` | Diagnostic procedures, expected values |
 | Phase 5-7 (latency tuning) | `docs/VISION_LATENCY_MEASUREMENT.md` | VISO_DELAY_MS measurement methodology |
 | Phase 8 (path planning) | `references/phase8_path_planner.md` | Planner selection, shared config, testing protocol |

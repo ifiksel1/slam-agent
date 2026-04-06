@@ -39,7 +39,7 @@ if 'ROS_DISTRO' not in os.environ:
     print("Please source your ROS environment first:")
     print("  ROS1 (Noetic):  source /opt/ros/noetic/setup.bash")
     print("  ROS2 (Humble):  source /opt/ros/humble/setup.bash")
-    print("  ROS2 (Foxy):    source /opt/ros/foxy/setup.bash")
+    print("  ROS2 (Jazzy):   source /opt/ros/jazzy/setup.bash")
     print()
     print("Then source your workspace:")
     print("  ROS1: source ~/catkin_ws/devel/setup.bash")

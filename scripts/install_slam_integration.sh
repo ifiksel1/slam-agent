@@ -82,15 +82,19 @@ fi
 if [[ -z "$ROS_VERSION" ]]; then
     echo "Select ROS version:"
     echo "1) ROS1 Noetic"
-    echo "2) ROS1 Melodic"
-    echo "3) ROS2 Humble"
-    echo "4) ROS2 Iron"
-    read -p "Choice [1-4]: " ros_choice
+    echo "2) ROS2 Humble  (recommended - Ubuntu 22.04, widest support)"
+    echo "3) ROS2 Jazzy   (recommended - Ubuntu 24.04)"
+    echo "4) ROS2 Iron    (EOL Nov 2024 - consider Humble instead)"
+    echo "5) ROS2 Foxy    (EOL May 2023 - consider Humble/Jazzy instead)"
+    read -p "Choice [1-5]: " ros_choice
     case $ros_choice in
         1) export ROS_VERSION="ROS1" && export ROS_DISTRO="noetic" ;;
-        2) export ROS_VERSION="ROS1" && export ROS_DISTRO="melodic" ;;
-        3) export ROS_VERSION="ROS2" && export ROS_DISTRO="humble" ;;
-        4) export ROS_VERSION="ROS2" && export ROS_DISTRO="iron" ;;
+        2) export ROS_VERSION="ROS2" && export ROS_DISTRO="humble" ;;
+        3) export ROS_VERSION="ROS2" && export ROS_DISTRO="jazzy" ;;
+        4) export ROS_VERSION="ROS2" && export ROS_DISTRO="iron"
+           log_warn "Iron reached EOL Nov 2024. Consider migrating to Humble." ;;
+        5) export ROS_VERSION="ROS2" && export ROS_DISTRO="foxy"
+           log_warn "Foxy reached EOL May 2023. Consider migrating to Humble or Jazzy." ;;
         *) log_error "Invalid choice"; exit 1 ;;
     esac
 fi

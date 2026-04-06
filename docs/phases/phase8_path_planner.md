@@ -35,8 +35,8 @@ run_install_script("install_path_planner", "octomap ~/slam_ws ROS2")
 # ROS 1 Noetic
 sudo apt install ros-noetic-octomap ros-noetic-octomap-server ros-noetic-octomap-rviz-plugins
 
-# ROS 2 Humble
-sudo apt install ros-humble-octomap ros-humble-octomap-mapping
+# ROS 2 (replace ${ROS_DISTRO} with humble, jazzy, etc.)
+sudo apt install ros-${ROS_DISTRO}-octomap ros-${ROS_DISTRO}-octomap-mapping
 ```
 
 ### Config (`config/octomap.yaml`)

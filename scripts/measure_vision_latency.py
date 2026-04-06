@@ -646,10 +646,20 @@ def run_in_container(container: str, args: List[str]) -> int:
     """Execute this script inside a Docker container."""
     script_path = '/home/dev/slam-agent/scripts/measure_vision_latency.py'
 
+    # Detect ROS distro: prefer env var, fall back to probing common paths
+    distro = os.environ.get("ROS_DISTRO", "")
+    if not distro:
+        for candidate in ("humble", "jazzy", "iron", "foxy"):
+            if os.path.isdir(f"/opt/ros/{candidate}"):
+                distro = candidate
+                break
+    if not distro:
+        distro = "humble"  # final fallback
+
     cmd = [
         'docker', 'exec', '-i', container,
         'bash', '-c',
-        f'source /opt/ros/humble/setup.bash && python3 {script_path} {" ".join(args)}'
+        f'source /opt/ros/{distro}/setup.bash && python3 {script_path} {" ".join(args)}'
     ]
 
     result = subprocess.run(cmd)

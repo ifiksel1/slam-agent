@@ -66,7 +66,14 @@ GNSS-integrated: GLIO, GVINS (for intermittent GPS)
 Ask: Which algorithm? Or provide GitHub URL for custom.
 
 **Q6: ROS Version**
-- ROS1 Noetic, ROS2 Humble, ROS2 Foxy, ROS2 Iron?
+- **Default to ROS 2.** Only suggest Noetic if the user has an existing ROS 1 workspace they can't migrate.
+- Recommend based on algorithm + driver compatibility first, then Ubuntu version:
+  1. Check Phase 2 ROS Compatibility matrix for the user's SLAM algorithm
+  2. Check sensor driver support (Ouster/Livox/RealSense all support Humble + Jazzy)
+  3. If both Humble and Jazzy work: Ubuntu 22.04 → Humble, Ubuntu 24.04 → Jazzy
+  4. If "Community" or "Untested" on Jazzy → recommend Humble (safer)
+- Foxy and Iron are **EOL** — if user has these, recommend migrating to Humble or Jazzy
+- If unsure, load `references/ros2_distributions.md` for the full decision tree
 - Communication method is auto-determined:
   - ROS1 + any FC → MAVROS
   - ROS2 + ArduPilot → MAVROS (default) or DDS (preferred)

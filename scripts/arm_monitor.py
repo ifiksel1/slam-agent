@@ -574,19 +574,28 @@ class ArmMonitor:
     def _build_ros2_env() -> dict:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = env.get("ROS_DOMAIN_ID", "1")
-        # Source humble setup if not already sourced
-        ros_setup = "/opt/ros/humble/setup.bash"
-        if os.path.exists(ros_setup) and "humble" not in env.get("AMENT_PREFIX_PATH", ""):
+        # Detect ROS 2 distro from environment or scan /opt/ros/
+        distro = env.get("ROS_DISTRO", "")
+        if not distro:
+            for candidate in ("humble", "jazzy", "iron", "foxy"):
+                if os.path.isdir(f"/opt/ros/{candidate}"):
+                    distro = candidate
+                    break
+        if not distro:
+            return env
+        ros_base = f"/opt/ros/{distro}"
+        if os.path.exists(f"{ros_base}/setup.bash") and distro not in env.get("AMENT_PREFIX_PATH", ""):
             # We can't source in Python directly, but we can add the key paths
-            humble_lib = "/opt/ros/humble/lib"
-            humble_bin = "/opt/ros/humble/bin"
+            ros_lib = f"{ros_base}/lib"
+            ros_bin = f"{ros_base}/bin"
             current_path = env.get("PATH", "")
-            if humble_bin not in current_path:
-                env["PATH"] = f"{humble_bin}:{current_path}"
+            if ros_bin not in current_path:
+                env["PATH"] = f"{ros_bin}:{current_path}"
             current_ld = env.get("LD_LIBRARY_PATH", "")
-            if humble_lib not in current_ld:
-                env["LD_LIBRARY_PATH"] = f"{humble_lib}:{current_ld}"
-            env["AMENT_PREFIX_PATH"] = f"/opt/ros/humble:{env.get('AMENT_PREFIX_PATH', '')}"
+            if ros_lib not in current_ld:
+                env["LD_LIBRARY_PATH"] = f"{ros_lib}:{current_ld}"
+            env["AMENT_PREFIX_PATH"] = f"{ros_base}:{env.get('AMENT_PREFIX_PATH', '')}"
+            env["ROS_DISTRO"] = distro
         return env
 
     # ------------------------------------------------------------------
