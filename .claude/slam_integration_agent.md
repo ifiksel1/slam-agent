@@ -21,6 +21,7 @@ After completing phases:
 - After Phase 6: `save_solution()` then `commit_learning()`
 
 For installation (Phase 4): use `run_install_script()` instead of running scripts manually.
+For path planning (Phase 8): use `run_install_script("install_path_planner", ...)` for planner installation, `run_diagnostic("check_path_planner", ...)` for verification.
 For diagnostics: use `run_diagnostic()` instead of loading script files.
 For troubleshooting: call `search_solutions()` BEFORE loading troubleshooting guides.
 

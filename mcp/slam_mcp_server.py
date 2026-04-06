@@ -38,6 +38,7 @@ INSTALL_SCRIPTS = {
     "install_mavros": "install_mavros.sh",
     "install_vision_to_mavros": "install_vision_to_mavros.sh",
     "install_dds_bridge": "install_dds_bridge.sh",
+    "install_path_planner": "install_path_planner.sh",
 }
 
 DIAGNOSTIC_SCRIPTS = {
@@ -55,6 +56,8 @@ DIAGNOSTIC_SCRIPTS = {
     "flight_recorder": ("flight_recorder.sh", "bash"),
     "flight_analysis": ("flight_analysis.py", "python3"),
     "transform_calibrator": ("transform_calibrator.py", "python3"),
+    "check_path_planner": ("check_path_planner.py", "python3"),
+    "verify_mcp_tools": ("verify_mcp_tools.py", "python3"),
 }
 
 DEPLOY_SCRIPTS = {
@@ -136,6 +139,8 @@ def run_install_script(script_name: str, args: str = "") -> str:
     - install_mavros <ROS_VERSION> <ROS_DISTRO>
     - install_vision_to_mavros <WORKSPACE_PATH> <ROS_VERSION>
     - install_dds_bridge <ROS_VERSION> <ROS_DISTRO> <FLIGHT_CONTROLLER> <WORKSPACE_PATH>
+    - install_path_planner <PLANNER_TYPE> <WORKSPACE_PATH> <ROS_VERSION>
+      PLANNER_TYPE: waypoint_nav, ego_planner, fuel, nav2, octomap
 
     Args:
         script_name: Name without .sh extension (e.g., "install_lidar_driver")
@@ -176,6 +181,8 @@ def run_diagnostic(
     - flight_recorder start [--notes "text"] [--full] [--ros1] | stop | status | list | last | clean --keep-last N
     - flight_analysis <flight_number> [--json] | --bag /path/to/bag
     - transform_calibrator start [--container NAME --config-dir PATH --json] | record <baseline|forward|right|up|yaw> [--json] | analyze [--json] | apply [--dry-run --json]
+    - check_path_planner --planner <waypoint_nav|ego_planner|fuel|nav2> [--ros-version ROS2] [--ros-distro humble] [--container NAME] [--verbose] [--json]
+    - verify_mcp_tools [--json] — smoke test: checks all scripts exist, phase files present, learned data valid, SKILL.md references consistent
 
     Args:
         diagnostic_name: Name without extension (e.g., "check_tf_tree")

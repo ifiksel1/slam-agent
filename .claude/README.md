@@ -38,6 +38,11 @@ The agent reads `docs/COORDINATOR.md` which routes it to load one phase file at 
 - Phase 5: Progressive testing
 - Phase 6: Operational troubleshooting (SLAM init, vision pose, EKF, drift)
 - Phase 7: Optimization & tuning (SLAM params, ArduPilot gains, resources)
+- Phase 8: Path planning (waypoint nav, SUPER+ROG-Map, EGO-Planner, Nav2)
+  - 8a: Waypoint navigation (simple MAVROS setpoints)
+  - 8b: SUPER + ROG-Map + OMMPC (high-speed obstacle avoidance)
+  - 8c: EGO-Planner-v2 / FUEL (3D trajectory / exploration)
+  - 8d: Nav2 (ROS 2, corridor/tunnel)
 - Troubleshooting: Loaded on-demand per issue
 
 See `docs/AGENT_TEAM.md` for the full architecture.
@@ -45,5 +50,5 @@ See `docs/AGENT_TEAM.md` for the full architecture.
 ## Files
 - `.claude/slam_integration_agent.md` - Thin agent dispatcher (points to COORDINATOR.md)
 - `docs/COORDINATOR.md` - Phase routing and rules
-- `docs/phases/*.md` - Individual phase instructions
+- `docs/phases/*.md` - Individual phase instructions (Phase 8 split into 8a-8d sub-files)
 - `docs/troubleshooting/*.md` - Per-issue troubleshooting

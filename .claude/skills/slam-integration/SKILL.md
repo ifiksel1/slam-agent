@@ -22,7 +22,7 @@ Load ONE phase reference file at a time. Never load multiple phases simultaneous
 
 | Phase | Reference File | Purpose | Output |
 |-------|---------------|---------|--------|
-| 0 | [phase0_docker_deployment.md](docs/phases/phase0_docker_deployment.md) | Docker-based deployment (if user wants Docker) | Docker infrastructure |
+| 0 | [phase0_docker_deployment.md](references/phase0_docker_deployment.md) | Docker-based deployment (if user wants Docker) | Docker infrastructure |
 | 1 | [phase1_assessment.md](references/phase1_assessment.md) | Hardware assessment (3 batched question groups) | hardware_config.yaml |
 | 2 | [phase2_validation.md](references/phase2_validation.md) | Compatibility validation | install_config.yaml |
 | 3 | [phase3_generation.md](references/phase3_generation.md) | Generate SLAM config, URDF, launch, params | Config file paths |
@@ -30,6 +30,11 @@ Load ONE phase reference file at a time. Never load multiple phases simultaneous
 | 5 | [phase5_testing.md](references/phase5_testing.md) | Progressive bench/ground/flight testing | Validated system |
 | 6 | [phase6_troubleshooting.md](references/phase6_troubleshooting.md) | Fix operational issues | System fixed |
 | 7 | [phase7_optimization.md](references/phase7_optimization.md) | Tune SLAM/ArduPilot for environment | Optimized config |
+| 8 | [phase8_path_planner.md](references/phase8_path_planner.md) | Path planner selection + shared config | Planner routing, ArduPilot params, testing |
+| 8a | [phase8a_waypoint_nav.md](references/phase8a_waypoint_nav.md) | Waypoint navigation (simple) | waypoint_nav.py + config |
+| 8b | [phase8b_super.md](references/phase8b_super.md) | SUPER + ROG-Map + OMMPC | Full planning stack for FAST-LIO |
+| 8c | [phase8c_ego_planner.md](references/phase8c_ego_planner.md) | EGO-Planner-v2 / FUEL | 3D trajectory + generic bridge |
+| 8d | [phase8d_nav2.md](references/phase8d_nav2.md) | Nav2 for drones (ROS 2) | Costmap + altitude adapter |
 | 9 | [phase9_voxl.md](references/phase9_voxl.md) | VOXL/ModalAI systems (load if VOXL detected) | VOXL validated |
 
 For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_index.md) first, then load only the specific file matching the symptom.
@@ -58,6 +63,9 @@ For troubleshooting, load [troubleshooting_index.md](references/troubleshooting_
 | Preview transform corrections | `run_diagnostic` | `run_diagnostic("transform_calibrator", "apply --dry-run --json")` |
 | Apply transform corrections | `run_diagnostic` | `run_diagnostic("transform_calibrator", "apply --json")` |
 | Deploy Docker SLAM | `run_deploy_script` | `run_deploy_script("deploy_docker_slam", "--build")` |
+| Install path planner | `run_install_script` | `run_install_script("install_path_planner", "waypoint_nav ~/slam_ws ROS2")` |
+| Check path planner | `run_diagnostic` | `run_diagnostic("check_path_planner", "--planner waypoint_nav --json")` |
+| MCP smoke test | `run_diagnostic` | `run_diagnostic("verify_mcp_tools", "--json")` |
 
 ### Node Control
 | Action | MCP Tool | Example |
@@ -205,6 +213,8 @@ These are auto-populated from real integrations. Always prefer learned data over
 | Phase 3 (config generation) | `docs/SLAM_INTEGRATION_TEMPLATE.md` | Config file templates for all SLAM algorithms |
 | Phase 5-6 (testing/debug) | `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` | Diagnostic procedures, expected values |
 | Phase 5-7 (latency tuning) | `docs/VISION_LATENCY_MEASUREMENT.md` | VISO_DELAY_MS measurement methodology |
+| Phase 8 (path planning) | `references/phase8_path_planner.md` | Planner selection, shared config, testing protocol |
+| Phase 8 (chosen planner) | `references/phase8{a,b,c,d}_*.md` | Load ONE sub-file matching user's planner choice |
 | Phase 9 or VOXL detected | `docs/VOXL_CAM_MISSING_STALLED_FIX.md` | VOXL camera stall fix |
 
 ### Docker Reference — Load during Docker operations

@@ -1,8 +1,8 @@
-# SLAM Integration Agent Team Architecture
+# SLAM Integration Agent Architecture
 
 ## Overview
 
-Instead of one monolithic agent loading/unloading 26k tokens of documentation, use specialized sub-agents that each carry only the knowledge they need.
+Selective phase loading with MCP tool integration. The agent loads one phase file at a time, uses MCP tools for script execution and knowledge persistence, and routes to sub-files when phases are large.
 
 ## Architecture
 
@@ -10,159 +10,180 @@ Instead of one monolithic agent loading/unloading 26k tokens of documentation, u
 User
   |
   v
-Coordinator (~500 token prompt)
-  - Routes to correct phase agent
+SKILL.md (Router, ~250 tokens)
+  - Routes to correct phase file
   - Maintains progress YAML between phases
-  - Passes structured config between agents
+  - Directs MCP tool usage
   |
-  |-- Phase 1 Agent: Hardware Assessor
-  |     Input: nothing (fresh start) or progress YAML (resume)
-  |     Reads: docs/phases/phase1_assessment.md (~2k tokens)
-  |     Does: Asks 3 batched question groups, web searches specs
-  |     Output: slam_hardware_config.yaml
+  |                         MCP Server (slam-tools)
+  |                           |-- run_install_script()
+  |                           |-- run_diagnostic()
+  |                           |-- run_deploy_script()
+  |                           |-- control_node()
+  |                           |-- inspect_topic()
+  |                           |-- search_profiles() / get_profile()
+  |                           |-- save_hardware_profile()
+  |                           |-- update_profile_status()
+  |                           |-- save_known_good_config()
+  |                           |-- save_solution() / search_solutions()
+  |                           |-- commit_learning() / pull_latest_learning()
   |
-  |-- Phase 2 Agent: Compatibility Validator
-  |     Input: slam_hardware_config.yaml
-  |     Reads: docs/phases/phase2_validation.md (~1k tokens)
-  |     Does: Checks compatibility matrix, warns about issues
-  |     Output: validated config + install_config.yaml
+  |-- Phase 0: Docker Deployment (optional)
+  |     Reads: phase0_docker_deployment.md (~330 lines)
+  |     Tools: run_deploy_script, docker_diagnostics
+  |     Output: Docker infrastructure
   |
-  |-- Phase 3 Agent: Config Generator
-  |     Input: validated config
-  |     Reads: docs/phases/phase3_generation.md (~5k tokens)
-  |     Does: Generates SLAM config, URDF, launch files, params, Docker
-  |     Output: file paths list
+  |-- Phase 1: Hardware Assessment
+  |     Reads: phase1_assessment.md (~230 lines)
+  |     Tools: search_profiles, save_hardware_profile
+  |     Output: hardware_config.yaml
   |
-  |-- Phase 4 Agent: Installer
-  |     Input: install_config.yaml + file paths
-  |     Reads: docs/phases/phase4_installation.md (~2k tokens)
-  |     Does: Runs install scripts or manual steps, tracks progress
-  |     Output: installation_status.yaml
+  |-- Phase 2: Compatibility Validation
+  |     Reads: phase2_validation.md (~120 lines)
+  |     Tools: update_profile_status(validated=true)
+  |     Output: install_config.yaml
   |
-  |-- Phase 5 Agent: Tester
-  |     Input: installation_status.yaml
-  |     Reads: docs/phases/phase5_testing.md (~1k tokens)
-  |     Does: Progressive bench/ground/flight testing checklist
-  |     Output: test results
+  |-- Phase 3: Config Generation
+  |     Reads: phase3_generation.md (~570 lines)
+  |     Ref: SLAM_ARDUPILOT_INTEGRATION_GUIDE.md, SLAM_INTEGRATION_TEMPLATE.md
+  |     Output: SLAM config, URDF, launch files, ArduPilot params
   |
-  |-- Phase 6 Agent: Operational Troubleshooter
-  |     Input: test results + error descriptions
-  |     Reads: docs/phases/phase6_troubleshooting.md (~1k tokens)
-  |     Does: Diagnoses SLAM init, vision pose, EKF, drift issues
-  |     Output: fix applied, return to testing
+  |-- Phase 4: Installation
+  |     Reads: phase4_installation.md (~150 lines)
+  |     Tools: run_install_script (lidar, camera, SLAM, MAVROS, bridge, planner)
+  |     Output: Installed system
   |
-  |-- Phase 7 Agent: Optimizer
-  |     Input: working system + environment info
-  |     Reads: docs/phases/phase7_optimization.md (~1k tokens)
-  |     Does: Tunes SLAM params, ArduPilot gains, resource usage
-  |     Output: optimized config files
+  |-- Phase 5: Testing
+  |     Reads: phase5_testing.md (~140 lines)
+  |     Tools: flight_recorder, flight_analysis, transform_calibrator, arm_monitor
+  |     Output: Validated system → save_known_good_config, commit_learning
   |
-  |-- Troubleshooter Agent (on-demand)
-  |     Input: error description + hardware config
-  |     Reads: ONE troubleshooting file (~1k tokens each)
-  |     Does: Diagnoses and provides fix
-  |     Output: fix instructions
+  |-- Phase 6: Troubleshooting
+  |     Reads: phase6_troubleshooting.md (~100 lines) → specific troubleshooting file
+  |     Tools: search_solutions (check FIRST), save_solution, commit_learning
+  |     Output: Fix applied → return to Phase 5
   |
-  |-- VOXL Agent (on-demand)
-        Input: VOXL hardware detection
-        Reads: docs/phases/phase9_voxl.md (~2k tokens)
-        Does: VOXL-specific validation and setup
-        Output: validated VOXL config
+  |-- Phase 7: Optimization
+  |     Reads: phase7_optimization.md (~70 lines)
+  |     Output: Tuned SLAM/ArduPilot params
+  |
+  |-- Phase 8: Path Planning (split into sub-files)
+  |     Reads: phase8_path_planner.md (~200 lines, router + shared config)
+  |       THEN one of:
+  |       |-- phase8a_waypoint_nav.md (~230 lines) — simple MAVROS waypoint following
+  |       |-- phase8b_super.md (~360 lines) — SUPER + ROG-Map + OMMPC
+  |       |-- phase8c_ego_planner.md (~180 lines) — EGO-Planner-v2 / FUEL + bridge
+  |       |-- phase8d_nav2.md (~60 lines) — Nav2 for drones (ROS 2)
+  |     Tools: install_path_planner, check_path_planner
+  |     Output: Planner + bridge + config
+  |
+  |-- Phase 9: VOXL/ModalAI (on-demand)
+  |     Reads: phase9_voxl.md (~80 lines)
+  |     Output: VOXL-specific config
+  |
+  |-- Troubleshooter (on-demand, per symptom)
+        Reads: ONE file from docs/troubleshooting/ (~100-200 lines each)
+          coordinate_frames, ros_environment, performance,
+          sensor_calibration, vio_specific, visualization_debugging,
+          hardware_data_quality, dependencies_flowchart
 ```
 
-## Token Comparison
-
-| Metric | Old (monolithic) | New (selective) | New (agent team) |
-|--------|-----------------|-----------------|------------------|
-| Per-turn context | 8-15k | 3-8k | 1-3k |
-| 35-turn session | ~910k | ~420k | ~120-150k |
-| Cost (Sonnet) | $3.90 | $2.25 | $0.65-0.80 |
-
-## How to Use with Claude Code
-
-### Option 1: Manual Phase Routing (works today)
-```
-User: "Help me integrate SLAM with my drone"
-Claude: [Reads COORDINATOR.md, loads phase1_assessment.md]
-        [Asks batched questions, collects answers]
-        [Outputs config YAML]
-        [Unloads phase1, loads phase2]
-        ...continues through phases...
-```
-
-### Option 2: Sub-Agent Delegation (Claude Code with Task tool)
-```python
-# Coordinator dispatches to specialized agents
-Task(
-    description="Collect hardware info",
-    prompt="Read docs/phases/phase1_assessment.md. Ask the user about their "
-           "hardware in 3 batched groups. Output slam_hardware_config.yaml.",
-    subagent_type="general-purpose"
-)
-```
-
-### Option 3: Background Agents (parallel where possible)
-```python
-# Phase 2 + Phase 3 can partially overlap:
-# - Validate compatibility (Phase 2)
-# - Start generating configs for confirmed components (Phase 3)
-# Phase 4 components can install in parallel:
-# - Install MAVROS while cloning SLAM repo
-# - Install sensor driver while building SLAM
-```
-
-## Coordinator Prompt Template
-
-Use this as the system prompt or initial instruction:
+## Learning System
 
 ```
-You are coordinating a SLAM integration for a GPS-denied autonomous UAV.
-
-Current state: [PHASE_NUMBER] - [PHASE_NAME]
-Hardware config: [YAML summary from Phase 1]
-
-Your job:
-1. Load the current phase file from docs/phases/
-2. Execute that phase's instructions
-3. Output structured results
-4. Report back when phase is complete
-
-Rules:
-- Only read the file for your current phase
-- Use web search for hardware lookups
-- Generate actual values, not templates
-- Report completion with structured output
+Session Start                              After Phase 5 Success
+     |                                            |
+pull_latest_learning()                   update_profile_status(complete)
+     |                                            |
+search_profiles(hardware)                save_known_good_config(fingerprint, configs)
+     |                                            |
+  Match found?                           commit_learning("validated: ...")
+  YES → skip to Phase 4/5                        |
+  NO  → start Phase 1                    git push → available to all future sessions
 ```
 
-## Resume Flow
+Data stored in `docs/learned/`:
+- `hardware_profiles.yaml` — cached hardware assessments
+- `solutions_log.yaml` — troubleshooting solutions (symptom → root cause → fix)
+- `known_good_configs/<fingerprint>/` — complete validated config sets
+
+## Context Budget per Phase
+
+| Phase | Lines loaded | Notes |
+|-------|-------------|-------|
+| 0 | ~330 | Docker setup |
+| 1 | ~230 | Hardware questions |
+| 2 | ~120 | Compatibility check |
+| 3 | ~570 | Largest core phase (config generation) |
+| 4 | ~150 | Installation via MCP |
+| 5 | ~140 | Testing checklists |
+| 6 | ~100 + ~150 | Router + one troubleshooting file |
+| 7 | ~70 | Optimization tuning |
+| 8 | ~200 + ~60-360 | Router + one planner sub-file |
+| 9 | ~80 | VOXL-specific |
+
+Typical session loads 2-3 phases = **400-900 lines** of reference docs, not the full 2500+.
+
+## Data Flow
 
 ```
-User provides progress YAML
-  |
-  v
-Coordinator parses YAML
-  - Extracts: current_phase, hardware_config, completed_phases
-  - Determines: next phase to execute
-  |
-  v
-Loads ONLY next phase file
-  - Skips all completed phases (no re-reading)
-  - Has hardware config from YAML (no re-asking questions)
-  |
-  v
-Continues from exact stopping point
+Phase 1 → hardware_config.yaml → Phase 2
+Phase 2 → install_config.yaml → Phase 3
+Phase 3 → config file paths → Phase 4
+Phase 4 → installed system → Phase 5
+Phase 5 → test results → Phase 6 (issues) or Phase 7 (working) or Phase 8 (autonomy)
+Phase 6 → fix applied → Phase 5 (re-test)
+Phase 7 → optimized config → Phase 5 (re-test)
+Phase 8 → planner validated → save to learning system → Done
 ```
 
-## Data Flow Between Phases
+## File Map
 
 ```
-Phase 1 --> slam_hardware_config.yaml --> Phase 2
-Phase 2 --> validated_config + install_config.yaml --> Phase 3
-Phase 3 --> file_paths_list --> Phase 4
-Phase 4 --> installation_status --> Phase 5
-Phase 5 --> test_results --> Phase 6 (if issues) or Phase 7 (if working)
-Phase 6 --> fixes_applied --> Phase 5 (re-test)
-Phase 7 --> optimized_config --> Phase 5 (re-test) --> Done
+slam-agent/
+├── .claude/
+│   ├── README.md                          # Quick start
+│   ├── slam_integration_agent.md          # Thin agent dispatcher
+│   ├── settings.local.json                # MCP permissions whitelist
+│   └── skills/slam-integration/
+│       └── SKILL.md                       # Main skill (router + MCP tool table)
+├── mcp/
+│   ├── slam_mcp_server.py                 # MCP server (all tools)
+│   ├── run_mcp_server.sh                  # Server launcher
+│   └── requirements.txt
+├── docs/
+│   ├── AGENT_TEAM.md                      # ← This file
+│   ├── phases/
+│   │   ├── phase0_docker_deployment.md
+│   │   ├── phase1_assessment.md
+│   │   ├── phase2_validation.md
+│   │   ├── phase3_generation.md
+│   │   ├── phase4_installation.md
+│   │   ├── phase5_testing.md
+│   │   ├── phase6_troubleshooting.md
+│   │   ├── phase7_optimization.md
+│   │   ├── phase8_path_planner.md         # Router + shared config
+│   │   ├── phase8a_waypoint_nav.md        # Simple waypoint nav
+│   │   ├── phase8b_super.md               # SUPER + ROG-Map + OMMPC
+│   │   ├── phase8c_ego_planner.md         # EGO-Planner / FUEL + bridge
+│   │   ├── phase8d_nav2.md                # Nav2 (ROS 2)
+│   │   └── phase9_voxl.md
+│   ├── troubleshooting/                   # Per-symptom files
+│   ├── learned/                           # Git-backed knowledge
+│   │   ├── hardware_profiles.yaml
+│   │   ├── solutions_log.yaml
+│   │   └── known_good_configs/
+│   └── *.md                               # Reference docs (loaded on demand)
+├── scripts/
+│   ├── install_*.sh                       # Installation scripts (MCP whitelisted)
+│   ├── check_*.py                         # Diagnostic scripts (MCP whitelisted)
+│   ├── flight_recorder.sh                 # Flight data recording
+│   ├── flight_analysis.py                 # Post-flight HTML dashboard
+│   ├── transform_calibrator.py            # LiDAR extrinsic calibration
+│   ├── arm_monitor.py                     # Auto-record on arm/disarm
+│   └── deploy_docker_slam.sh              # Docker deployment
+├── config/                                # Config templates
+├── launch/                                # ROS launch files
+├── flights/                               # Recorded flight data
+└── Dockerfile / docker-compose.yml        # Docker definitions
 ```
-
-Each handoff is a structured YAML document, not free text. This keeps inter-phase communication at ~200 tokens instead of carrying full conversation history.
