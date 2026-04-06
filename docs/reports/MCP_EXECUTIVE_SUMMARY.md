@@ -65,7 +65,7 @@ Created an isolated execution environment:
 **Documentation:**
 - `/home/dev/slam-agent/mcp/MCP_SETUP_README.md` - Technical details
 - `/home/dev/slam-agent/mcp/QUICK_REFERENCE.md` - User guide
-- `/home/dev/slam-agent/docs/reports/MCP_SETUP_SUCCESS.md` - Full success report
+- `/home/dev/slam-agent/docs/archive/MCP_SETUP_SUCCESS.md` - Full success report
 - `/home/dev/slam-agent/docs/reports/MCP_EXECUTIVE_SUMMARY.md` - This document
 
 **Modified:**

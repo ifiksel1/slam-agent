@@ -136,7 +136,7 @@ Found 2 matching profile(s):
 - `/home/dev/slam-agent/mcp/run_mcp_server.sh` - Wrapper script
 - `/home/dev/slam-agent/mcp/verify_mcp.sh` - Health check script
 - `/home/dev/slam-agent/mcp/MCP_SETUP_README.md` - Setup documentation
-- `/home/dev/slam-agent/docs/reports/MCP_SETUP_SUCCESS.md` - This report
+- `/home/dev/slam-agent/docs/archive/MCP_SETUP_SUCCESS.md` - This report
 
 ### Modified Files
 - `/home/dev/slam-agent/.mcp.json` - Updated configuration

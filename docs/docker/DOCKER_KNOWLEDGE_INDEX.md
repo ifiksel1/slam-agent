@@ -8,20 +8,6 @@
 
 ## 📍 Navigation Guide
 
-### 🎯 Start Here (First-Time Users)
-**File**: `DOCKER_KNOWLEDGE_MAP.txt`
-**Purpose**: Visual overview of what slam-agent learned
-**Content**:
-- What happened during 3 build iterations
-- 9 issues discovered and their priorities
-- Quick pointers to relevant documentation
-- Key insights and lessons
-- How to use this knowledge
-
-**Read Time**: 5 minutes
-
----
-
 ### 🚀 Quick Reference (Before Building)
 **File**: `DOCKER_DEPLOYMENT_CHECKLIST.md`
 **Purpose**: Actionable checklist for Docker builds
@@ -103,7 +89,7 @@
 ### 🏗️ Architecture & Design
 
 #### Multi-ROS Architecture
-**File**: `docs/DOCKER_MULTI_ROS_ARCHITECTURE.md`
+**File**: `docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md`
 **Purpose**: Design decisions for supporting both ROS1 and ROS2
 **Content**:
 - Three architecture options compared (Single-image, Multi-image, Unified)
@@ -249,7 +235,6 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 ```
 /home/dev/slam-agent/
 ├── docs/docker/
-│   ├── DOCKER_KNOWLEDGE_MAP.txt                    ← Start here (visual overview)
 │   ├── DOCKER_KNOWLEDGE_INDEX.md                   ← This file (navigation guide)
 │   ├── DOCKER_DEPLOYMENT_CHECKLIST.md              ← Pre-build checklist
 │   ├── DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md     ← High-level summary
@@ -260,7 +245,8 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 │   ├── DOCKER_BUILD_LESSONS_LEARNED.md         ← Deep dive into all 9 issues
 │   ├── DOCKER_OPERATIONS_RUNBOOK.md            ← ROS1 operations
 │   ├── DOCKER_OPERATIONS_RUNBOOK_ROS2.md       ← ROS2 operations
-│   ├── DOCKER_MULTI_ROS_ARCHITECTURE.md        ← Architecture decisions
+│   ├── archive/
+│   │   └── DOCKER_MULTI_ROS_ARCHITECTURE.md   ← Architecture decisions (archived)
 │   └── phases/
 │       └── phase0_docker_deployment.md         ← Structured deployment guide
 │
@@ -283,24 +269,23 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 ### For Different Roles
 
 #### Docker Build Engineer
-1. Start: `DOCKER_KNOWLEDGE_MAP.txt` (5 min overview)
+1. Start: `DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md` (25 min overview)
 2. Read: `DOCKER_DEPLOYMENT_CHECKLIST.md` (15 min checklist)
 3. Reference: `DOCKER_BUILD_LESSONS_LEARNED.md` (issue deep-dive)
 4. Use: `scripts/docker_diagnostics.py` (automated checks)
 
 #### System Operations
-1. Start: `DOCKER_KNOWLEDGE_MAP.txt` (5 min overview)
+1. Start: `DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md` (25 min overview)
 2. Read: `docs/DOCKER_OPERATIONS_RUNBOOK.md` or `_ROS2.md`
 3. Reference: `DOCKER_DEPLOYMENT_CHECKLIST.md` (troubleshooting section)
 4. Use: Diagnostics script for health checks
 
 #### Manager/Decision Maker
 1. Start: `DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md` (25 min)
-2. Reference: `DOCKER_KNOWLEDGE_MAP.txt` (issues overview)
-3. Review: Metrics section in `DOCKER_BUILD_LESSONS_LEARNED.md`
+2. Review: Metrics section in `DOCKER_BUILD_LESSONS_LEARNED.md`
 
 #### Software Developer (Extending System)
-1. Start: `docs/DOCKER_MULTI_ROS_ARCHITECTURE.md` (architecture)
+1. Start: `docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md` (architecture)
 2. Read: `docs/phases/phase0_docker_deployment.md` (detailed guide)
 3. Reference: `.claude/projects/slam-docker-deployment/MEMORY.md` (decisions)
 
@@ -321,12 +306,11 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 → Or `DOCKER_OPERATIONS_RUNBOOK.md` → "Troubleshooting" section
 
 ### "What's the architecture decision?"
-→ `docs/DOCKER_MULTI_ROS_ARCHITECTURE.md`
+→ `docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md`
 → Or `MEMORY.md` → "Architecture Decisions Made"
 
 ### "What issues were discovered?"
-→ `DOCKER_KNOWLEDGE_MAP.txt` → "9 CRITICAL ISSUES"
-→ Or `DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md` → "9 Critical Issues"
+→ `DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md` → "9 Critical Issues"
 
 ### "How do I run the system?"
 → `docs/DOCKER_OPERATIONS_RUNBOOK.md` (ROS1)
@@ -342,12 +326,11 @@ These are the actual Docker files used for deployment. slam-agent's documentatio
 
 Before using this knowledge in your project:
 
-- [ ] Read `DOCKER_KNOWLEDGE_MAP.txt` for overview
 - [ ] Review `DOCKER_DEPLOYMENT_CHECKLIST.md` for your use case
 - [ ] Run `python3 scripts/docker_diagnostics.py` after any build
 - [ ] Reference `DOCKER_BUILD_LESSONS_LEARNED.md` for issues
 - [ ] Choose appropriate operations runbook (ROS1 or ROS2)
-- [ ] Review architectural decisions in `DOCKER_MULTI_ROS_ARCHITECTURE.md`
+- [ ] Review architectural decisions in `docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md`
 - [ ] Validate using success criteria in checklist
 
 ---
@@ -362,7 +345,7 @@ Before using this knowledge in your project:
 | Issue explanation | DOCKER_BUILD_LESSONS_LEARNED.md | Issue #1-9 |
 | Troubleshooting | DOCKER_OPERATIONS_RUNBOOK.md | Troubleshooting |
 | ROS2 guide | DOCKER_OPERATIONS_RUNBOOK_ROS2.md | All sections |
-| Architecture | DOCKER_MULTI_ROS_ARCHITECTURE.md | All sections |
+| Architecture | docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md | All sections |
 | Automation | scripts/docker_diagnostics.py | Run directly |
 | Knowledge | MEMORY.md | All sections |
 
@@ -379,23 +362,23 @@ Before using this knowledge in your project:
 
 ## 🎯 Recommended Reading Order
 
-### For First-Time Users (45 minutes)
-1. **DOCKER_KNOWLEDGE_MAP.txt** (5 min) - Get overview
-2. **DOCKER_DEPLOYMENT_CHECKLIST.md** (15 min) - Understand process
-3. **DOCKER_OPERATIONS_RUNBOOK.md** or **_ROS2.md** (15 min) - Learn operations
+### For First-Time Users (40 minutes)
+1. **DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md** (25 min) - Get overview
+2. **DOCKER_DEPLOYMENT_CHECKLIST.md** (5 min) - Understand process
+3. **DOCKER_OPERATIONS_RUNBOOK.md** or **_ROS2.md** (5 min) - Learn operations
 4. **Run diagnostics** (5 min) - Verify setup
 
-### For Issue Resolution (30 minutes)
-1. **DOCKER_KNOWLEDGE_MAP.txt** (5 min) - Find issue category
+### For Issue Resolution (25 minutes)
+1. **DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md** (5 min) - Find issue category
 2. **DOCKER_DEPLOYMENT_CHECKLIST.md** (5 min) - Find quick fix
-3. **DOCKER_BUILD_LESSONS_LEARNED.md** (15 min) - Read detailed explanation
+3. **DOCKER_BUILD_LESSONS_LEARNED.md** (10 min) - Read detailed explanation
 4. **Run diagnostics** (5 min) - Verify fix
 
-### For Architecture Review (60 minutes)
+### For Architecture Review (55 minutes)
 1. **DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md** (25 min)
-2. **DOCKER_MULTI_ROS_ARCHITECTURE.md** (15 min)
+2. **docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md** (15 min)
 3. **MEMORY.md** (10 min) - Decisions and rationale
-4. **DOCKER_BUILD_LESSONS_LEARNED.md** (10 min) - Technical depth
+4. **DOCKER_BUILD_LESSONS_LEARNED.md** (5 min) - Technical depth
 
 ---
 
@@ -434,7 +417,7 @@ python3 /home/dev/slam-agent/scripts/docker_diagnostics.py
 
 ### I want to understand what slam-agent learned
 ```bash
-cat /home/dev/slam-agent/docs/docker/DOCKER_KNOWLEDGE_MAP.txt
+less /home/dev/slam-agent/docs/docker/DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md
 less /home/dev/slam-agent/.claude/projects/slam-docker-deployment/MEMORY.md
 ```
 

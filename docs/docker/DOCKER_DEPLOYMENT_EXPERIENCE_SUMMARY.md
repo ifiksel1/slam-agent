@@ -243,7 +243,7 @@ healthcheck: test: ["CMD-SHELL", "rosnode list"]  # Fails without ROS Master
 - Troubleshooting guides
 
 ### For Architecture Decisions
-🏗️ See: `/home/dev/slam-agent/docs/DOCKER_MULTI_ROS_ARCHITECTURE.md`
+🏗️ See: `/home/dev/slam-agent/docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md`
 - Why multi-image approach chosen
 - Comparison with alternatives
 - Migration strategy for ROS versions

@@ -109,4 +109,4 @@ This keeps ROS/SLAM environment completely safe.
 ---
 
 For detailed setup information, see: `/home/dev/slam-agent/mcp/MCP_SETUP_README.md`
-For complete success report, see: `/home/dev/slam-agent/docs/reports/MCP_SETUP_SUCCESS.md`
+For complete success report, see: `/home/dev/slam-agent/docs/archive/MCP_SETUP_SUCCESS.md`

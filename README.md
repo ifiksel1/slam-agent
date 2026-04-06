@@ -59,7 +59,6 @@ slam_integration/
 │   │   ├── DOCKER_DEPLOYMENT_EXPERIENCE_SUMMARY.md
 │   │   ├── DOCKER_NETWORK_GUIDE.md       #   Networking configuration
 │   │   ├── DOCKER_KNOWLEDGE_INDEX.md     #   Docker knowledge index
-│   │   ├── DOCKER_KNOWLEDGE_MAP.txt      #   Docker knowledge map
 │   │   └── DOCKER_SLAM_EXECUTION_GUIDE.md #  Runtime execution guide
 │   │
 │   ├── guides/                            # Operational guides
@@ -70,22 +69,30 @@ slam_integration/
 │   │   ├── FAST_LIO_GPU_INTEGRATION_CHECKLIST.md
 │   │   └── MCP_SCRIPTS_REFERENCE.md      #   MCP tool/script reference
 │   │
-│   ├── reports/                           # Test results and build reports
+│   ├── reports/                           # Current test results and reports
+│   │   ├── MCP_EXECUTIVE_SUMMARY.md
+│   │   ├── PHASE2_FAST_LIO_GPU_VALIDATION.md
+│   │   ├── SYSTEM_DOCUMENTATION_SUMMARY.md
+│   │   └── VOXL_VALIDATION_REPORT.md
+│   │
+│   ├── archive/                           # Archived reports, old meta-docs
 │   │   ├── AGENT_TEST_SUMMARY.md
 │   │   ├── DIAGNOSTIC_SCRIPTS_TEST_RESULTS.md
-│   │   ├── HARDWARE_TEST_RESULTS.md
-│   │   ├── QUICK_START_TESTING.md
-│   │   ├── SYSTEM_BUILD_COMPLETE.md
 │   │   ├── FINAL_BUILD_REPORT.md
-│   │   ├── SYSTEM_READINESS_SUMMARY.md
-│   │   ├── SCRIPT_FIXES_SUMMARY.md
 │   │   ├── GIT_COMMIT_SUMMARY.md
-│   │   ├── SYSTEM_DOCUMENTATION_SUMMARY.md
-│   │   ├── MCP_EXECUTIVE_SUMMARY.md
+│   │   ├── HARDWARE_TEST_RESULTS.md
 │   │   ├── MCP_SETUP_SUCCESS.md
-│   │   ├── VOXL_VALIDATION_REPORT.md
 │   │   ├── OUSTER_CURRENT_STATUS.md
-│   │   └── PHASE2_FAST_LIO_GPU_VALIDATION.md
+│   │   ├── QUICK_START_TESTING.md
+│   │   ├── SCRIPT_FIXES_SUMMARY.md
+│   │   ├── SYSTEM_BUILD_COMPLETE.md
+│   │   ├── SYSTEM_READINESS_SUMMARY.md
+│   │   ├── DOCKER_MULTI_ROS_ARCHITECTURE.md
+│   │   └── SUCCESS_RATE_ASSESSMENT.md
+│   │
+│   ├── hardware_specs/                    # Hardware datasheets and specs
+│   │   ├── JT128_default_angle.csv
+│   │   └── JT128_User_Manual*.pdf
 │   │
 │   ├── learned/                           # Learning system (auto-updated, git-backed)
 │   │   ├── hardware_profiles.yaml        #   Cached Phase 1 configs by hardware
@@ -98,8 +105,7 @@ slam_integration/
 │   ├── AI_SYSTEM_BUILDER_GUIDE.md         # Original monolithic guide (archive/reference)
 │   ├── SLAM_ARDUPILOT_INTEGRATION_GUIDE.md  # Technical integration reference
 │   ├── SLAM_INTEGRATION_TEMPLATE.md       # Config templates
-│   ├── SLAM_INTEGRATION_DIAGNOSTICS.md    # Systematic diagnostics
-│   └── archive/                           # Archived meta-docs (not for AI runtime)
+│   └── SLAM_INTEGRATION_DIAGNOSTICS.md    # Systematic diagnostics
 │
 ├── scripts/                               # Automation & diagnostics (called via MCP)
 │   ├── build_slam_system.sh              #   Full system build script

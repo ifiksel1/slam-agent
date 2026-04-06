@@ -598,7 +598,7 @@ Deployment and testing automation:
 ### Updated Documentation
 - **DOCKER_OPERATIONS_RUNBOOK.md** - Complete ROS1 operations guide
 - **DOCKER_OPERATIONS_RUNBOOK_ROS2.md** - ROS2 Humble equivalent
-- **DOCKER_MULTI_ROS_ARCHITECTURE.md** - Multi-version support design
+- **docs/archive/DOCKER_MULTI_ROS_ARCHITECTURE.md** - Multi-version support design
 
 ---
 
