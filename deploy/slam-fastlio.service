@@ -1,0 +1,20 @@
+[Unit]
+Description=FAST-LIO SLAM + MAVROS vision bridge (inside slam container)
+Documentation=https://github.com/ifiksel1/slam-agent
+Requires=slam-container.service
+After=slam-container.service
+
+[Service]
+Type=simple
+# Wait (up to ~2 min) until the container accepts exec before launching.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do /usr/bin/docker exec slam-hesai-fastlio true 2>/dev/null && exit 0; sleep 2; done; exit 1'
+# Full pipeline: Hesai driver + FAST-LIO + MAVROS + vision-pose bridge (rotation from the launch).
+ExecStart=/usr/bin/docker exec slam-hesai-fastlio bash -lc 'source /opt/ros/noetic/setup.bash && source /root/slam_ws/devel/setup.bash && exec roslaunch $(rospack find fast_lio)/config/fastlio_to_fc.launch'
+# docker exec doesn't forward SIGTERM into the container reliably; stop roslaunch explicitly.
+ExecStop=-/usr/bin/docker exec slam-hesai-fastlio bash -lc 'pkill -f roslaunch'
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
