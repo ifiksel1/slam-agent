@@ -1,0 +1,18 @@
+[Unit]
+Description=SLAM Docker container (Hesai JT128 + FAST-LIO)
+Documentation=https://github.com/ifiksel1/slam-agent
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/revolute/Documents/slam-agent
+# Brings up the slam-system service (auto-includes docker-compose.override.yml: USB mount, etc.)
+ExecStart=/usr/bin/docker compose up -d slam-system
+ExecStop=/usr/bin/docker compose stop slam-system
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
