@@ -6,9 +6,9 @@ services:
       context: .
       dockerfile: Dockerfile
     image: slam-system:latest
-    container_name: slam-ouster-fastlio
+    container_name: slam-hesai-fastlio
 
-    # Network configuration for Ouster sensor access
+    # Network configuration for Hesai sensor access
     network_mode: host
 
     # Privileged mode for hardware access (if needed)
@@ -19,7 +19,7 @@ services:
       - ROS_HOSTNAME=localhost
       - ROS_MASTER_URI=http://localhost:11311
       - DISPLAY=${DISPLAY:-:0}
-      - OUSTER_IP=169.254.56.220
+      - HESAI_IP=192.168.1.201
       - RVIZ_ENABLE=false
 
     # Volume mounts
@@ -30,8 +30,8 @@ services:
       - ./logs:/root/slam_logs:rw
       # Mount X11 socket for GUI (rviz)
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      # Mount config files for easy editing
-      - ./config:/root/slam_ws/src/FAST_LIO_SLAM/FAST-LIO/config:rw
+      # Mount FAST-LIO config dir for easy editing (Hesai JT128 config lives here)
+      - ./config:/root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/config:rw
 
     # Device access (if needed for specific hardware)
     # devices:
@@ -65,19 +65,19 @@ services:
     tty: true
     stdin_open: true
 
-# Optional: Service for running SLAM with automatic startup
+# Optional: Service for running full FAST-LIO-SLAM (FAST-LIO + SC-PGO) on autostart
   slam-autostart:
     extends: slam-system
     container_name: slam-autostart
-    command: bash -c "source /root/slam_ws/devel/setup.bash && /root/preflight_check.sh && roslaunch fast_lio mapping_ouster64_docker.launch"
+    command: bash -c "source /root/slam_ws/devel/setup.bash && /root/preflight_check.sh && roslaunch fast_lio mapping_hesai_jt128.launch"
     profiles:
       - autostart
 
-# Optional: Service for running just Ouster driver
-  ouster-driver:
+# Optional: Service for running just the Hesai JT128 driver
+  hesai-driver:
     extends: slam-system
-    container_name: ouster-driver-only
-    command: bash -c "source /root/slam_ws/devel/setup.bash && roslaunch ouster_ros sensor.launch sensor_hostname:=169.254.56.220 viz:=false"
+    container_name: hesai-driver-only
+    command: bash -c "source /root/slam_ws/devel/setup.bash && roslaunch hesai_ros_driver start.launch"
     profiles:
       - driver-only
 

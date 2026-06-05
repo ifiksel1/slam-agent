@@ -1,0 +1,26 @@
+# The Dockerfile only COPYs from scripts/; everything else is noise in the build context.
+.git
+.cursor
+.claude
+flights
+docs
+examples
+launch
+mcp
+config
+workspace
+logs
+*.md
+LICENSE
+.gitignore
+.cursorrules
+.mcp.json
+docker-compose.yml
+
+# Vendored sources under docker_src/ ARE part of the build context (COPYed in),
+# but strip git histories and bulky upstream doc media / a stray core dump so the
+# image stays lean. (Hesai SDK angle-correction .dat/.csv files are kept — needed at runtime.)
+**/.git
+docker_src/**/doc
+docker_src/**/picture
+docker_src/**/core

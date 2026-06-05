@@ -5,3 +5,6 @@ __pycache__/
 *.log
 mcp/__pycache__/
 *.yaml.tmp
+
+# Vendored Docker build sources (cloned by scripts/fetch_docker_sources.sh)
+docker_src/
