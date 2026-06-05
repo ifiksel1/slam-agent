@@ -19,16 +19,16 @@ export ROS_MASTER_URI=${ROS_MASTER_URI:-http://localhost:11311}
 echo "ROS Configuration:"
 echo "  ROS_HOSTNAME: $ROS_HOSTNAME"
 echo "  ROS_MASTER_URI: $ROS_MASTER_URI"
-echo "  OUSTER_IP: ${OUSTER_IP:-169.254.56.220}"
+echo "  HESAI_IP: ${HESAI_IP:-192.168.1.201}"
 echo ""
 
-# Check network connectivity to Ouster
-if [ ! -z "${OUSTER_IP}" ]; then
-    echo "Checking Ouster sensor connectivity..."
-    if ping -c 1 -W 2 ${OUSTER_IP} &>/dev/null; then
-        echo "✓ Ouster sensor reachable at ${OUSTER_IP}"
+# Check network connectivity to the Hesai JT128 sensor
+if [ ! -z "${HESAI_IP}" ]; then
+    echo "Checking Hesai JT128 sensor connectivity..."
+    if ping -c 1 -W 2 ${HESAI_IP} &>/dev/null; then
+        echo "✓ Hesai sensor reachable at ${HESAI_IP}"
     else
-        echo "⚠ Warning: Cannot reach Ouster sensor at ${OUSTER_IP}"
+        echo "⚠ Warning: Cannot reach Hesai sensor at ${HESAI_IP}"
         echo "  Make sure sensor is powered and connected to same network"
     fi
     echo ""
@@ -37,15 +37,21 @@ fi
 # Display available ROS packages
 echo "Available SLAM packages:"
 if [ -d /root/slam_ws/devel/lib/fast_lio ]; then
-    echo "  ✓ FAST-LIO (SLAM)"
+    echo "  ✓ FAST-LIO (odometry)"
 else
     echo "  ✗ FAST-LIO not found"
 fi
 
-if [ -d /root/slam_ws/devel/lib/ouster_ros ]; then
-    echo "  ✓ Ouster ROS driver"
+if [ -d /root/slam_ws/devel/lib/aloam_velodyne ]; then
+    echo "  ✓ SC-PGO (loop closure)"
 else
-    echo "  ✗ Ouster ROS driver not found"
+    echo "  ✗ SC-PGO not found"
+fi
+
+if [ -d /root/slam_ws/devel/lib/hesai_ros_driver ]; then
+    echo "  ✓ Hesai ROS driver"
+else
+    echo "  ✗ Hesai ROS driver not found"
 fi
 echo ""
 
