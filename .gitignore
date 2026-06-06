@@ -8,3 +8,7 @@ mcp/__pycache__/
 
 # Vendored Docker build sources (cloned by scripts/fetch_docker_sources.sh)
 docker_src/
+
+# Local tooling artifacts (machine-specific, not project content)
+.catkin_tools/
+.claude/projects/
