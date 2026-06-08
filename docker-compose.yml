@@ -33,9 +33,18 @@ services:
       # Mount FAST-LIO config dir for easy editing (Hesai JT128 config lives here)
       - ./config:/root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/config:rw
 
-    # Device access (if needed for specific hardware)
-    # devices:
-    #   - /dev/dri:/dev/dri  # GPU access for visualization
+    # Device access. The flight controller (mRo Pixracer Pro) enumerates over USB
+    # CDC-ACM as /dev/ttyACM0 (MAVLink, used by mavros) and /dev/ttyACM1. Mapping
+    # them here makes the nodes appear inside the container's /dev at start, so
+    # mavros finds the FC after a restart without a manual `mknod`.
+    # NOTE: docker fails to start the container if a listed device is absent, so
+    # the FC must be plugged in before `docker compose up`. If ttyACM numbering is
+    # unstable across reboots, switch to a stable by-id path, e.g.:
+    #   - /dev/serial/by-id/usb-mRo_mRoPixracerPro_...-if00:/dev/ttyACM0
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0  # FC MAVLink (mavros fcu_url)
+      - /dev/ttyACM1:/dev/ttyACM1  # FC secondary CDC-ACM interface
+    # - /dev/dri:/dev/dri  # GPU access for visualization (uncomment if needed)
 
     # Restart policy
     restart: unless-stopped
