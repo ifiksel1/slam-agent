@@ -1,16 +1,24 @@
 # SuperOdom Degeneracy Characterization — Orin NX 8GB / OS1-64 (2026-06-09)
 
-> **CAVEAT (extrinsic):** This run used a placeholder *identity* LiDAR↔IMU extrinsic. That was
-> wrong for this rig and caused the yaw instability (±130° jumps) and "yaw sign inverted" below.
-> Corrected later that day to `[-1,0,0,0,-1,0,0,0,1]` + `use_imu_roll_pitch:true` → replayed path
-> is stable. The **qualitative degeneracy signal (x/yaw uncertainty maxed in corridor) and the
-> health-flag-insensitivity finding stand**; the specific drift/yaw-jump numbers should be
-> re-measured with the corrected extrinsic. See README "Extrinsic correction".
+> **✅ RE-RUN 2026-06-09 (corrected extrinsic + CycloneDDS, 1.0× native) — supersedes the
+> drift/yaw numbers below.** Same `degen_bag`, fixed extrinsic `[-1,0,0,0,-1,0,0,0,1]` +
+> `use_imu_roll_pitch:true`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, replayed at **1.0×** (old run
+> needed 0.5× — Cyclone removed the Fast-DDS bottleneck; see README "Live rate"):
+> - **path 62.05 m, peak excursion 7.07 m, return-to-start 0.84 m (~1.4%)**, 4355 samples / 174 s.
+> - **Yaw blowup ELIMINATED:** end-yaw drift **−20.5°** vs the old identity-extrinsic run's
+>   **±130–137° jumps**. The extrinsic fix cured the catastrophic heading failure.
+> - Degeneracy signature unchanged: `uncertainty_x/y/yaw` mean ~1.0; `z` best (mean 0.52);
+>   `icp_avg_distance` 0.03→0.81. **`/state_estimation_health` stayed `true` 100% of the run
+>   (0.0 s false)** — the health-flag-insensitivity finding STANDS.
+> - Tracked at native 1.0×, confirming real-time capability on this rig under CycloneDDS.
 
-Featureless-corridor test. Because live SuperOdom + ROS2 Ouster driver is compute-marginal
-on this rig (see "Live limitation"), the data was captured to a bag with the **driver alone**
-(clean 20 Hz) and **replayed offline into SuperOdom at 0.5×**. This is the validated method
-for testing on this hardware.
+> **CAVEAT (original run below):** used a placeholder *identity* LiDAR↔IMU extrinsic. That was
+> wrong for this rig and caused the yaw instability (±130° jumps) and "yaw sign inverted" below —
+> now superseded by the RE-RUN above.
+
+Featureless-corridor test. The data was captured to a bag with the **driver alone**
+(clean 20 Hz) and **replayed offline into SuperOdom** (original run below at 0.5×; the RE-RUN above
+at 1.0× under CycloneDDS).
 
 - Bag: `~/superodom_ws/degen_bag` (10 GB, NOT in git) — 176 s, 3386 clouds @19 Hz, 17591 IMU @100 Hz.
 - Trajectory log: `degen_corridor_replay_2026-06-09.log`.

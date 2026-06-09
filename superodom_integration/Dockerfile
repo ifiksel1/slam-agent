@@ -106,7 +106,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libtins-dev libpcap-dev libflatbuffers-dev libzip-dev \
         ros-humble-pcl-ros ros-humble-tf2-eigen ros-humble-rviz2 \
         ros-humble-ament-cmake ros-humble-ament-lint-auto ros-humble-ament-cmake-gtest \
+        ros-humble-rmw-cyclonedds-cpp \
+        ros-humble-foxglove-bridge \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# CRITICAL (2026-06-09): default Fast-DDS (rmw_fastrtps_cpp) stalls the large /ouster/points
+# PointCloud2 publish when multiple SuperOdom DDS participants are active -> /ouster/points
+# collapses to ~15Hz regardless of CPU/clock/QoS. CycloneDDS holds a steady 20Hz. Make it the
+# default rmw for this image. Proven by A/B on Orin NX 8GB / OS1-64.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
 WORKDIR /root/ros2_ws
 

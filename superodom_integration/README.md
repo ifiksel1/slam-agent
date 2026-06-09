@@ -43,12 +43,54 @@ See `results/DEGENERACY_FINDINGS.md`. 54.67 m corridor walk (bag-record + 0.5× 
 - **`/state_estimation_health` stayed `true` the whole time** — it does NOT detect this degeneracy.
 - Yaw came apart (±130° jumps) at the deepest stretch.
 
-### ⚠️ Live limitation on this rig
-The ROS2 Ouster driver (1024×20) + SuperOdom together overloads the 8 GB/6-core Orin → LiDAR
-drops to ~11 Hz → LiDAR-IMU sync fails → no live tracking. Driver alone holds 20 Hz. **Validated
-method here is bag-record (driver only) + offline replay.** For LIVE flight: try 512×20, lighten
-SuperOdom, use beefier compute, or prefer the lighter EllipseLIO for live and keep SuperOdom for
-offline/analysis.
+### Live rate: ROOT CAUSE was Fast-DDS, FIXED with CycloneDDS (2026-06-09)
+The `/ouster/points` drop under SuperOdom (earlier called a "live limitation") was the **ROS 2
+middleware**, not compute. Default **Fast-DDS (`rmw_fastrtps_cpp`)** stalls the large PointCloud2
+publish when several SuperOdom DDS participants are active → `/ouster/points` collapses to ~15 Hz.
+**Switching to CycloneDDS restores a steady 20 Hz.**
+
+How it was isolated — every compute hypothesis ruled out by direct live test:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| RAM | — | 24% used, 5.6 GB free → no |
+| Single-core saturation | driver pinned to a dedicated core (`taskset -c 0` + `nice -20`) | core at 62%, still ~17 Hz → no |
+| UDP buffer overflow | 10 s live delta | **0 drops** (the 1352 were stale) → no |
+| `ros2 topic hz` artifact | reporter on dedicated core + `nice -20` | still ~17 Hz → no |
+| Memory bandwidth | `tegrastats` | `EMC_FREQ 0%` → no |
+| Thermal | `tegrastats` | 66–70 °C → no |
+| **CPU clock** | raised 1497→1984 MHz (sysfs `scaling_max_freq`) | CPU util **dropped to ~50%** but rate stayed ~15 Hz → **no** |
+| Reliable-QoS backpressure | `ros2 topic info -v` | both ends **BEST_EFFORT** → no |
+| `/points` subscription coupling | stopped the only `/points` subscriber | still ~13 Hz with **0 subscribers** → no |
+
+**Decisive isolation:** raw `/ouster/lidar_packets` held **1234 Hz rock-steady** under full load
+while assembled `/ouster/points` collapsed — so the loss is in the driver's **large-PointCloud2
+assembly/publish path**, triggered merely by other SuperOdom DDS participants being alive. That is
+Fast-DDS large-message + multi-participant contention.
+
+**The fix (baked in):**
+```
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp   # on BOTH the driver and SuperOdom (must match)
+```
+Result: `/ouster/points` **20.0 Hz steady** (std 0.011 s), sustained, 69.8 °C @ 1984 MHz. Now in
+the Dockerfile (`ros-humble-rmw-cyclonedds-cpp` + `ENV RMW_IMPLEMENTATION`) and
+`run_superodom_bench.sh`. **This lifts the "not viable live at 1024×20" caveat at the bench level —
+a live *motion* test is still needed to confirm tracking** (stationary, the nodes sit in cold-start
+"throw laser scan").
+
+> **CPU headroom / power mode (secondary):** under CycloneDDS at full 20 Hz, SuperOdom is
+> CPU-bound — cores ~73–84% @ 1984 MHz. Holding 20 Hz at the **stock 25 W cap (1497 MHz)** is
+> **untested** (likely OK since the bottleneck was DDS, but verify). Note `nvpmodel -m 0` (MAXN) is
+> **broken on this module**: the stock `/etc/nvpmodel.conf` MAXN entry references CORE_6/CORE_7 but
+> the **Orin NX 8 GB is a 6-core part** (16 GB = 8-core) → `NVPM ERROR cpu6/online`. Boost instead
+> via per-core sysfs `echo 1984000 > scaling_max_freq` + `performance` governor (non-persistent;
+> reverts on reboot). For a persistent boost, fix the MAXN conf to 6 cores or add a boot unit.
+
+> **Image fixed (2026-06-09):** `superodom:humble` was **rebuilt** with `libzip-dev` (and now
+> `rmw-cyclonedds-cpp`) baked in. BuildKit reused the cached GTSAM/Sophus layers — only the apt
+> layer re-ran. A fresh container no longer aborts `os_driver` on `libzip.so.4`. Use
+> `DOCKER_BUILDKIT=1` for incremental rebuilds; the classic builder (`DOCKER_BUILDKIT=0`) misses the
+> cache and triggers a full ~30-min GTSAM rebuild.
 
 ### Extrinsic correction (2026-06-09) — IMPORTANT
 The initial bench/motion/degeneracy runs used a **placeholder identity** LiDAR↔IMU extrinsic.

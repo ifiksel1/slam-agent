@@ -25,8 +25,12 @@ docker run -d --name "$CTR" --privileged --net=host --ipc=host --shm-size=4gb \
 # NOTE: mount the WHOLE workspace (not just src/) so build/ + install/ persist on the
 # host — otherwise a container restart loses the colcon build and needs a full rebuild.
 
-# 2. ROS2 Ouster driver (publishes /ouster/points ~18Hz, /ouster/imu ~100Hz)
+# 2. ROS2 Ouster driver (publishes /ouster/points 20Hz, /ouster/imu ~100Hz)
+# CRITICAL: RMW_IMPLEMENTATION=rmw_cyclonedds_cpp. Default Fast-DDS stalls the large
+# /ouster/points publish with multiple SuperOdom participants -> ~15Hz. CycloneDDS holds 20Hz
+# (proven A/B 2026-06-09). Baked into the image as ENV too; set here so it survives base changes.
 docker exec -d "$CTR" bash -lc '
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
   ros2 launch ouster_ros driver.launch.py \
     params_file:=/root/ros2_ws/src/ouster_os1_64_driver.yaml viz:=false'
@@ -34,7 +38,9 @@ echo "Ouster driver starting (sensor $SENSOR_IP -> udp_dest $HOST_IP); waiting f
 sleep 25
 
 # 3. SuperOdom (3 nodes: feature_extraction, laser_mapping, imu_preintegration)
+# Same rmw as the driver — they MUST match to interoperate.
 docker exec -d "$CTR" bash -lc '
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
   ros2 launch super_odometry os1_128.launch.py \
     config_file:=/root/ros2_ws/src/SuperOdom/super_odometry/config/os1_64.yaml \
