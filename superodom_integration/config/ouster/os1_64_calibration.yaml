@@ -1,0 +1,30 @@
+%YAML:1.0
+
+# Ouster OS1-64 with built-in IMU.
+# Rotation from laser frame to imu frame, imu^R_laser.
+# OS1 LiDAR and built-in IMU axes are nominally aligned -> identity is a sane
+# starting point. CALIBRATE against your unit's Ouster metadata
+# (lidar_to_sensor_transform / imu_to_sensor_transform) or measure, before flight.
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+
+# Translation from laser frame to imu frame, imu^T_laser (meters).
+# Reference OS1 value below — REPLACE with your measured/metadata lever arm.
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [-0.006253, 0.011775, -0.007645]
+
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+yaw_ratio: 0.0

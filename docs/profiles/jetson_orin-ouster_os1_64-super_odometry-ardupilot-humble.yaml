@@ -90,6 +90,21 @@ build_notes:
   - "Build Livox SDK2 then 'cd src/livox_ros_driver2 && ./build.sh humble' BEFORE colcon build"
   - "SLAM vs localization via laser_mapping_node.localization_mode (+ map_dir .pcd for localization)"
 
-validated: true            # Phase 2 compatibility validated 2026-06-09 (Docker-only path)
-integration_complete: false  # NOT yet installed / bench / flight-tested
-notes: "Phase 2 validated 2026-06-09: compatible ONLY via Docker (host is Ubuntu 20.04, no native Humble) and RAM-tight at the 8GB floor. Not yet installed/flight-tested. Heavier build than EllipseLIO/FAST-LIO. Key draw: 6-DOF degeneracy/uncertainty signal for confined/degenerate environments. Next: Phase 4 Docker image build, then Phase 5 bench testing (props off)."
+phase5_bench:
+  date: "2026-06-09"
+  verdict: "PASS (bench + hand-carried motion). Built + run on the real rig."
+  image: "superodom:humble (arm64, ros:humble-ros-base base)"
+  setup: "single Humble container, host net; in-container ROS2 ouster_ros driver + SuperOdom. FAST-LIVO2 (ROS1) stopped to free the Ouster. See superodom_integration/."
+  results:
+    - "/state_estimation 25Hz, /state_estimation_health true, no NaN, valid map->sensor TF"
+    - "translation tracked (x -0.24..+1.03m), lift tracked (z -0.60..+0.12m)"
+    - "left-90deg rotation measured as -91deg (magnitude accurate)"
+    - "position loop-closure ~0.13m (excl. startup z transient)"
+  before_flight:
+    - "YAW SIGN INVERTED vs ENU (physical left -> negative yaw) — vision_to_mavros needs frame/sign fix or flyaway"
+    - "slow yaw drift ~5-7deg/min at rest (weak DOF); gate on health + stats"
+    - "measure real LiDAR-IMU extrinsic; odom pose.covariance not populated"
+
+validated: true            # Phase 2 + Phase 5 bench validated 2026-06-09
+integration_complete: false  # NOT flight-tested; vision-bridge frame fix pending
+notes: "Phase 2 + Phase 5 bench/motion validated 2026-06-09 on the real rig (Orin NX 8GB, Ouster OS1-64). Runs Docker-only (host Ubuntu 20.04, no native Humble). Working setup in superodom_integration/. Build gotchas fixed: amd64-only desktop-full base -> ros-base arm64; libzip-dev for ouster-sdk; unified colcon build (livox build.sh wipes install/). NEXT: fix vision-bridge yaw-sign/frame, measure extrinsic, then progressive flight test."
