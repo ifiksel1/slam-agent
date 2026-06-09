@@ -17,8 +17,10 @@ SENSOR_IP=192.168.2.60
 HOST_IP=192.168.2.50
 
 # 1. Start the container (host net so the in-container ROS2 driver reaches the sensor)
+# --init: run tini as PID 1 so killed SuperOdom nodes get REAPED instead of piling up as <defunct>
+# zombies across repeated relaunches (plain `sleep infinity` as PID 1 does not reap children).
 docker rm -f "$CTR" 2>/dev/null || true
-docker run -d --name "$CTR" --privileged --net=host --ipc=host --shm-size=4gb \
+docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size=4gb \
   -e ROS_DOMAIN_ID=0 \
   -v "$HOME/superodom_ws:/root/ros2_ws" \
   superodom:humble sleep infinity
