@@ -1,5 +1,12 @@
 # SuperOdom Degeneracy Characterization — Orin NX 8GB / OS1-64 (2026-06-09)
 
+> **CAVEAT (extrinsic):** This run used a placeholder *identity* LiDAR↔IMU extrinsic. That was
+> wrong for this rig and caused the yaw instability (±130° jumps) and "yaw sign inverted" below.
+> Corrected later that day to `[-1,0,0,0,-1,0,0,0,1]` + `use_imu_roll_pitch:true` → replayed path
+> is stable. The **qualitative degeneracy signal (x/yaw uncertainty maxed in corridor) and the
+> health-flag-insensitivity finding stand**; the specific drift/yaw-jump numbers should be
+> re-measured with the corrected extrinsic. See README "Extrinsic correction".
+
 Featureless-corridor test. Because live SuperOdom + ROS2 Ouster driver is compute-marginal
 on this rig (see "Live limitation"), the data was captured to a bag with the **driver alone**
 (clean 20 Hz) and **replayed offline into SuperOdom at 0.5×**. This is the validated method

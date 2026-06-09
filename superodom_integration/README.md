@@ -50,9 +50,21 @@ method here is bag-record (driver only) + offline replay.** For LIVE flight: try
 SuperOdom, use beefier compute, or prefer the lighter EllipseLIO for live and keep SuperOdom for
 offline/analysis.
 
+### Extrinsic correction (2026-06-09) — IMPORTANT
+The initial bench/motion/degeneracy runs used a **placeholder identity** LiDAR↔IMU extrinsic.
+That was wrong for this rig and caused the yaw instability (±130° jumps) and the apparent
+"yaw sign inverted" finding. Corrected to this rig's real Ouster extrinsic (from the working
+FAST-LIO config): `extrinsicRotation_imu_laser = [-1,0,0, 0,-1,0, 0,0,1]` (OS1 IMU is yaw-flipped
+vs the LiDAR), translation `[-0.006253, 0.011775, 0.028535]`, plus `use_imu_roll_pitch: true`.
+**Result: the replayed path is now stable.** SuperOdom still builds the world in the sensor's
+start orientation (not full gravity-up like FAST-LIO), so the map renders **upside-down**; for
+viewing, follow a 180°-roll `map_view` frame; for flight, the vision bridge must apply this
+world-Z/heading correction. Re-run the degeneracy replay with the corrected extrinsic for final
+drift/yaw numbers (the qualitative degeneracy + health-flag findings still stand).
+
 ### ⚠️ Before ArduPilot flight
-1. **Yaw sign is inverted vs ENU** (physical left → negative yaw). The `vision_to_mavros`
-   bridge needs a frame/sign correction or heading will be wrong (flyaway risk).
+1. **World-Z + yaw frame correction** in `vision_to_mavros` (SuperOdom world is not ENU/gravity-up
+   on this rig). Re-verify yaw sign on a fresh motion test now that the extrinsic is fixed.
 2. **Slow yaw drift ~5–7°/min at rest** — yaw is the least-observable DOF; gate fusion on
    `/state_estimation_health` + `/super_odometry_stats` uncertainty.
 3. **Measure the real LiDAR–IMU extrinsic** into `os1_64_calibration.yaml`.

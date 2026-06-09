@@ -3,7 +3,7 @@
     imu_topic: "/ouster/imu"
     laser_topic: "/ouster/points"
     sensor: "ouster"
-    use_imu_roll_pitch: false
+    use_imu_roll_pitch: true
     save_ply: false   # This can affect real-time performance; make sure you have enough memory for saving point cloud
 
     world_frame: "map"

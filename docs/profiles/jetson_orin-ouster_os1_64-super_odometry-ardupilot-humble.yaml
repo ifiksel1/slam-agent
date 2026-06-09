@@ -101,9 +101,9 @@ phase5_bench:
     - "left-90deg rotation measured as -91deg (magnitude accurate)"
     - "position loop-closure ~0.13m (excl. startup z transient)"
   before_flight:
-    - "YAW SIGN INVERTED vs ENU (physical left -> negative yaw) — vision_to_mavros needs frame/sign fix or flyaway"
-    - "slow yaw drift ~5-7deg/min at rest (weak DOF); gate on health + stats"
-    - "measure real LiDAR-IMU extrinsic; odom pose.covariance not populated"
+    - "EXTRINSIC FIXED 2026-06-09: was identity (wrong) -> caused yaw instability/sign issues. Now [-1,0,0,0,-1,0,0,0,1] T[-0.006253,0.011775,0.028535] + use_imu_roll_pitch:true (from working FAST-LIO config). Path now STABLE."
+    - "World renders UPSIDE-DOWN: SuperOdom builds in sensor start orientation (not gravity-up). Viz via 180-roll map_view frame; flight via vision_to_mavros world-Z/heading correction"
+    - "re-verify yaw sign on fresh motion test (extrinsic now correct); odom pose.covariance not populated"
 
 degeneracy_test:
   date: "2026-06-09"

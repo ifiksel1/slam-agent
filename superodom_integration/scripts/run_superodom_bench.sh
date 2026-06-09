@@ -20,8 +20,10 @@ HOST_IP=192.168.2.50
 docker rm -f "$CTR" 2>/dev/null || true
 docker run -d --name "$CTR" --privileged --net=host --ipc=host --shm-size=4gb \
   -e ROS_DOMAIN_ID=0 \
-  -v "$HOME/superodom_ws/src:/root/ros2_ws/src" \
+  -v "$HOME/superodom_ws:/root/ros2_ws" \
   superodom:humble sleep infinity
+# NOTE: mount the WHOLE workspace (not just src/) so build/ + install/ persist on the
+# host — otherwise a container restart loses the colcon build and needs a full rebuild.
 
 # 2. ROS2 Ouster driver (publishes /ouster/points ~18Hz, /ouster/imu ~100Hz)
 docker exec -d "$CTR" bash -lc '
