@@ -1,5 +1,31 @@
 # SuperOdom Degeneracy Characterization — Orin NX 8GB / OS1-64 (2026-06-09)
 
+> **🔁 5× REPEATABILITY + STATS-USABILITY SWEEP 2026-06-09 (5 identical replays of `degen_bag`,
+> 1.0× CycloneDDS) — this is the strongest result; it REVISES the "gate on uncertainty"
+> recommendation below.** Harness `scripts/repeatability.sh` (per-scan CSVs in
+> `~/superodom_ws/results/repeat/run_*.csv`), analysis `scripts/analyze_degeneracy.py`.
+>
+> **#1 Endpoint repeatability is excellent but MISLEADING:**
+> - net return-to-origin: 0.85 / 0.91 / 0.87 / 0.87 / 0.87 m → **mean 0.87 m, sd 0.02 m**.
+>   (net = drift + the operator's real end-offset from the true origin → an UPPER BOUND on drift.)
+> - end-yaw: −19.1…−21.5° (~±1° band). Highly deterministic by endpoint.
+> - **BUT 1 of 5 runs (run 4) had a crash-grade transient:** the pose **oscillated ±13 m between
+>   consecutive scans for ~0.7 s around t=112 s, then recovered** to a normal endpoint
+>   (net 0.87 m!). path 251 m vs ~63 m baseline, peak 13.2 m vs ~7.2 m. Same input, nondeterministic.
+>   **Endpoint error completely hides it** — never validate this stack on return-to-origin alone.
+>
+> **#3 NO `/super_odometry_stats` field is a usable EKF-gating signal in this build** (all 5 runs):
+> - `/state_estimation_health`: stuck **`true`** (0 false scans) even through run 4's explosion.
+> - `uncertainty_x/y/yaw`: **saturated ~1.0 from startup** in good AND bad runs → zero discrimination.
+> - `plane_match_success`: **0 every scan** (not populated). `latency`: large **negative** (clock
+>   mismatch). `n_iter`: pinned at cap (5). `translation_from_last`: **0.03 m while pose jumped 10 m.**
+> - **The transient that would crash a drone is invisible in every self-reported metric.**
+>
+> **→ REVISED GATING RECOMMENDATION:** do NOT gate on health OR on `uncertainty_*` (saturated here).
+> Gate **externally** on a kinematic plausibility check of `/state_estimation` itself: run 4's jumps
+> were ~10 m in ~0.02 s ≈ **500 m/s** implied velocity — reject any pose implying >5–10 m/s. The
+> EKF must sanity-check the pose STREAM, not trust any SuperOdom confidence field.
+
 > **✅ RE-RUN 2026-06-09 (corrected extrinsic + CycloneDDS, 1.0× native) — supersedes the
 > drift/yaw numbers below.** Same `degen_bag`, fixed extrinsic `[-1,0,0,0,-1,0,0,0,1]` +
 > `use_imu_roll_pitch:true`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, replayed at **1.0×** (old run
