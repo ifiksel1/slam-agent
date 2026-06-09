@@ -7,10 +7,11 @@ hardware:
   platform:
     type: jetson
     model: orin_nx
-    ram_gb: 16
-    cpu_cores: 8
+    ram_gb: 8           # 7.65 GB usable — comfortable for EllipseLIO (4GB floor)
+    cpu_cores: 6
+    carrier: "CTI Hadron Dual MIPI"
     gpu: "Ampere (not required — EllipseLIO is CPU-only, no CUDA)"
-    os: "Ubuntu 22.04 (JetPack 6.0)"
+    os: "Ubuntu 20.04 (focal) — host has ROS Noetic only; NO native Humble. ROS 2 via Docker."
   lidar:
     model: ouster_os1_64
     channels: 64
@@ -58,7 +59,7 @@ phase1_config:
       roll: 0.0
       pitch: 0.0
       yaw: 0.0
-  docker: false
+  docker: true          # host is Ubuntu 20.04 (Noetic only); Humble via container. Jazzy alt needs 24.04.
 
 slam_io:
   config_template: "config/os1_64_ouster.yaml (single nested params file)"

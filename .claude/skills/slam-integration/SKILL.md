@@ -195,6 +195,7 @@ If accepted, load [foxglove_setup.md](references/foxglove_setup.md).
 7. After each phase, offer to save a progress YAML for resume capability.
 8. After Phase 4 installation, offer Foxglove Bridge setup (see section above).
 9. **Default to ROS 2.** Recommend ROS 2 (Humble or Jazzy) unless the user has a specific reason for ROS 1. Choose the distro based on algorithm + driver compatibility first, Ubuntu version second. Load `references/ros2_distributions.md` when the user is undecided.
+10. **MRS UAV System is an available stack option.** If the user wants a full control/estimation/planning/simulation stack (not just SLAM), load `references/mrs_uav_system.md`. MRS is **PX4-only + ROS 2 Jazzy-only** — selecting it forces autopilot=PX4, ros=jazzy, docker=true and supersedes Phase 8 planners. Never silently switch a working ArduPilot rig; route the decision through the gates in `docs/MRS_PX4_MIGRATION_ASSESSMENT.md`.
 
 ## Safety Rules
 
@@ -238,6 +239,7 @@ These are auto-populated from real integrations. Always prefer learned data over
 | Phase 3 (config generation) | `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` | EKF params, frame conventions, MAVLink setup |
 | Phase 3 (config generation) | `docs/SLAM_INTEGRATION_TEMPLATE.md` | Config file templates for all SLAM algorithms |
 | Phase 2-5 (`ellipse_lio` or `super_odometry` chosen) | `references/frameworks_ellipse_super.md` | Ground-truth topics, extrinsics, MAVROS bridge, build/ARM64 notes for EllipseLIO & SuperOdom |
+| User wants full autonomy stack / MRS / "MRS UAV System" | `references/mrs_uav_system.md` + `docs/MRS_PX4_MIGRATION_ASSESSMENT.md` | MRS as an alternative PX4-only/Jazzy stack: capabilities, enable path, migration gates |
 | Phase 4 (user accepts Foxglove) | `references/foxglove_setup.md` | Foxglove Bridge setup (ROS 1/2, Docker) |
 | Phase 5-6 (testing/debug) | `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` | Diagnostic procedures, expected values |
 | Phase 5-7 (latency tuning) | `docs/VISION_LATENCY_MEASUREMENT.md` | VISO_DELAY_MS measurement methodology |

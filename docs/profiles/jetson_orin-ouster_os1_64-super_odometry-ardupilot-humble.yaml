@@ -7,10 +7,11 @@ hardware:
   platform:
     type: jetson
     model: orin_nx
-    ram_gb: 16
-    cpu_cores: 8
+    ram_gb: 8           # 7.65 GB usable — AT SuperOdom's 8GB floor (RAM-tight)
+    cpu_cores: 6
+    carrier: "CTI Hadron Dual MIPI"
     gpu: "Ampere (not required — SuperOdom is CPU-only; --gpus all in Docker is for GL display only)"
-    os: "Ubuntu 22.04 (JetPack 6.0)"
+    os: "Ubuntu 20.04 (focal) — host has ROS Noetic only; NO native Humble. ROS 2 via Docker."
   lidar:
     model: ouster_os1_64
     channels: 64
@@ -58,7 +59,19 @@ phase1_config:
       roll: 0.0
       pitch: 0.0
       yaw: 0.0
-  docker: false
+  docker: true          # MANDATORY: host is Ubuntu 20.04, Humble only via container
+
+phase2_validation:
+  date: "2026-06-09"
+  verdict: "COMPATIBLE via Docker only"
+  findings:
+    - "Host OS Ubuntu 20.04/focal -> ROS 2 Humble NOT installable natively. Must use Docker (ros:humble / ros2-jetson-humble images already present)."
+    - "RAM 8GB (7.65 usable) is AT SuperOdom's 8GB floor. Build GTSAM with -j4 max + 4GB swap; watch runtime map-pool RAM. EllipseLIO (4GB floor) is the safer fit on this rig."
+    - "6 cores (not 8). Fine for runtime; just cap build parallelism."
+    - "Ouster OS1-64 + built-in IMU supported (os1_128 config -> scan_line 64). ouster-ros already built in ~/super_ws."
+    - "ArduPilot path OK: /state_estimation (nav_msgs/Odometry) -> vision_to_mavros, gated on /state_estimation_health."
+    - "NOTE: ~/super_ws is the SUPER *planner* (HKU), NOT SuperOdometry — name collision. SuperOdom not yet installed."
+  install_path: "Build a Humble Docker image with SuperOdom + livox_ros_driver2 + GTSAM@4abef92(MARCH_NATIVE=OFF) + Sophus@97e7161 (reuse scripts/patch_sophus_cmake.py)."
 
 slam_io:
   config_template: "config/os1_64.yaml (ROS params) + config/ouster/os1_64_calibration.yaml (OpenCV FileStorage)"
@@ -77,6 +90,6 @@ build_notes:
   - "Build Livox SDK2 then 'cd src/livox_ros_driver2 && ./build.sh humble' BEFORE colcon build"
   - "SLAM vs localization via laser_mapping_node.localization_mode (+ map_dir .pcd for localization)"
 
-validated: false
-integration_complete: false
-notes: "Newly added framework (2026-06-08). Configs/scripts staged but NOT yet bench/flight-tested on this rig. Heavier build than EllipseLIO/FAST-LIO. Run Phase 2 validation + Phase 5 testing before trusting. Key draw: 6-DOF degeneracy/uncertainty signal for confined/degenerate environments."
+validated: true            # Phase 2 compatibility validated 2026-06-09 (Docker-only path)
+integration_complete: false  # NOT yet installed / bench / flight-tested
+notes: "Phase 2 validated 2026-06-09: compatible ONLY via Docker (host is Ubuntu 20.04, no native Humble) and RAM-tight at the 8GB floor. Not yet installed/flight-tested. Heavier build than EllipseLIO/FAST-LIO. Key draw: 6-DOF degeneracy/uncertainty signal for confined/degenerate environments. Next: Phase 4 Docker image build, then Phase 5 bench testing (props off)."
