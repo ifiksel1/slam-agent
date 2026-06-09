@@ -237,6 +237,7 @@ These are auto-populated from real integrations. Always prefer learned data over
 | Phase 1 (ROS version choice) | `references/ros2_distributions.md` | Distro EOL dates, Ubuntu pairing, algorithm support per distro |
 | Phase 3 (config generation) | `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` | EKF params, frame conventions, MAVLink setup |
 | Phase 3 (config generation) | `docs/SLAM_INTEGRATION_TEMPLATE.md` | Config file templates for all SLAM algorithms |
+| Phase 2-5 (`ellipse_lio` or `super_odometry` chosen) | `references/frameworks_ellipse_super.md` | Ground-truth topics, extrinsics, MAVROS bridge, build/ARM64 notes for EllipseLIO & SuperOdom |
 | Phase 4 (user accepts Foxglove) | `references/foxglove_setup.md` | Foxglove Bridge setup (ROS 1/2, Docker) |
 | Phase 5-6 (testing/debug) | `docs/SLAM_INTEGRATION_DIAGNOSTICS.md` | Diagnostic procedures, expected values |
 | Phase 5-7 (latency tuning) | `docs/VISION_LATENCY_MEASUREMENT.md` | VISO_DELAY_MS measurement methodology |

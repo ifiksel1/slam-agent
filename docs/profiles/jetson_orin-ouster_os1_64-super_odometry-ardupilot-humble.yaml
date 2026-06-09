@@ -1,0 +1,82 @@
+fingerprint: "jetson_orin-ouster_os1_64-super_odometry-ardupilot-humble"
+date: "2026-06-08"
+source: "curated"
+description: "Jetson Orin NX with Ouster OS1-64 running SuperOdometry (LIO with 6-DOF degeneracy/uncertainty estimation) on ArduPilot."
+
+hardware:
+  platform:
+    type: jetson
+    model: orin_nx
+    ram_gb: 16
+    cpu_cores: 8
+    gpu: "Ampere (not required — SuperOdom is CPU-only; --gpus all in Docker is for GL display only)"
+    os: "Ubuntu 22.04 (JetPack 6.0)"
+  lidar:
+    model: ouster_os1_64
+    channels: 64
+    interface: ethernet
+    default_ip: "192.168.1.2"
+    points_per_second: 1310720
+    has_imu: true
+    imu_model: ICM-20948
+  camera: null
+  imu_source: lidar
+  flight_controller:
+    model: cube_orange
+    firmware: ardupilot
+    version: "4.5"
+    telemetry_port: "/dev/ttyTHS1"
+    telemetry_baud: 921600
+  communication: mavros
+  ros_version: humble
+  slam_algorithm: super_odometry
+
+phase1_config:
+  workspace_path: "~/ros2_ws"
+  ros_version: "ROS2"
+  ros_distro: "humble"          # Humble only — Dockerfile is osrf/ros:humble; Jazzy untested
+  slam_algorithm: "super_odometry"
+  repo_url: "https://github.com/v4rl-ucy/SuperOdom"
+  package_name: "super_odometry"
+  lidar:
+    type: "ouster"
+    model: "os1-64"
+    topic: "/ouster/points"
+    imu_topic: "/ouster/imu"
+  imu_source: "lidar"
+  flight_controller:
+    type: "ardupilot"
+    connection: "serial"
+    port: "/dev/ttyTHS1"
+    baud: 921600
+  communication: "mavros"
+  transforms:
+    base_to_lidar:
+      x: 0.0
+      y: 0.0
+      z: 0.10
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+  docker: false
+
+slam_io:
+  config_template: "config/os1_64.yaml (ROS params) + config/ouster/os1_64_calibration.yaml (OpenCV FileStorage)"
+  odom_topic: "/state_estimation"           # nav_msgs/Odometry, high-rate IMU-propagated -> vision_to_mavros
+  health_topic: "/state_estimation_health"  # std_msgs/Bool — HARD gate before fusing
+  stats_topic: "/super_odometry_stats"      # super_odometry_msgs/OptimizationStats — per-DoF uncertainty
+  tf_chain: "map -> sensor"
+  bridge: "vision_to_mavros (nav_msgs/Odometry in), gated on /state_estimation_health"
+  caveat: "odom pose.covariance NOT populated by current code; degeneracy_threshold params inert. Use health+stats, not odom covariance, for EKF trust."
+
+build_notes:
+  - "ROS 2 Humble ONLY. Workspace must also contain livox_ros_driver2 (HARD dep even for Ouster) + rviz_2d_overlay_plugins"
+  - "Source-build Sophus @97e7161 and GTSAM @4abef92. GTSAM cmake: -DGTSAM_USE_SYSTEM_EIGEN=ON -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF (MARCH_NATIVE=OFF MANDATORY on aarch64)"
+  - "Ceres: apt libceres-dev (2.1.0) is fine on ARM64, or build @f68321e. Also needs libsuitesparse-dev, libatlas-base-dev, glog"
+  - "GTSAM build ~20-30 min on Jetson; cap make to -j6 to avoid OOM on 8GB"
+  - "Build Livox SDK2 then 'cd src/livox_ros_driver2 && ./build.sh humble' BEFORE colcon build"
+  - "SLAM vs localization via laser_mapping_node.localization_mode (+ map_dir .pcd for localization)"
+
+validated: false
+integration_complete: false
+notes: "Newly added framework (2026-06-08). Configs/scripts staged but NOT yet bench/flight-tested on this rig. Heavier build than EllipseLIO/FAST-LIO. Run Phase 2 validation + Phase 5 testing before trusting. Key draw: 6-DOF degeneracy/uncertainty signal for confined/degenerate environments."
