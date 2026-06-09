@@ -105,6 +105,17 @@ phase5_bench:
     - "slow yaw drift ~5-7deg/min at rest (weak DOF); gate on health + stats"
     - "measure real LiDAR-IMU extrinsic; odom pose.covariance not populated"
 
+degeneracy_test:
+  date: "2026-06-09"
+  method: "bag-record (driver only, clean 20Hz) + offline replay 0.5x — live is compute-marginal"
+  results:
+    - "54.67m featureless-corridor walk; drift ~0.79m (~1.4%); returned to ~start"
+    - "uncertainty x maxed ~94% of run, yaw maxed almost always; z best-constrained (min 0.14)"
+    - "ICP residual 0.03->0.81 tracks degeneracy; yaw jumped +/-130deg at deepest stretch"
+  critical_finding: "/state_estimation_health stayed TRUE the entire degenerate run -> health flag does NOT detect degeneracy. GATE EKF FUSION ON /super_odometry_stats UNCERTAINTY, not health."
+
+live_limitation: "ROS2 ouster driver (1024x20) + SuperOdom overloads 8GB/6-core Orin -> LiDAR ~11Hz -> sync fails -> no live tracking. Driver alone=20Hz. LIVE FLIGHT not viable at 1024x20; try 512x20, lighten SuperOdom, or use lighter EllipseLIO for live. See superodom_integration/results/DEGENERACY_FINDINGS.md"
+
 validated: true            # Phase 2 + Phase 5 bench validated 2026-06-09
 integration_complete: false  # NOT flight-tested; vision-bridge frame fix pending
 notes: "Phase 2 + Phase 5 bench/motion validated 2026-06-09 on the real rig (Orin NX 8GB, Ouster OS1-64). Runs Docker-only (host Ubuntu 20.04, no native Humble). Working setup in superodom_integration/. Build gotchas fixed: amd64-only desktop-full base -> ros-base arm64; libzip-dev for ouster-sdk; unified colcon build (livox build.sh wipes install/). NEXT: fix vision-bridge yaw-sign/frame, measure extrinsic, then progressive flight test."

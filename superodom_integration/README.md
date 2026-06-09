@@ -37,6 +37,19 @@ Motion (lift → move → rotate left 90° → return): translation (x −0.24�
 (z −0.60→+0.12 m) tracked; **rotation measured −91° for a 90° left turn**; position
 loop-closure **~0.13 m** (excl. startup transient).
 
+### Degeneracy characterization (featureless corridor, 2026-06-09)
+See `results/DEGENERACY_FINDINGS.md`. 54.67 m corridor walk (bag-record + 0.5× offline replay).
+- uncertainty x/yaw pinned at max (~94% / always); z best-constrained; drift ~0.79 m / 54.67 m (~1.4%).
+- **`/state_estimation_health` stayed `true` the whole time** — it does NOT detect this degeneracy.
+- Yaw came apart (±130° jumps) at the deepest stretch.
+
+### ⚠️ Live limitation on this rig
+The ROS2 Ouster driver (1024×20) + SuperOdom together overloads the 8 GB/6-core Orin → LiDAR
+drops to ~11 Hz → LiDAR-IMU sync fails → no live tracking. Driver alone holds 20 Hz. **Validated
+method here is bag-record (driver only) + offline replay.** For LIVE flight: try 512×20, lighten
+SuperOdom, use beefier compute, or prefer the lighter EllipseLIO for live and keep SuperOdom for
+offline/analysis.
+
 ### ⚠️ Before ArduPilot flight
 1. **Yaw sign is inverted vs ENU** (physical left → negative yaw). The `vision_to_mavros`
    bridge needs a frame/sign correction or heading will be wrong (flyaway risk).

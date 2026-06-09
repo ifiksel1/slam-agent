@@ -13,3 +13,4 @@ docker_src_fastlivo2/
 # Local tooling artifacts (machine-specific, not project content)
 .catkin_tools/
 .claude/projects/
+superodom_integration/**/*.db3
