@@ -1,0 +1,119 @@
+version: '3.8'
+
+# FAST-LIVO2 SLAM — Ouster OS1-64 + MAVROS (ArduPilot)
+# Mirrors docker-compose.yml conventions for the FAST-LIO-SLAM system.
+#
+# Usage:
+#   # First time (build + start interactive):
+#   docker compose -f docker-compose.fastlivo2.yml up fast-livo2
+#
+#   # Launch full stack (MAVROS + Ouster + FAST-LIVO2):
+#   docker compose -f docker-compose.fastlivo2.yml run --rm fast-livo2 \
+#     roslaunch fast_livo2_integration master.launch
+#
+#   # SLAM only (no MAVROS):
+#   docker compose -f docker-compose.fastlivo2.yml run --rm fast-livo2 \
+#     roslaunch fast_livo2_integration slam.launch
+#
+#   # Autostart service (full stack, restart on failure):
+#   docker compose -f docker-compose.fastlivo2.yml --profile autostart up -d
+
+services:
+  fast-livo2:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastlivo2
+    image: fast_livo2_slam:latest
+    container_name: fast_livo2_slam
+
+    # Host networking: required for Ouster UDP (LiDAR + IMU data to host-bound ports),
+    # ROS master visibility, and MAVROS serial access.
+    network_mode: host
+
+    # Privileged: required for USB serial device access (CubeOrange) and nodelet manager.
+    privileged: true
+
+    environment:
+      - ROS_HOSTNAME=localhost
+      - ROS_MASTER_URI=http://localhost:11311
+      - DISPLAY=${DISPLAY:-:0}
+      # Ouster static IP (set Phase 4 Stage 1 via HTTP API)
+      - OUSTER_IP=192.168.2.60
+      - DEST_IP=192.168.2.50
+
+    volumes:
+      # Config dir — mount for live edits without rebuild
+      - ./fast_livo2_integration/config:/root/slam_ws/src/fast_livo2_integration/config:rw
+      # Launch dir — mount for live edits without rebuild
+      - ./fast_livo2_integration/launch:/root/slam_ws/src/fast_livo2_integration/launch:rw
+      # Scripts dir — yaw-zeroing node + python3-fixed set_origin.py (boot-stable, no rebuild)
+      - ./fast_livo2_integration/scripts:/root/slam_ws/src/fast_livo2_integration/scripts:rw
+      # Logs and PCD saves
+      - ./logs:/root/slam_logs:rw
+      # X11 for rviz (optional)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+    # CubeOrange USB serial by persistent by-id path (survives hotplug / remapping)
+    devices:
+      - /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00:/dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00
+
+    restart: unless-stopped
+
+    # Jetson Orin NX 8GB: leave headroom for OS + sensor stack
+    deploy:
+      resources:
+        limits:
+          cpus: '5'
+          memory: 6G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+    healthcheck:
+      test: ["CMD", "bash", "-c", "source /root/slam_ws/devel/setup.bash && rospack find fast_livo"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    tty: true
+    stdin_open: true
+    command: bash
+
+  # -------------------------------------------------------------------------
+  # Autostart profile: full stack on container start, restart on failure
+  # docker compose -f docker-compose.fastlivo2.yml --profile autostart up -d
+  # -------------------------------------------------------------------------
+  fast-livo2-autostart:
+    extends: fast-livo2
+    container_name: fast_livo2_slam_autostart
+    profiles:
+      - autostart
+    command: >
+      bash -c "
+        mkdir -p /dev/serial/by-id &&
+        ln -sf /dev/ttyACM0 /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00 &&
+        ln -sf /dev/ttyACM1 /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if02 &&
+        source /root/slam_ws/devel/setup.bash &&
+        /root/docker_entrypoint.sh roslaunch fast_livo2_integration master.launch
+      "
+
+  # -------------------------------------------------------------------------
+  # SLAM-only profile (no MAVROS): for bench testing without FC connected
+  # docker compose -f docker-compose.fastlivo2.yml --profile slam-only up
+  # -------------------------------------------------------------------------
+  fast-livo2-slam-only:
+    extends: fast-livo2
+    container_name: fast_livo2_slam_only
+    profiles:
+      - slam-only
+    # Remove FC device for SLAM-only
+    devices: []
+    command: >
+      bash -c "
+        source /root/slam_ws/devel/setup.bash &&
+        roslaunch fast_livo2_integration slam.launch
+      "
+
+volumes:
+  logs:

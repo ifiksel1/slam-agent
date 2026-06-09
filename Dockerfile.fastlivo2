@@ -1,0 +1,193 @@
+# FAST-LIVO2 SLAM Docker Image — Ouster OS1-64 + MAVROS (ArduPilot)
+# LiDAR-inertial-only mode (img_en=0); vision path compiled in but inactive.
+# Architecture: ARM64 (aarch64) — Jetson Orin NX 8GB, JetPack 5.1.2, Ubuntu 20.04
+#
+# Sources vendored via scripts/fetch_docker_sources_fastlivo2.sh into docker_src_fastlivo2/:
+#   FAST-LIVO2      hku-mars/FAST-LIVO2             (latest)
+#   rpg_vikit       xuankuzcr/rpg_vikit             (latest, FAST-LIVO2-specific fork)
+#   Sophus          strasdat/Sophus @ a621ff2e       (non-templated double-only, REQUIRED)
+#   ouster-ros      ultraviewdev_ws ARM64-safe copy  (stock nodelets crash exit 255 on Orin)
+#   vision_to_mavros  ultraviewdev_ws copy
+#   fast_livo2_integration  this repo's generated config/launch package
+#
+# Build: docker build -f Dockerfile.fastlivo2 -t fast_livo2_slam:latest /home/dev/slam-agent
+# Run:   docker compose -f docker-compose.fastlivo2.yml up fast-livo2
+
+FROM ros:noetic-ros-base-focal
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=noetic
+
+LABEL maintainer="SLAM Agent"
+LABEL description="FAST-LIVO2 (LiDAR-inertial) + Ouster OS1-64 + MAVROS — ARM64 Jetson"
+LABEL version="1.0"
+
+# ---------------------------------------------------------------------------
+# System dependencies
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    # Build tools
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    software-properties-common \
+    # ROS build tools
+    python3-catkin-tools \
+    python3-rosdep \
+    python3-rosinstall \
+    python3-rosinstall-generator \
+    python3-wstool \
+    # Math / PCL / OpenCV
+    libeigen3-dev \
+    libpcl-dev \
+    libopencv-dev \
+    libopencv-contrib-dev \
+    libomp-dev \
+    libboost-all-dev \
+    libyaml-cpp-dev \
+    # Ouster SDK dependencies (ouster_client CMakeLists requires all three)
+    libjsoncpp-dev \
+    libspdlog-dev \
+    libcurl4-openssl-dev \
+    # ROS packages
+    ros-${ROS_DISTRO}-pcl-ros \
+    ros-${ROS_DISTRO}-pcl-conversions \
+    ros-${ROS_DISTRO}-tf \
+    ros-${ROS_DISTRO}-tf2-geometry-msgs \
+    ros-${ROS_DISTRO}-tf2-sensor-msgs \
+    ros-${ROS_DISTRO}-tf2-eigen \
+    ros-${ROS_DISTRO}-eigen-conversions \
+    ros-${ROS_DISTRO}-cv-bridge \
+    ros-${ROS_DISTRO}-image-transport \
+    ros-${ROS_DISTRO}-robot-state-publisher \
+    ros-${ROS_DISTRO}-rviz \
+    # MAVROS (ArduPilot connectivity)
+    ros-${ROS_DISTRO}-mavros \
+    ros-${ROS_DISTRO}-mavros-extras \
+    # Networking + debug tools
+    net-tools \
+    iputils-ping \
+    iproute2 \
+    vim \
+    htop \
+    tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Initialize rosdep
+RUN rosdep init || echo "rosdep already initialized" && rosdep update
+
+# ---------------------------------------------------------------------------
+# Install Sophus (non-templated, commit a621ff2e — REQUIRED by FAST-LIVO2)
+# The new templated Sophus (main branch) is INCOMPATIBLE with FAST-LIVO2.
+#
+# CMakeLists fixups needed for CMake 3.x:
+#   1. GET_TARGET_PROPERTY(... LOCATION) removed in CMake 3.x (CMP0026 error).
+#      Replace with explicit path: SET(FULL_LIBRARY_NAME <build_dir>/libSophus.so)
+# ---------------------------------------------------------------------------
+COPY docker_src_fastlivo2/Sophus /tmp/sophus_src
+# Patch CMakeLists.txt for CMake 3.x: GET_TARGET_PROPERTY(LOCATION) is banned by CMP0026.
+# Script is COPYied from scripts/ to avoid multi-line python3 -c parse issues in Dockerfile.
+COPY scripts/patch_sophus_cmake.py /tmp/patch_sophus_cmake.py
+RUN python3 /tmp/patch_sophus_cmake.py && rm /tmp/patch_sophus_cmake.py
+RUN mkdir -p /tmp/sophus_build && \
+    cmake /tmp/sophus_src \
+          -B /tmp/sophus_build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/sophus_build -j$(nproc) && \
+    cmake --install /tmp/sophus_build && \
+    ldconfig && \
+    rm -rf /tmp/sophus_src /tmp/sophus_build
+
+# Install SophusConfig.cmake so FIND_PACKAGE(Sophus) works for vikit_common and fast_livo.
+# Old Sophus (a621ff) export(PACKAGE ...) only writes to the build dir which we deleted above.
+# This hand-authored config points to the installed /usr/local paths.
+RUN mkdir -p /usr/local/lib/cmake/Sophus
+COPY scripts/SophusConfig.cmake /usr/local/lib/cmake/Sophus/SophusConfig.cmake
+
+# ---------------------------------------------------------------------------
+# GeographicLib datasets (required by MAVROS)
+# Mirror of existing Dockerfile pattern.
+# ---------------------------------------------------------------------------
+WORKDIR /tmp
+RUN wget -q https://raw.githubusercontent.com/mavlink/mavros/master/mavros/scripts/install_geographiclib_datasets.sh && \
+    chmod +x install_geographiclib_datasets.sh && \
+    ./install_geographiclib_datasets.sh && \
+    rm install_geographiclib_datasets.sh
+
+# ---------------------------------------------------------------------------
+# Workspace sources
+# Vendored via scripts/fetch_docker_sources_fastlivo2.sh on the host.
+# Structure: ouster-ros/, FAST-LIVO2/, rpg_vikit/, vision_to_mavros/,
+#            fast_livo2_integration/, Sophus/ (no package.xml → catkin ignores)
+# ---------------------------------------------------------------------------
+WORKDIR /root/slam_ws/src
+COPY docker_src_fastlivo2/ /root/slam_ws/src/
+
+# Add CATKIN_IGNORE to Sophus inside src/ (no package.xml, but belt-and-suspenders)
+RUN touch /root/slam_ws/src/Sophus/CATKIN_IGNORE
+
+# ---------------------------------------------------------------------------
+# Fix googletest CMake minimum_required (Ubuntu 20.04 / CMake 3.x compat)
+# ---------------------------------------------------------------------------
+RUN if [ -f /usr/src/googletest/CMakeLists.txt ]; then \
+        sed -i 's/cmake_minimum_required(VERSION 2.8.3)/cmake_minimum_required(VERSION 3.5)/' \
+            /usr/src/googletest/CMakeLists.txt; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Resolve remaining ROS dependencies via rosdep
+# ---------------------------------------------------------------------------
+WORKDIR /root/slam_ws
+RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
+    rosdep install --from-paths src --ignore-src -r -y \
+        --skip-keys="fast_livo vikit_common vikit_ros vikit_py" \
+    || echo "rosdep finished with warnings"
+
+# ---------------------------------------------------------------------------
+# Build workspace
+#
+# Build order: rpg_vikit packages FIRST (vikit_common, vikit_ros), because
+# fast_livo has explicit build_depend on them and a parallel build can race.
+# Then build everything else (catkin resolves remaining deps automatically).
+#
+# OpenCV link order note: vikit and fast_livo link ${OpenCV_LIBS} via
+# find_package(OpenCV). Inside this container all OpenCV is 4.2 from Ubuntu
+# focal apt, so there is no ABI conflict.  The entrypoint applies LD_PRELOAD
+# as an additional guard for the JetPack 4.5 host scenario.
+# ---------------------------------------------------------------------------
+RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
+    catkin config --extend /opt/ros/${ROS_DISTRO} \
+                  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                               -DSophus_DIR=/usr/local && \
+    catkin build vikit_common vikit_ros -j$(nproc) && \
+    catkin build -j$(nproc)
+
+# ---------------------------------------------------------------------------
+# Entrypoint (adapted from docker_entrypoint.sh; Ouster-specific checks)
+# ---------------------------------------------------------------------------
+COPY scripts/docker_entrypoint_fastlivo2.sh /root/docker_entrypoint.sh
+RUN chmod +x /root/docker_entrypoint.sh
+
+# ---------------------------------------------------------------------------
+# Shell environment
+# ---------------------------------------------------------------------------
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
+    echo "source /root/slam_ws/devel/setup.bash" >> /root/.bashrc && \
+    echo "export ROS_HOSTNAME=\${ROS_HOSTNAME:-localhost}" >> /root/.bashrc && \
+    echo "export ROS_MASTER_URI=\${ROS_MASTER_URI:-http://localhost:11311}" >> /root/.bashrc && \
+    echo "# OpenCV ABI fix (harmless no-op inside container; guards against JetPack 4.5 host)" >> /root/.bashrc && \
+    echo "if [ -n \"\$(ls /usr/lib/aarch64-linux-gnu/libopencv_core.so.4.2* 2>/dev/null)\" ]; then" >> /root/.bashrc && \
+    echo "  _OCV_LIBS=\$(ls /usr/lib/aarch64-linux-gnu/libopencv_{core,highgui,imgproc,features2d,calib3d,imgcodecs}.so.4.2* 2>/dev/null | tr '\n' ':' | sed 's/:\$//')" >> /root/.bashrc && \
+    echo "  export LD_PRELOAD=\"\${_OCV_LIBS}\${LD_PRELOAD:+:\$LD_PRELOAD}\"" >> /root/.bashrc && \
+    echo "fi" >> /root/.bashrc
+
+WORKDIR /root/slam_ws
+
+# ROS master + MAVLink serial
+EXPOSE 11311 5760
+
+ENTRYPOINT ["/root/docker_entrypoint.sh"]
+CMD ["bash"]
