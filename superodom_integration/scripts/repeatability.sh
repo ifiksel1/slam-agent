@@ -49,6 +49,11 @@ for i in $(seq 1 "$N"); do
   echo "  nodes up: $up (want 3)"
   # sampler subscribed BEFORE the bag plays (so it catches every scan); self-terminates on idle
   csv="$OUTDIR/run_$i.csv"
+  # CRITICAL: clear any prior csv + .done FIRST. The wait below keys on ${csv}.done, so a
+  # stale marker (e.g. from an earlier batch that reused these run indices) makes the wait
+  # break instantly -> the run races through without playing the bag and the next cleanup
+  # kills it mid-launch. Removing it here makes each run robust to leftovers.
+  docker exec "$CTR" bash -c "rm -f ${csv} ${csv}.done"
   docker exec -d "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && python3 /root/ros2_ws/repeat_sampler.py $csv > /tmp/repeat_log_$i.txt 2>&1"
   sleep 2
   echo "  playing bag (rate 1.0, ~176s)..."
