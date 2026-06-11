@@ -34,7 +34,8 @@ SO="$HOME/superodom_ws/results/field/$BAGNAME"
 FL="$HOME/slam-gpu/bags/$BAGNAME"
 printf '%-12s | %s\n' "framework" "summary (path / peak / final_disp / max_single_step)"
 printf '%-12s | %s\n' "SuperOdom" "$(grep -h 'samples=' "$SO/"*.log 2>/dev/null | tail -1 || echo 'n/a — see '"$SO")"
-printf '%-12s | %s\n' "FAST-LIO" "$(grep -hE 'FASTLIO SUMMARY' /tmp/fl_mon.log 2>/dev/null | tail -1 | sed 's/FASTLIO SUMMARY //' || echo 'n/a')"
+# FAST-LIO's monitor log lives INSIDE the slam_gpu_system container, not on the host — read it there.
+printf '%-12s | %s\n' "FAST-LIO" "$(docker exec slam_gpu_system grep -hE 'FASTLIO SUMMARY' /tmp/fl_mon.log 2>/dev/null | tail -1 | sed 's/FASTLIO SUMMARY //' || echo 'n/a')"
 echo
 echo "maps:  $SO/map.pcd   vs   $FL/fastlio_map.pcd   (open both in CloudCompare)"
 echo "EVAL: lower max_single_step = no divergence; final_disp_from_start ~ loop-closure drift if you returned to start."
