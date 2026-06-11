@@ -1,0 +1,21 @@
+/**:
+  ros__parameters:
+    port: 8765
+    address: 0.0.0.0
+    # use_sim_time:=true for bag replay (follow /clock); set false for live sensor.
+    use_sim_time: true
+    # Whitelist ONLY the EllipseLIO viz topics. The raw /ouster/points organized
+    # cloud is ~3MB/msg @20Hz (~480Mbps) and saturates any remote link (Tailscale/
+    # wifi) -> the websocket send queue backs up and NOTHING renders. /cloud_scan is
+    # the dense, NaN-free equivalent at a fraction of the size. NEVER stream the raw
+    # organized Ouster cloud over a remote bridge.
+    topic_whitelist:
+      - "^/cloud_scan$"
+      - "^/cloud_map$"
+      - "^/ellipselio_path$"
+      - "^/ellipselio_odom$"
+      - "^/analytics$"
+      - "^/tf$"
+      - "^/tf_static$"
+      - "^/clock$"
+    send_buffer_limit: 100000000

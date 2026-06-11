@@ -161,7 +161,11 @@ ouster/os_driver:
     max_failed_reconnect_attempts: 2147483647
     # organized[optional]: whether to generate an organized point cloud. default
     # is organized.
-    organized: true
+    # LIVE ONLY: false drops no-return beams -> dense, NaN-free /ouster/points
+    # (Foxglove stops warning about NaN). Has NO effect on bag replay (the recorded
+    # cloud is already organized w/ NaNs baked in). EllipseLIO is unaffected either
+    # way (it range-filters internally) — this is purely for cleaner visualization.
+    organized: false
     # destagger[optional]: enable or disable point cloud destaggering, default enabled.
     destagger: true
     # min_range[optional]: minimum lidar range to consider (meters).
