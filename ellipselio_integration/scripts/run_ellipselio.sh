@@ -16,10 +16,11 @@ HOST_IP=192.168.2.50
 CONFIG=${1:-/root/ros2_ws/src/ellipselio/config/os1_64_ouster.yaml}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Stage the Foxglove params + odom->path republisher into the mounted workspace so the
-# container sees them at /root/ros2_ws/ (same pattern run_bag.sh uses for the sampler).
+# Stage the Foxglove params + helper nodes into the mounted workspace so the container
+# sees them at /root/ros2_ws/ (same pattern run_bag.sh uses for the sampler).
 cp "$HERE/../config/foxglove_params.yaml" "$HOME/ellipselio_ws/foxglove_params.yaml"
 cp "$HERE/odom_to_path.py"               "$HOME/ellipselio_ws/odom_to_path.py"
+cp "$HERE/cloud_throttle.py"             "$HOME/ellipselio_ws/cloud_throttle.py"
 
 # 1. Start the container. host net so the in-container ROS2 driver reaches the sensor.
 #    --init: tini as PID 1 reaps killed nodes instead of leaving <defunct> zombies.
@@ -51,12 +52,17 @@ docker exec -d "$CTR" bash -lc "
 echo "EllipseLIO starting. Odometry on /ellipselio_odom (nav_msgs/Odometry, IMU rate)."
 sleep 8
 
-# 4. odom->Path republisher: EllipseLIO has no nav_msgs/Path; this gives Foxglove a
-#    /ellipselio_path trajectory line to draw.
+# 4. Viz helpers: odom->Path republisher (/ellipselio_path; EllipseLIO has no Path)
+#    and /cloud_scan throttle (/cloud_scan_lite @5Hz; full /cloud_scan is ~63Mbps,
+#    too heavy for a remote Foxglove link).
 docker exec -d "$CTR" bash -lc "
   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
   python3 /root/ros2_ws/odom_to_path.py"
+docker exec -d "$CTR" bash -lc "
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
+  python3 /root/ros2_ws/cloud_throttle.py 5"
 
 # 5. Foxglove bridge (port 8765), WHITELISTED. The raw /ouster/points organized cloud
 #    (~480Mbps) saturates remote links and stalls the websocket, so the bridge streams
@@ -69,6 +75,6 @@ docker exec -d "$CTR" bash -lc "
     --params-file /root/ros2_ws/foxglove_params.yaml -p use_sim_time:=false"
 echo
 echo "Foxglove: connect to ws://<jetson-ip>:8765  (fixed frame: odom_ellipselio)"
-echo "  topics: /cloud_scan (dense, clean)  /cloud_map (set Decay=0)  /ellipselio_path  /ellipselio_odom"
+echo "  topics: /cloud_scan_lite (dense scan @5Hz)  /cloud_map (set Decay=0)  /ellipselio_path  /ellipselio_odom"
 echo "Verify:  docker exec $CTR bash -lc 'source /opt/ros/humble/setup.bash && ros2 topic hz /ellipselio_odom'"
 echo "Map:     /cloud_map   Scan: /cloud_scan   Analytics: /analytics (watch ram_usage)"

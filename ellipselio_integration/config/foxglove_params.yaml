@@ -6,11 +6,12 @@
     use_sim_time: true
     # Whitelist ONLY the EllipseLIO viz topics. The raw /ouster/points organized
     # cloud is ~3MB/msg @20Hz (~480Mbps) and saturates any remote link (Tailscale/
-    # wifi) -> the websocket send queue backs up and NOTHING renders. /cloud_scan is
-    # the dense, NaN-free equivalent at a fraction of the size. NEVER stream the raw
-    # organized Ouster cloud over a remote bridge.
+    # wifi) -> the websocket send queue backs up and NOTHING renders. NEVER stream the
+    # raw organized Ouster cloud over a remote bridge.
+    # /cloud_scan itself is also heavy (48B/pt x ~8k pts @20Hz ~= 63Mbps) -> stream the
+    # throttled /cloud_scan_lite (~5Hz ~= 16Mbps) from cloud_throttle.py instead.
     topic_whitelist:
-      - "^/cloud_scan$"
+      - "^/cloud_scan_lite$"
       - "^/cloud_map$"
       - "^/ellipselio_path$"
       - "^/ellipselio_odom$"

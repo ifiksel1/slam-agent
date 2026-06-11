@@ -15,13 +15,14 @@ CFG=/root/ros2_ws/src/ellipselio/config
 BAG=${1:-/root/field/apartment_20260611_034239}
 
 while true; do
-  pkill -9 -f 'ellipselio_standalone|component_container_mt|odom_to_path|ros2 bag play' 2>/dev/null
+  pkill -9 -f 'ellipselio_standalone|component_container_mt|odom_to_path|cloud_throttle|ros2 bag play' 2>/dev/null
   sleep 2
   bash -lc "$SRC && ros2 launch ellipselio ellipselio_standalone.launch.py \
       config_path:=$CFG config_file:=os1_64_ouster.yaml \
       use_sim_time:=true rviz:=false > /tmp/ellipselio_fox.log 2>&1" &
   sleep 8
   bash -lc "$SRC && python3 /root/ros2_ws/odom_to_path.py > /tmp/odom_to_path.log 2>&1" &
+  bash -lc "$SRC && python3 /root/ros2_ws/cloud_throttle.py 5 > /tmp/cloud_throttle.log 2>&1" &
   sleep 2
   echo "[loop] playing bag once (monotonic sim-time)..."
   bash -lc "$SRC && ros2 bag play $BAG --clock --rate 1.0 > /tmp/bagplay_fox.log 2>&1"

@@ -58,9 +58,14 @@ link is saturated.
 `ros2 run foxglove_bridge foxglove_bridge --ros-args --params-file foxglove_params.yaml`
 
 Rules of thumb:
-- **Stream the SLAM framework's processed cloud (`/cloud_scan`), not the raw sensor cloud.** Same
-  view, a fraction of the bytes, and no NaN warning (raw organized clouds carry NaN for every
-  no-return beam — normal, but Foxglove warns).
+- **Stream the SLAM framework's processed cloud, not the raw sensor cloud.** No NaN warning (raw
+  organized clouds carry NaN for every no-return beam — normal, but Foxglove warns).
+- **Even the processed cloud may be too heavy for a remote link — throttle it.** EllipseLIO's
+  `/cloud_scan` is the fat "original" Ouster point type: **48 bytes/pt × ~8k pts @20Hz ≈ 63 Mbps**,
+  which still backs up Tailscale (~5 MB Send-Q, ~1 s lag). Throttle to ~5 Hz (`cloud_throttle.py`
+  → `/cloud_scan_lite`, ~16 Mbps) and whitelist the throttled topic. The accumulating `/cloud_map`
+  (Foxglove Decay 0) + `/ellipselio_path` are tiny and stay full-rate, so the live dense scan is
+  the only thing that needs capping.
 - A diagnostic check when "no topics" appears: on the host, `ss -tnp | grep :8765` — a large
   `Send-Q` to the client = link saturation, not a discovery problem.
 - This is the Foxglove-transport twin of the Fast-DDS large-cloud lesson: big PointCloud2 messages
