@@ -48,6 +48,7 @@ benchmark bag. **Boost the clock first** for clean results: `sudo ~/superodom_ws
 Bags land in `~/superodom_ws/field/`. The recorder logs a summary to `~/superodom_ws/field/field_log.txt`.
 
 ## If something looks wrong in the field
+- **`⛔ /ouster/points is NOT publishing`** (preflight) → the sensor isn't streaming (HTTP config can pass while the UDP data stream fails — often a just-power-cycled sensor or a dropped cable). Wait ~20s, check the LiDAR power/cable, re-run. The recorder **refuses to record into a dead stream** (no more silent empty bags).
+- **`⛔ /ouster/points not flowing — skipping this clip`** → the sensor dropped between clips; fix the LiDAR, pick the spot again.
 - "sensor NOT reachable" → check Ouster power + ethernet.
-- "recorder did not start" → re-run the script (it restarts the driver).
-- That's it — if it says **● RECORDING**, it's capturing. Trust it; we evaluate at home.
+- After each clip you get a verdict: **`✓ CLEAN`** (good) or **`⚠⚠ RE-RECORD`** (empty *or* blacked-out → re-walk it). Trust the verdict — that's what makes a bag safe to benchmark.

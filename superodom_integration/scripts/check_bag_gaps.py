@@ -23,11 +23,11 @@ def find_db3(p):
 def scan_topic(cur, topic, thr):
     r = cur.execute("select id from topics where name=?", (topic,)).fetchone()
     if not r:
-        return None
+        return (0, 0.0, 0.0, 0)   # topic absent = 0 messages (treated as empty below)
     ts = [x[0] for x in cur.execute(
         "select timestamp from messages where topic_id=? order by timestamp", (r[0],))]
     if len(ts) < 2:
-        return (0, 0.0, 0.0, 0)
+        return (len(ts), 0.0, 0.0, 0)
     t0 = ts[0]
     rel = [(t - t0) / 1e9 for t in ts]
     worst = worst_t = 0.0
@@ -45,24 +45,24 @@ def check(path):
     if not db:
         print(f"  ✗ {path}: no .db3 found"); return 2
     cur = sqlite3.connect(db).cursor()
-    span = None
-    bad = False
+    bad = empty = False
     lines = []
     for topic, thr, _ in TOPICS:
-        s = scan_topic(cur, topic, thr)
-        if s is None:
-            lines.append(f"    {topic}: (not in bag)"); continue
-        n, worst, wt, nbig = s
-        if worst > DROPOUT_S:
+        n, worst, wt, nbig = scan_topic(cur, topic, thr)
+        if n < 10:
+            empty = True
+            lines.append(f"    ⚠ {topic}: only {n} msgs — sensor was NOT streaming (empty/near-empty)")
+        elif worst > DROPOUT_S:
             bad = True
             lines.append(f"    ⚠ {topic}: {n} msgs — {worst*1000:.0f}ms DROPOUT at t={wt:.1f}s ({nbig} gaps >{thr*1000:.0f}ms)")
         else:
             lines.append(f"    ✓ {topic}: {n} msgs — max gap {worst*1000:.0f}ms (clean)")
     print(f"{os.path.basename(os.path.normpath(path))}:")
     print("\n".join(lines))
-    print("  VERDICT: ⚠⚠ RE-RECORD — sensor blacked out (check the LiDAR cable/tether/power)" if bad
+    print("  VERDICT: ⚠⚠ RE-RECORD — NO sensor data (the driver wasn't publishing)" if empty
+          else "  VERDICT: ⚠⚠ RE-RECORD — sensor blacked out (check the LiDAR cable/tether/power)" if bad
           else "  VERDICT: ✓ CLEAN — good for SLAM benchmarking")
-    return 1 if bad else 0
+    return 1 if (bad or empty) else 0
 
 def main():
     if len(sys.argv) < 2:

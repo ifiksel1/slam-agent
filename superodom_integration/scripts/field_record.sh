@@ -37,28 +37,30 @@ if not dbs: print("  GAP-CHECK: no db3 found"); sys.exit(2)
 cur=sqlite3.connect(dbs[0]).cursor()
 def scan(topic, thr):
     r=cur.execute("select id from topics where name=?",(topic,)).fetchone()
-    if not r: return None
+    if not r: return (topic,0,0,0,0)
     ts=[x[0] for x in cur.execute("select timestamp from messages where topic_id=? order by timestamp",(r[0],))]
-    if len(ts)<2: return (topic,0,0,0)
-    t0=ts[0]; rel=[(t-t0)/1e9 for t in ts]
+    n=len(ts)
+    if n<2: return (topic,n,0,0,0)
+    rel=[(t-ts[0])/1e9 for t in ts]
     worst=worst_t=nbig=0
     for i in range(len(rel)-1):
         dt=rel[i+1]-rel[i]
         if dt>thr: nbig+=1
         if dt>worst: worst, worst_t = dt, rel[i]
-    return (topic,worst,worst_t,nbig)
-bad=False
+    return (topic,n,worst,worst_t,nbig)
+bad=empty=False
 for topic,thr in (('/ouster/points',0.15),('/ouster/imu',0.05)):
-    s=scan(topic,thr)
-    if s is None: continue
-    _,worst,wt,nbig=s
-    if worst>0.3:
+    _,n,worst,wt,nbig=scan(topic,thr)
+    if n<10:
+        empty=True; print(f"  ⚠ {topic}: only {n} msgs — sensor was NOT streaming")
+    elif worst>0.3:
         bad=True; print(f"  ⚠ {topic}: {worst*1000:.0f}ms DROPOUT at t={wt:.1f}s ({nbig} gaps)")
     else:
-        print(f"  ✓ {topic}: max gap {worst*1000:.0f}ms (clean)")
-print("  VERDICT: ⚠⚠ RE-RECORD — sensor blacked out (check the LiDAR cable/tether)" if bad
+        print(f"  ✓ {topic}: {n} msgs, max gap {worst*1000:.0f}ms (clean)")
+print("  VERDICT: ⚠⚠ RE-RECORD — NO sensor data (driver wasn't publishing)" if empty
+      else "  VERDICT: ⚠⚠ RE-RECORD — sensor blacked out (check the LiDAR cable/tether)" if bad
       else "  VERDICT: ✓ CLEAN — good for SLAM benchmarking")
-sys.exit(1 if bad else 0)
+sys.exit(1 if (bad or empty) else 0)
 PY
 }
 
@@ -89,7 +91,13 @@ if ! docker exec "$CTR" bash -lc "$SRC && timeout 4 ros2 topic list 2>/dev/null"
   done
 fi
 RATE=$(docker exec "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && timeout 6 ros2 topic hz /ouster/points 2>/dev/null | grep -oE 'average rate: [0-9.]+' | tail -1")
-echo "  driver: ${RATE:-NO POINTS — check sensor!}"
+if [ -z "$RATE" ]; then
+  warn "  ⛔ /ouster/points is NOT publishing — the sensor isn't streaming, so recording would capture NOTHING."
+  warn "     (The Ouster HTTP config can succeed while the UDP data stream fails — e.g. just power-cycled, or the cable/tether dropped.)"
+  warn "     Fix: confirm the LiDAR is powered + cabled, wait ~20s, check /tmp/field_driver.log, then re-run. Refusing to record into a dead stream."
+  exit 1
+fi
+echo "  driver: $RATE  (streaming ✓)"
 FREEGB=$(df --output=avail -BG "$FIELD_HOST" | tail -1 | tr -d 'G ')
 echo "  disk free: ${FREEGB} GB  (~$((FREEGB/3)) min of raw recording)"
 [ "${FREEGB:-0}" -lt 15 ] && warn "  LOW DISK — clear space before recording!"
@@ -105,6 +113,12 @@ while true; do
   STAMP=$(date +%Y%m%d_%H%M%S)
   NAME="${ENV// /_}_$STAMP"
   read -r -p "  Stand at your START point, then press ENTER to begin recording '$ENV'..." _
+  # verify the sensor is ACTUALLY streaming right now — it can drop between clips (battery/tether),
+  # and recording a dead stream silently produces a 0-message bag. Don't let that happen.
+  if ! docker exec "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && timeout 5 ros2 topic hz /ouster/points 2>/dev/null | grep -q 'average rate'"; then
+    warn "  ⛔ /ouster/points not flowing — the sensor dropped. Skipping this clip; check the LiDAR power/cable, then pick the spot again."
+    continue
+  fi
   docker exec -d "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && ros2 bag record -o $FIELD_CTR/$NAME /ouster/points /ouster/imu /tf_static > /tmp/field_rec_$STAMP.log 2>&1"
   sleep 2
   if docker exec "$CTR" bash -c "pgrep -f 'bag record' >/dev/null"; then
