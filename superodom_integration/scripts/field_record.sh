@@ -25,6 +25,46 @@ mkdir -p "$FIELD_HOST"
 say(){ echo -e "\n\033[1;36m$*\033[0m"; }
 warn(){ echo -e "\033[1;33m$*\033[0m"; }
 
+# Scan a finished bag for sensor dropouts. A simultaneous gap in BOTH /ouster/points and
+# /ouster/imu = the single Ouster ethernet link dropped (e.g. the tether stretched as you
+# walked) — that blackout makes the take useless for SLAM (any odometry diverges on resume).
+# Returns 0 = clean, 1 = dropout. $1 = container bag dir.
+check_gaps(){
+  docker exec -i "$CTR" bash -lc "$SRC && python3 - '$1'" <<'PY'
+import sqlite3, glob, os, sys
+dbs=glob.glob(os.path.join(sys.argv[1],'*.db3'))
+if not dbs: print("  GAP-CHECK: no db3 found"); sys.exit(2)
+cur=sqlite3.connect(dbs[0]).cursor()
+def scan(topic, thr):
+    r=cur.execute("select id from topics where name=?",(topic,)).fetchone()
+    if not r: return None
+    ts=[x[0] for x in cur.execute("select timestamp from messages where topic_id=? order by timestamp",(r[0],))]
+    if len(ts)<2: return (topic,0,0,0)
+    t0=ts[0]; rel=[(t-t0)/1e9 for t in ts]
+    worst=worst_t=nbig=0
+    for i in range(len(rel)-1):
+        dt=rel[i+1]-rel[i]
+        if dt>thr: nbig+=1
+        if dt>worst: worst, worst_t = dt, rel[i]
+    return (topic,worst,worst_t,nbig)
+bad=False
+for topic,thr in (('/ouster/points',0.15),('/ouster/imu',0.05)):
+    s=scan(topic,thr)
+    if s is None: continue
+    _,worst,wt,nbig=s
+    if worst>0.3:
+        bad=True; print(f"  ⚠ {topic}: {worst*1000:.0f}ms DROPOUT at t={wt:.1f}s ({nbig} gaps)")
+    else:
+        print(f"  ✓ {topic}: max gap {worst*1000:.0f}ms (clean)")
+print("  VERDICT: ⚠⚠ RE-RECORD — sensor blacked out (check the LiDAR cable/tether)" if bad
+      else "  VERDICT: ✓ CLEAN — good for SLAM benchmarking")
+sys.exit(1 if bad else 0)
+PY
+}
+
+# tell the terminal to STOP sending focus-in/out (ESC[I/ESC[O) + bracketed-paste markers,
+# which otherwise get captured into the read prompts and corrupt the bag folder name.
+printf '\033[?1004l\033[?2004l'
 # ---------- PREFLIGHT ----------
 say "=== FIELD RECORDER preflight ==="
 ping -c1 -W2 "$SENSOR_IP" >/dev/null 2>&1 && echo "  sensor $SENSOR_IP: UP" || { warn "  sensor $SENSOR_IP NOT reachable — check the Ouster is powered + cabled"; exit 1; }
@@ -59,6 +99,8 @@ say "Ready. For each spot: type a name, walk (LOOP back to start!), press ENTER 
 while true; do
   echo
   read -r -p "Environment name (blank = finish): " ENV
+  # strip ANSI/control junk (terminal focus events like ESC[O / ESC[I land in stdin) + trim
+  ENV=$(printf '%s' "$ENV" | sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' | tr -cd '[:alnum:][:space:],._-' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   [ -z "$ENV" ] && break
   STAMP=$(date +%Y%m%d_%H%M%S)
   NAME="${ENV// /_}_$STAMP"
@@ -76,8 +118,13 @@ while true; do
   SZ=$(du -sh "$FIELD_HOST/$NAME" 2>/dev/null | cut -f1)
   DUR=$(docker exec "$CTR" bash -lc "$SRC && ros2 bag info $FIELD_CTR/$NAME 2>/dev/null | grep -oE 'Duration:[^ ]*[0-9.]+s' | head -1")
   echo "  saved '$ENV': size=$SZ  $DUR"
+  echo "  checking for sensor dropouts (the tether/connection blackout)..."
+  if check_gaps "$FIELD_CTR/$NAME"; then GAP=clean; else GAP=DROPOUT; warn "  ^^ RE-WALK this spot — any SLAM will diverge on a blacked-out take."; fi
   read -r -p "  Did you return to the exact start point? (y/n + any notes): " NOTE
-  echo "$NAME | size=$SZ | $DUR | returned_to_start: $NOTE" >> "$FIELD_HOST/field_log.txt"
+  # log INSIDE the container (it owns the root:root field dir; a host echo as 'dev' gets Permission denied)
+  docker exec -i "$CTR" bash -c "cat >> $FIELD_CTR/field_log.txt" <<EOF
+$NAME | size=$SZ | $DUR | gaps: $GAP | returned_to_start: $NOTE
+EOF
 done
 
 say "Done. $(ls -1d "$FIELD_HOST"/*/ 2>/dev/null | wc -l) bag(s) in $FIELD_HOST"

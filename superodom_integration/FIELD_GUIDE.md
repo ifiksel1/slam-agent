@@ -18,7 +18,14 @@ It will:
 2. ask for an **environment name**,
 3. ask you to stand at your **START** point → press ENTER to record,
 4. you **walk your route**, then press ENTER to stop,
-5. ask if you returned to start, then loop for the next spot.
+5. **auto-check the take for sensor dropouts** → prints `VERDICT: ✓ CLEAN` or `⚠⚠ RE-RECORD`,
+6. ask if you returned to start, then loop for the next spot.
+
+## ⚠ The #1 thing that ruins a take: a sensor blackout
+The Ouster sends LiDAR **and** IMU over **one ethernet cable**. If that link drops even for a second, the whole stream blacks out and **every SLAM framework diverges** when it resumes — the clip is dead past the gap.
+- **Don't stretch the tether.** If you record on a stationary computer and walk away with the LiDAR, the ethernet cable will eventually yank loose. Either **stay within the cable's slack**, or **carry the compute (Jetson) on the rig** with the LiDAR + battery so the only cable is a short, taped-down LiDAR↔Jetson link.
+- After each clip the recorder tells you `✓ CLEAN` or `⚠⚠ RE-RECORD`. **If it says RE-RECORD, re-walk that spot** — don't carry home a blacked-out bag.
+- Check any existing bag yourself: `scripts/check_bag_gaps.py ~/superodom_ws/field/<name>`
 
 ## How to walk for good data
 - **Walk a LOOP and return to the EXACT start point + facing.** Return-to-start = our drift metric (no GPS truth otherwise).
@@ -30,10 +37,13 @@ It will:
 ## Back home (with the agent)
 Reconnect to WiFi and just say: **"process the field bags."** Or per bag:
 ```
-~/slam-agent/superodom_integration/scripts/process_field_bag.sh <env_name>   # the folder name
+scripts/process_field_bag.sh <env_name>   # SuperOdom  -> map.pcd + trajectory + metrics
+scripts/run_fastlio.sh      <env_name>   # FAST-LIO   -> fastlio_map.pcd + trajectory + metrics
+scripts/benchmark_bag.sh    <env_name>   # BOTH on the same bag + a comparison table
 ```
-→ builds `map.pcd` (open in CloudCompare/meshlab), records the trajectory, and reports
-loop-closure drift + any divergence. We can also run EllipseLIO on the same bags to compare.
+`benchmark_bag.sh` first validates the bag is dropout-free, then replays it through each framework
+so you can compare drift / divergence / map sharpness apples-to-apples — the point of recording a
+benchmark bag. **Boost the clock first** for clean results: `sudo ~/superodom_ws/set_cpu_clock.sh boost`.
 
 Bags land in `~/superodom_ws/field/`. The recorder logs a summary to `~/superodom_ws/field/field_log.txt`.
 
