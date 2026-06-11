@@ -37,10 +37,14 @@ ros2 launch ellipselio ellipselio_standalone.launch.py config_file:=<ouster>.yam
 
 ### Tuning & gotchas
 - `lidar.vertical_fov` is **tune-critical** (OS64=42.4, OS128=90.0) — wrong value silently degrades accuracy.
-- `mapping.map_resolution` floor is 0.1 m; raise to 0.15–0.2 if RAM-bound on Orin NX 8GB.
+- ⚠️ **`lidar.rate` MUST equal the sensor's real scan Hz** (20 for OS1-64 @1024x20, NOT the dataset config's 10). EllipseLIO uses `rate` for IMU↔LiDAR association (`match_idx=floor(dt*rate)`) AND deskew period (`scan_time=1/rate`); a 2× error mis-associates IMU to scans → **EKF runs away under motion (observed: 8000 m divergence)**. When porting ANY dataset config, re-pin every rate/timing field to the live sensor.
+- ⚠️ **`mapping.map_resolution` must be ≥ the feature spacing in the sensor's SPARSEST region — finer is NOT safer.** The 0.1 m floor was finer than FAST-LIO (0.5) / SuperOdom (0.2) and **fragmented the few features at feature-poor spots → tensor-voting collapse (`/analytics.num_feats` 1000→<50, `obs_score` 1.0→<0.5, ~all points rejected) → terminal IMU runaway.** Validated fix on OS1-64: **`map_resolution: 0.2`** (also `min_range 0.3`, `max_range 80`) → no runaway, 3/3 clean at boosted clock. Raise further if RAM-bound on Orin NX 8GB.
+- **`/analytics.obs_score` is a usable native degeneracy gate** (drops toward 0 as features collapse) — unlike SuperOdom's health flag. Watch it for confined-space flight.
 - `r_imu_lidar` accepts a 9-element row-major matrix **or** a 4-element quaternion `[x,y,z,w]` (auto-detected by length).
 - `use_sim_time:=false` mandatory for live sensors (default `true` = bags).
-- Internal EKF/tensor-voting weights self-adapt; there is **no** `num_match_points`/filter knob.
+- Internal EKF/tensor-voting weights self-adapt; there is **no** `num_match_points`/filter knob — and **no online-extrinsic flag**, so `r_imu_lidar`/`t_imu_lidar` MUST be the real lever-arm (it cannot self-correct a bad extrinsic the way FAST-LIO's `extrinsic_est_en` can).
+- `/ellipselio_odom` is published **BEST_EFFORT** QoS — a RELIABLE subscriber (or eval sampler) receives **zero** messages. Match BEST_EFFORT. (`ros2 topic hz` masks this by auto-negotiating.)
+- **Compute-marginal at stock clock:** clean at 1984 MHz boost; ~50% of runs diverge at the stock 1497 MHz on this rig. Treat the clock boost as part of the validated config (see Phase 7).
 
 ### ARM64 / Jetson
 Low risk: no CUDA, no x86 intrinsics, OpenMP-based. Watchpoints: (1) `-Ofast` implies `-ffast-math` — if EKF diverges on aarch64 only, override to `-O3`; (2) `PCL_NO_PRECOMPILE` makes builds slow/RAM-hungry — cap `-j` on 8 GB; (3) `kMaxMapPoints=10M` preallocates large pools — watch `/analytics.ram_usage`.
@@ -85,7 +89,8 @@ Config is split: a **ROS params YAML** + a **separate OpenCV FileStorage calibra
 ### Modes & gotchas
 - `laser_mapping_node.localization_mode`: `false` = mapping; `true` loads `.pcd` prior via `map_dir` (still hardcoded to `/path/to/your/pcd` in launch — override it). `read_pose_file`/`init_*` set the seed pose.
 - `scan_line` valid values: 4, 16, 32, 64, 128.
-- ⚠️ **Degeneracy caveats (current code):** `nav_msgs/Odometry.pose.covariance` is **not populated**; `pos_degeneracy_threshold`/`ori_degeneracy_threshold` are declared but **never read from YAML** (inert, default 0.0); `isDegenerate` paths are commented out. → For EKF trust, gate on `/state_estimation_health` + watch `/super_odometry_stats`, do **not** rely on odom covariance or `isDegenerate`.
+- ⚠️ **Degeneracy caveats (current code):** `nav_msgs/Odometry.pose.covariance` is **not populated**; `pos_degeneracy_threshold`/`ori_degeneracy_threshold` are declared but **never read from YAML** (inert, default 0.0); `isDegenerate` paths are commented out. → For EKF trust, gate on `/state_estimation_health` + watch `/super_odometry_stats`, do **not** rely on odom covariance or `isDegenerate`. The health flag stays TRUE even through a full divergence — gate **externally** on kinematic plausibility of `/state_estimation` (reject any pose implying >5–10 m/s).
+- ⚠️ **The "nondeterministic ±10 m transient" is CPU CONTENTION, not an algorithm flaw.** It fired every run when another LIO node shared the Jetson, and **vanished (max-step 9–12 m → 0.23 m) the moment SuperOdom owned all 6 cores.** Do NOT co-locate SuperOdom with another heavy LIO/mapping node; give it the cores (and the clock boost — see Phase 7). Lighter config (`filter_point_size 4`, `max_surface_features 1500`) shrinks it further but isolation is the real fix.
 - Default launch has empty `PROJECT_NAME`, so topics sit at root (`/laser_odometry`, etc.).
 
 ### ARM64 / Jetson
