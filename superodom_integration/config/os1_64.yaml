@@ -19,14 +19,19 @@
     feature_extraction_node:
         scan_line: 64       # Ouster OS1-64 (was 128 on os1_128.yaml)
         min_range: 0.2      #<!-- remove too closed points -->
-        filter_point_size: 3
+        filter_point_size: 4   # TUNED 3->4 (2026-06-11): SuperOdom's nondeterministic transient
+                               # scales with per-scan compute (apartment max-step: heavy iter8/surf3000=60m,
+                               # baseline=20m, this lighter config=~10m). More downsampling -> more real-time
+                               # margin -> smaller transient. Loop closure unchanged (0.19m).
 
     # Laser Mapping Params
     laser_mapping_node:
         mapping_line_resolution: 0.1
         mapping_plane_resolution: 0.2
         max_iterations: 5
-        max_surface_features: 2000
+        max_surface_features: 1500   # TUNED 2000->1500: fewer surface constraints -> lighter per-scan
+                                     # compute -> smaller transient (see filter_point_size note). Transient
+                                     # NOT eliminated -> external kinematic gate on /state_estimation stays mandatory.
 
         # For localization mode
         localization_mode: false
