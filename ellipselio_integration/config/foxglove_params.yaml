@@ -15,8 +15,10 @@
     # and drop feature_image (or throttle) if it backs up.
     topic_whitelist:
       - "^/cloud_scan_lite$"
-      - "^/cloud_map$"
-      - "^/ellipselio_path$"
+      - "^/cloud_scan$"          # registered current scan (cloud_registered); heavy ~63Mbps remote
+      - "^/cloud_map$"           # accumulated map (laser_map)
+      - "^/cloud_effected$"      # points that drove the EKF update (effective/matched points)
+      - "^/ellipselio_path$"     # trajectory (now published natively by the node)
       - "^/ellipselio_odom$"
       - "^/analytics$"
       - "^/photometric/intensity_image$"
