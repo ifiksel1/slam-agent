@@ -26,6 +26,14 @@ docker exec "$CTR" bash -lc '
   CFGDIR=/root/ros2_ws/src/ellipselio/config
   BAG=/root/bags/apartment_20260611_034239
 
+  # Viz-only frame: EllipseLIO anchors the world to the IMU, which is yaw-flipped 180 deg
+  # from the LiDAR (r_imu_lidar). Publish a static odom_ellipselio -> map_lidar (180 deg yaw)
+  # so Foxglove can render the map LiDAR-forward by setting fixed frame = map_lidar. No effect
+  # on the SLAM (TF only). No leading slash -> tf2 requires it (Foxglove strips the published one).
+  ros2 run tf2_ros static_transform_publisher \
+      --x 0 --y 0 --z 0 --yaw 3.14159265 --pitch 0 --roll 0 \
+      --frame-id odom_ellipselio --child-frame-id map_lidar > /tmp/static_tf.log 2>&1 &
+
   # IMPORTANT (QoS): EllipseLIO publishes its viz topics BEST_EFFORT (SensorDataQoS).
   # foxglove_bridge auto-detects a topic`s QoS from a LIVE publisher when it first
   # subscribes -- if the bridge starts before any publisher exists, it defaults to
