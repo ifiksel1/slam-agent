@@ -76,6 +76,30 @@ sim-time jumps backward at loop restart and the node floods "time out of order" 
 publishing. Instead loop by relaunching the node + replaying the bag once per cycle (see
 `ellipselio_integration/scripts/foxglove_replay_loop.sh`).
 
+## ⚠️ Start the bridge AFTER the node — BEST_EFFORT QoS auto-detection
+
+Second "I connected but only see /tf" cause (distinct from the whitelist one): a **QoS
+mismatch**. EllipseLIO (and most LIO) publish their viz topics **BEST_EFFORT**
+(`rclcpp::SensorDataQoS()`); `/tf` is **RELIABLE**. `foxglove_bridge` auto-detects a topic's
+QoS from a **live publisher** when it first subscribes. If the bridge starts **before** any
+publisher exists (e.g. bridge launched first, or a looping demo that relaunches the node), it
+defaults to **RELIABLE** and **silently drops every best-effort topic** — so you see only `/tf`
+(the one reliable topic).
+
+Diagnosis: `ros2 topic info -v /ellipselio_odom` shows `Reliability: BEST_EFFORT`; `/tf` shows
+`RELIABLE`; and only `/tf` renders in Foxglove.
+
+**Fix: start `foxglove_bridge` AFTER the node is publishing** (a few seconds into bag play /
+after the live sensor is up), so it auto-detects BEST_EFFORT. This is the ordering
+`run_ellipselio.sh` uses (node in step 3, bridge in step 5). For a looping bag demo, start the
+bridge a few seconds into the **first** bag play, not before the first node — see
+`coinlio_fusion_integration/scripts/foxglove_bag_demo.sh`. (Restarting just the bridge while the
+publishers are live also fixes a session already in the broken state.)
+
+Note: the foxglove-sdk C++ bridge has no `best_effort_qos_topic_whitelist` param (that was the
+deprecated `ros-foxglove-bridge`); it relies on auto-detection, so ordering is the lever. The
+`max_qos_depth` param (e.g. 25) silences the "Limiting history depth for /tf" warning.
+
 ## Control Script
 
 Generate `scripts/foxglove.sh` with start/stop/restart/status/logs commands following the node control script pattern.

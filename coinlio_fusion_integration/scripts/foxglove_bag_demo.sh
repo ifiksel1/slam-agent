@@ -26,21 +26,34 @@ docker exec "$CTR" bash -lc '
   CFGDIR=/root/ros2_ws/src/ellipselio/config
   BAG=/root/bags/apartment_20260611_034239
 
-  # 1. persistent, whitelisted bridge (stays connected across bag cycles)
-  ros2 run foxglove_bridge foxglove_bridge --ros-args \
-      --params-file /root/ros2_ws/foxglove_params.yaml -p use_sim_time:=true \
-      > /tmp/foxglove_bridge.log 2>&1 &
-  sleep 3
-  echo "[demo] foxglove_bridge up on :8765"
+  # IMPORTANT (QoS): EllipseLIO publishes its viz topics BEST_EFFORT (SensorDataQoS).
+  # foxglove_bridge auto-detects a topic`s QoS from a LIVE publisher when it first
+  # subscribes -- if the bridge starts before any publisher exists, it defaults to
+  # RELIABLE and silently drops every best-effort topic (you only see /tf). So the bridge
+  # must be started AFTER the node is publishing, i.e. a few seconds into the first bag
+  # play. (This is the ordering the production run_ellipselio.sh uses.)
+  bridge_started=0
 
-  # 2. loop: fresh node + one bag play per cycle
+  # loop: fresh node + one bag play per cycle (a persistent node + bag re-play breaks on
+  # the sim-time jump at loop restart -> relaunch per cycle keeps each lifetime monotonic).
   while true; do
     ros2 launch ellipselio ellipselio_standalone.launch.py \
         config_path:=$CFGDIR config_file:=os1_64_ouster.yaml \
         use_sim_time:=true rviz:=false > /tmp/ell_demo.log 2>&1 &
     sleep 8
     echo "[demo] playing apartment bag (photometric fusion)..."
-    ros2 bag play "$BAG" --clock --rate 1.0 > /tmp/play_demo.log 2>&1
+    ros2 bag play "$BAG" --clock --rate 1.0 > /tmp/play_demo.log 2>&1 &
+    BAGPID=$!
+    if [ $bridge_started -eq 0 ]; then
+      sleep 8   # let the best-effort publishers come up under /clock
+      ros2 run foxglove_bridge foxglove_bridge --ros-args \
+          --params-file /root/ros2_ws/foxglove_params.yaml \
+          -p use_sim_time:=true -p max_qos_depth:=25 \
+          > /tmp/foxglove_bridge.log 2>&1 &
+      bridge_started=1
+      echo "[demo] foxglove_bridge up on :8765 (QoS auto-detected from live publishers)"
+    fi
+    wait $BAGPID
     echo "[demo] bag done; relaunching node for next cycle"
     for pid in $(ps -eo pid,comm | awk "/component_container/{print \$1}"); do kill -INT $pid; done
     sleep 3
