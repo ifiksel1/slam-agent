@@ -33,6 +33,7 @@ docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -v "$WS:/root/ros2_ws" \
   -v /home/dev/slam-gpu/bags:/root/bags:ro \
+  -v /home/dev/superodom_ws/degen_bag:/root/bags_extra/degen_bag:ro \
   "$IMAGE" sleep infinity
 
 echo "[dev_up] up. Useful:"

@@ -1,5 +1,12 @@
 # Port plan: COIN-LIO photometric residual → EllipseLIO
 
+> **Project name: IRIS-LIO** — **I**ntensity-**R**einforced **I**terated-**S**tate LiDAR-Inertial
+> Odometry. The fused estimator = EllipseLIO geometry (adaptive-ellipsoid + `obs_score`) ⊕
+> COIN-LIO LiDAR-intensity direct-photometric residual, in one IKFoM update. The "iris/eye"
+> reading also nods to the EllipseLIO lineage. (Container/branch/workspace keep their
+> `coinlio_fusion` names until a stable-checkpoint rename, to avoid churning the validated v1 DDS
+> setup.)
+
 **Goal.** Add COIN-LIO's LiDAR-intensity *direct photometric* residual as a second, stacked
 residual channel inside EllipseLIO's existing IEKF update, so geometry-degenerate viewpoints
 (blank fuselage / nadir-over-wing in the 737 hangar) are constrained by reflectivity texture the
