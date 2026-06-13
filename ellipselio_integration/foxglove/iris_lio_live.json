@@ -1,0 +1,113 @@
+{
+  "configById": {
+    "3D!main": {
+      "followTf": "odom_ellipselio",
+      "followMode": "follow-pose",
+      "scene": { "enableStats": false },
+      "topics": {
+        "/cloud_map": { "visible": true, "colorField": "intensity", "colorMode": "colormap", "colorMap": "turbo" },
+        "/cloud_scan_lite": { "visible": true, "colorField": "intensity", "colorMode": "colormap", "colorMap": "turbo" },
+        "/ellipselio_path": { "visible": true },
+        "/ellipselio_odom": { "visible": true }
+      },
+      "layers": {},
+      "cameraState": {
+        "distance": 25,
+        "perspective": true,
+        "phi": 55,
+        "thetaOffset": 45,
+        "targetOffset": [0, 0, 0],
+        "target": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "foxglovePanelTitle": "IRIS-LIO map + trajectory"
+    },
+    "Plot!infofrac": {
+      "paths": [
+        { "value": "/photometric/info_frac.data", "enabled": true, "timestampMethod": "receiveTime", "label": "info_frac (photo share of constraint)" }
+      ],
+      "xAxisVal": "timestamp",
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "COIN-LIO contribution: info_frac (rises as geometry degenerates)"
+    },
+    "Plot!info": {
+      "paths": [
+        { "value": "/photometric/geo_info.data", "enabled": true, "timestampMethod": "receiveTime", "label": "geo_info" },
+        { "value": "/photometric/photo_info.data", "enabled": true, "timestampMethod": "receiveTime", "label": "photo_info" }
+      ],
+      "xAxisVal": "timestamp",
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Fisher info: geometry vs photometric"
+    },
+    "Plot!activity": {
+      "paths": [
+        { "value": "/photometric/n_rows.data", "enabled": true, "timestampMethod": "receiveTime", "label": "n_rows (active photo residuals)" },
+        { "value": "/photometric/res_rms.data", "enabled": true, "timestampMethod": "receiveTime", "label": "res_rms (intensity residual)" }
+      ],
+      "xAxisVal": "timestamp",
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "Photometric activity: rows + residual RMS"
+    },
+    "Image!intensity": {
+      "imageMode": { "imageTopic": "/photometric/intensity_image" },
+      "foxglovePanelTitle": "Intensity image"
+    },
+    "Image!feature": {
+      "imageMode": { "imageTopic": "/photometric/feature_image" },
+      "foxglovePanelTitle": "Photometric features"
+    },
+    "RawMessages!analytics": {
+      "topicPath": "/analytics",
+      "foxglovePanelTitle": "Analytics (obs_score / obs_min)"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "direction": "row",
+    "splitPercentage": 58,
+    "first": {
+      "direction": "column",
+      "splitPercentage": 62,
+      "first": "3D!main",
+      "second": {
+        "direction": "row",
+        "splitPercentage": 50,
+        "first": "Image!intensity",
+        "second": "Image!feature"
+      }
+    },
+    "second": {
+      "direction": "column",
+      "splitPercentage": 30,
+      "first": "Plot!infofrac",
+      "second": {
+        "direction": "column",
+        "splitPercentage": 43,
+        "first": "Plot!info",
+        "second": {
+          "direction": "column",
+          "splitPercentage": 55,
+          "first": "Plot!activity",
+          "second": "RawMessages!analytics"
+        }
+      }
+    }
+  }
+}
