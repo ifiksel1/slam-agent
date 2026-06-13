@@ -23,6 +23,11 @@
       - "^/analytics$"
       - "^/photometric/intensity_image$"
       - "^/photometric/feature_image$"
+      # photometric CONTRIBUTION diagnostics (Float64, for Foxglove Plot panels):
+      # info_frac = photo share of Fisher info (the "how much is COIN-LIO helping" number),
+      # n_rows = active photo residual rows, res_rms = intensity-residual strength,
+      # geo_info/photo_info = raw Fisher-info magnitudes.
+      - "^/photometric/(n_rows|res_rms|info_frac|geo_info|photo_info)$"
       - "^/tf$"
       - "^/tf_static$"
       - "^/clock$"
