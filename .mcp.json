@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "slam-tools": {
-      "command": "/home/dev/slam-agent/mcp/run_mcp_server.sh",
+      "command": "./mcp/run_mcp_server.sh",
       "args": []
     }
   },

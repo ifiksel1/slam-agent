@@ -1,0 +1,69 @@
+# MAVROS configuration for ArduPilot
+# Optimized for vision position input
+
+# Common configuration
+conn:
+  heartbeat_rate: 1.0
+  timeout: 10.0
+  timesync_rate: 10.0
+  system_time_rate: 1.0
+
+# sys_status
+sys:
+  min_voltage: 10.0
+  disable_diag: false
+
+# sys_time
+time:
+  time_ref_source: "fcu"
+  timesync_mode: MAVLINK
+  timesync_avg_alpha: 0.6
+
+# Vision position configuration
+vision_pose:
+  tf:
+    listen: false
+    frame_id: "map"
+    child_frame_id: "base_link"
+    rate_limit: 45.0
+
+# Vision speed configuration  
+vision_speed:
+  listen_twist: false
+
+# Local position
+local_position:
+  frame_id: "map"
+  tf:
+    send: true
+    frame_id: "map"
+    child_frame_id: "base_link"
+
+# Global position
+global_position:
+  frame_id: "map"
+  tf:
+    send: false
+
+# Setpoint configuration
+setpoint_position:
+  tf:
+    listen: false
+    frame_id: "map"
+
+# IMU
+imu:
+  frame_id: "base_link"
+  
+# Plugin blacklist - disable unnecessary plugins for better performance
+plugin_blacklist:
+  - actuator_control
+  - altitude
+  - hil
+  - home_position
+  - setpoint_accel
+  - setpoint_trajectory
+  - wind_estimation
+  - vibration
+  - adsb
+  - debug_value

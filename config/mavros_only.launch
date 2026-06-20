@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Restart MAVROS alone (e.g. after an FC reboot re-enumerates /dev/ttyACM0),
+       without disturbing the running FAST-LIO / driver / bridge nodes. -->
+  <arg name="fcu_url" default="/dev/ttyACM0:921600" />
+  <node pkg="mavros" type="mavros_node" name="mavros" required="false" clear_params="true" output="screen">
+    <param name="fcu_url" value="$(arg fcu_url)" />
+    <param name="target_system_id" value="1" />
+    <param name="target_component_id" value="1" />
+    <rosparam command="load" file="$(find fast_lio)/config/mavros_apm_config.yaml" />
+  </node>
+</launch>

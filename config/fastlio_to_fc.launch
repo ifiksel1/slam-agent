@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- FAST-LIO (odometry only) -> Hesai JT128 -> MAVROS vision pose to the FC.
+       Deliberately omits SC-PGO (alaserPGO) and the VOXL IMU bridge: the FC is
+       fed RAW FAST-LIO /Odometry via fastlio_mavros_bridge.py, not the
+       loop-closure-corrected PGO pose. -->
+
+  <!-- mRo Pixracer Pro over USB CDC-ACM -->
+  <arg name="fcu_url" default="/dev/ttyACM0:921600" />
+  <arg name="gcs_url" default="" />
+  <arg name="tgt_system" default="1" />
+  <arg name="tgt_component" default="1" />
+
+  <!-- FAST-LIO params (same as mapping_hesai_jt128.launch) -->
+  <rosparam command="load" file="$(find fast_lio)/config/hesai_jt128.yaml" />
+  <param name="feature_extract_enable" type="bool" value="0"/>
+  <param name="point_filter_num" type="int" value="3"/>
+  <param name="max_iteration" type="int" value="3" />
+  <param name="filter_size_surf" type="double" value="0.5" />
+  <param name="filter_size_map" type="double" value="0.5" />
+  <param name="cube_side_length" type="double" value="300" />   <!-- bounded local map (was 1000=never trims); trims map outside 300m to cap ikd-tree growth -->
+  <param name="runtime_pos_log_enable" type="bool" value="0" />
+  <!-- Disable PCD saving: the periodic in-thread save of an ever-growing cloud to USB
+       stalls laserMapping (and grows RAM unbounded). The rosbag captures /cloud_registered,
+       so the map can be regenerated offline. Overrides pcd_save_en:true from hesai_jt128.yaml. -->
+  <param name="pcd_save/pcd_save_en" type="bool" value="0" />
+
+  <!-- 1. Hesai JT128 driver (publishes /lidar_points + /lidar_imu directly in FAST-LIO format) -->
+  <node pkg="hesai_ros_driver" name="hesai_ros_driver_node" type="hesai_ros_driver_node" output="screen" />
+
+  <!-- 2. FAST-LIO mapping (publishes /Odometry) -->
+  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen" />
+
+  <!-- 3. MAVROS to the flight controller -->
+  <node pkg="mavros" type="mavros_node" name="mavros" required="false" clear_params="true" output="screen">
+    <param name="fcu_url" value="$(arg fcu_url)" />
+    <param name="gcs_url" value="$(arg gcs_url)" />
+    <param name="target_system_id" value="$(arg tgt_system)" />
+    <param name="target_component_id" value="$(arg tgt_component)" />
+    <rosparam command="load" file="$(find fast_lio)/config/mavros_apm_config.yaml" />
+  </node>
+
+  <!-- 4. Bridge RAW FAST-LIO /Odometry -> /mavros/vision_pose/pose.
+       Raw /Odometry frame is (+x=LEFT, +y=UP, +z=FORWARD). To get ENU/FLU (fwd=+x,left=+y,up=+z)
+       BOTH position and orientation need the SAME cyclic permutation (one rigid rotation):
+         ENU_x(fwd)=odom_z ; ENU_y(left)=odom_x ; ENU_z(up)=odom_y  ->  matrix [0,0,1, 1,0,0, 0,1,0]
+       NOTE: an earlier identity position_matrix (from a MISLABELED bench) sent scrambled axes to the FC
+       and caused the in-flight drift; corrected below. Orientation uses the quaternion similarity form. -->
+  <node pkg="fast_lio" type="fastlio_mavros_bridge.py" name="fastlio_mavros_bridge" output="screen" launch-prefix="python3">
+    <param name="remap_axes" type="bool" value="true" />
+    <rosparam param="position_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <rosparam param="orientation_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+  </node>
+
+  <!-- 4b. EKF origin for GPS-denied ExternalNav. mavros sends SET_GPS_GLOBAL_ORIGIN when it
+       receives this; ArduPilot needs an origin to produce a usable local position. Repeats
+       (-r 0.1 = every 10s) so it survives the FC-connect race on boot; re-sends are ignored once
+       the origin is locked. *** PLACEHOLDER COORDS (Terni, IT): fine for local GPS-denied hold,
+       but set lat/lon/alt to your real location before any geofence/RTL/global use. *** -->
+  <node name="set_ekf_origin" pkg="rostopic" type="rostopic" output="screen"
+        args="pub -r 0.1 /mavros/global_position/set_gp_origin geographic_msgs/GeoPointStamped '{position: {latitude: 42.56335, longitude: 12.64329, altitude: 163.0}}'" />
+
+  <!-- 5. Foxglove WebSocket bridge: streams map + point-cloud topics to remote
+       viewers (laptop/Android) over ws://<nuc-ip>:8765. Read-only visualization. -->
+  <include file="$(find foxglove_bridge)/launch/foxglove_bridge.launch">
+    <arg name="port" value="8765" />
+    <arg name="address" value="0.0.0.0" />
+  </include>
+
+  <!-- 6. Bandwidth-friendly downsampled live scan (/cloud_registered_lite) for remote
+       viewers over wifi. Raw /cloud_registered is ~20 MB/s; this is ~0.4 MB/s. -->
+  <include file="$(find fast_lio)/config/cloud_lite.launch" />
+
+  <!-- 7. Frame-comparison TF publisher: re-emits /Odometry, /mavros/vision_pose/pose, and
+       /mavros/local_position/pose as named frames (viz_odom / viz_vision / viz_fc) under 'map'
+       so Foxglove shows them as comparable axis triads for calibration debugging. /tf only;
+       no FC interaction. Set ~zero_position:=true to overlay at origin (orientation-only compare). -->
+  <node pkg="fast_lio" type="viz_frames.py" name="viz_frames" output="screen" launch-prefix="python3">
+    <param name="parent_frame" value="map" />
+    <param name="zero_position" value="false" />
+  </node>
+</launch>

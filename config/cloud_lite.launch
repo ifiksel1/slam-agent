@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Bandwidth-friendly live scan for remote viewers over wifi/SSH.
+       Raw /cloud_registered is ~20 MB/s (166 Mbit/s) - too heavy for a wifi tunnel.
+       Throttle to 5 Hz, then voxel-downsample to 0.4 m -> /cloud_registered_lite
+       (~a few hundred KB/s). Read-only; does not touch SLAM or odometry. -->
+  <arg name="rate"      default="5.0" />
+  <arg name="leaf_size" default="0.4" />
+
+  <node pkg="topic_tools" type="throttle" name="cloud_lite_throttle"
+        args="messages /cloud_registered $(arg rate) /cloud_registered_5hz" output="screen"/>
+
+  <node pkg="nodelet" type="nodelet" name="cloud_lite_manager" args="manager" output="screen"/>
+
+  <node pkg="nodelet" type="nodelet" name="cloud_lite_voxel"
+        args="load pcl/VoxelGrid cloud_lite_manager" output="screen">
+    <remap from="~input"  to="/cloud_registered_5hz"/>
+    <remap from="~output" to="/cloud_registered_lite"/>
+    <rosparam subst_value="true">
+      leaf_size: $(arg leaf_size)
+      filter_field_name: ""
+    </rosparam>
+  </node>
+</launch>

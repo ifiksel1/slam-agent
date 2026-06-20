@@ -58,6 +58,8 @@ RUN apt-get update && apt-get install -y \
     ros-${ROS_DISTRO}-robot-localization \
     ros-${ROS_DISTRO}-robot-state-publisher \
     ros-${ROS_DISTRO}-rviz \
+    # Foxglove WebSocket bridge (remote map/point-cloud streaming to laptop/Android)
+    ros-${ROS_DISTRO}-foxglove-bridge \
     # MAVRos (ArduPilot connectivity)
     ros-${ROS_DISTRO}-mavros \
     ros-${ROS_DISTRO}-mavros-extras \

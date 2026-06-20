@@ -1,0 +1,18 @@
+# ArduPilot FC parameters for FAST-LIO external-nav (GPS-denied, vision position-only).
+# Captured 2026-06-12. Load via Mission Planner / MAVProxy / `mavparam set` to reproduce on a reflashed FC.
+# These live in FC EEPROM (persist across FC reboot) but are NOT otherwise in the repo.
+#
+# EKF source set 1: position + yaw from ExternalNav (vision); velocity NOT from external nav.
+# CRITICAL: VELXY/VELZ MUST be 0 (None). Setting them to 6 (ExternalNav) with no velocity
+# source published caused IMU velocity dead-reckoning -> position runaway under motion.
+EK3_SRC1_POSXY,6
+EK3_SRC1_VELXY,0
+EK3_SRC1_POSZ,6
+EK3_SRC1_VELZ,0
+EK3_SRC1_YAW,6
+# Visual odometry / external-nav fusion
+VISO_TYPE,1
+VISO_DELAY_MS,50
+VISO_POS_M_NSE,0.2
+VISO_YAW_M_NSE,0.2
+VISO_POS_X,0.22

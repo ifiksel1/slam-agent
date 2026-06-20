@@ -8,3 +8,9 @@ mcp/__pycache__/
 
 # Vendored Docker build sources (cloned by scripts/fetch_docker_sources.sh)
 docker_src/
+
+# Local machine-specific compose override (USB mount paths, etc.)
+docker-compose.override.yml
+
+# Large flight logs / dataflash .bin (4.7GB) - never commit
+logs/

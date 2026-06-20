@@ -1,0 +1,563 @@
+# =============================================================================
+# SLAM-AGENT PROGRESS TRACKER
+# Purpose: cross-session continuity for Claude. Update after each work session.
+# Format: status = done | in_progress | pending | blocked
+# =============================================================================
+
+meta:
+  project: "FAST-LIO SLAM remote visualization + failure diagnostics"
+  goal: >
+    Stream FAST-LIO map + diagnostic topics from the NUC to a remote computer via
+    Foxglove, to understand WHEN and HOW FAST-LIO fails (GPS-denied drone SLAM).
+  last_updated: "2026-06-20"
+  branch: "boot-services"
+  safety_note: "Read-only visualization only. NEVER arm or command the drone/FC. Also: do NOT change system state (params/configs/y-flip) the user did not explicitly ask to change."
+
+# -----------------------------------------------------------------------------
+# SYSTEM FACTS (stable reference)
+# -----------------------------------------------------------------------------
+system:
+  nuc:
+    host: "revolute@192.168.0.107"
+    hostname: "revolute"
+    ssh: "enabled (port 22); ufw allows ssh"
+    lan_ip: "192.168.0.107"
+  container:
+    name: "slam-hesai-fastlio"
+    image: "slam-system:latest"
+    image_id_current: "3173572c612b   # 2026-06-12: bridge yaw-datum + re-stamp + flip_position_y, laserMapping eigenvalues. (prior: 6849d0d18a89 -> e4b85ce4496e -> 3173572c612b)"
+    network_mode: "host"
+    ros_distro: "noetic"
+  repo:
+    path: "/home/revolute/Documents/slam-agent"
+    launch_file: "config/fastlio_to_fc.launch   # bind-mounted via ./config -> container"
+    config_mount: "./config -> /root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/config (rw)"
+    vendored_src: "docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/src/laserMapping.cpp"
+    vendored_src_note: "docker_src/ is GITIGNORED (private fork convention). Source patch persists on disk + in image, NOT in git."
+  systemd:
+    - "slam-container.service   # docker compose up -d slam-system (oneshot, RemainAfterExit)"
+    - "slam-fastlio.service     # docker exec roslaunch fastlio_to_fc.launch"
+    note: "systemctl start/restart needs root (no passwordless sudo in agent shell). Reboot to apply."
+  sensor: "Hesai JT128 LiDAR (publishes /lidar_points + /lidar_imu directly)"
+  flight_controller: "mRo Pixracer Pro over USB CDC-ACM /dev/ttyACM0 @921600, MAVROS, ArduPilot"
+  fc_ekf_sources: >
+    POSXY=6 POSZ=6 YAW=6 (ExternalNav/vision). GPS1_TYPE=0, no RC source-switch.
+    VELXY/VELZ: CURRENTLY = 6 (user set back 2026-06-12 end-of-session) BUT the VALIDATED value is 0.
+    See T13: VELXY/VELZ=6 with NO velocity source published = the runaway root cause. 0 (None) fixed it.
+    6 only works if velocity is published (FAST-LIO twist is currently zero) -> otherwise runaway returns under motion.
+  fc_frame: "/mavros/local_position/pose = ENU world frame (x=East, y=North, z=Up), ~50Hz. NOT body-relative. mavros auto-converts ArduPilot NED<->ROS ENU. Body=FLU (fwd+x,left+y,up+z) per REP-103; yaw CCW-positive, 0=East."
+  fc_baud: "fcu_url /dev/ttyACM0:921600 (USB CDC-ACM -> baud is cosmetic, USB ignores it). timesync locked ~3ms RTT."
+  fc_params_dump: "config/fc_ekf_params.parm  # captured FC params for reflash reproducibility (NOTE: lists VELXY/VELZ=0, the validated value)"
+  fc_prearm: "PreArm: PRX1: No Data (PRX1_TYPE=2 MAVLink proximity, unfed) + RC_RECEIVER unhealthy (no TX). Block arming; not fixed."
+  fc_audit_deferred: "COMPASS_USE=1 (consider 0 for vision-yaw indoors); EK3_SRC1_POSZ=6 vision height (consider 1=baro); VISO_DELAY_MS=50 (estimate, validate); no loop-closure node (SC-PGO not launched -> drift)."
+
+# -----------------------------------------------------------------------------
+# COMPLETED WORK
+# -----------------------------------------------------------------------------
+tasks:
+  - id: T1
+    title: "Enable SSH server on NUC"
+    status: done
+    detail: "Installed openssh-server, systemctl enable --now ssh, ufw allow ssh. Reachable at 192.168.0.107:22."
+
+  - id: T2
+    title: "Install + persist Foxglove WebSocket bridge"
+    status: done
+    detail: >
+      Installed ros-noetic-foxglove-bridge. Added to Dockerfile (apt block) and to
+      fastlio_to_fc.launch as an <include> on port 8765, address 0.0.0.0. Listening on host net.
+    files: ["Dockerfile", "config/fastlio_to_fc.launch"]
+
+  - id: T3
+    title: "Enable /Laser_map (real internal ikd-tree map), decoupled from odometry"
+    status: done
+    detail: >
+      /Laser_map was hard-disabled in source (if(0) block + commented publish). Implemented a
+      DEDICATED PUBLISHER THREAD (map_publish_thread) that snapshots the ikd-tree under a mutex
+      (lock held only for read-only flatten), serializes + publishes OFF the hot path at 1 Hz.
+      Estimator tree mutations (Add_Points/Delete_Point_Boxes/Build) wrapped in same mutex.
+      Tunable via rosparam map_publish_rate (default 1.0 Hz; <=0 disables).
+      Verified: /Laser_map 1.0 Hz, /Odometry + vision_pose unaffected at 20 Hz.
+    files: ["docker_src/.../FAST-LIO/src/laserMapping.cpp"]
+
+  - id: T4
+    title: "Enable /cloud_effected (matched points / degeneracy visual)"
+    status: done
+    detail: "Uncommented publish_effect_world(pubLaserCloudEffect). Was advertised but never published. Now 20 Hz."
+    files: ["docker_src/.../FAST-LIO/src/laserMapping.cpp"]
+
+  - id: T5
+    title: "Add /fastlio_health scalar diagnostics publisher"
+    status: done
+    detail: >
+      New std_msgs/Float32MultiArray topic at 20 Hz. data = [matched_pts (effct_feat_num),
+      mean_residual (res_mean_last), ekf_update_ms, input_pts_downsampled (feats_down_size)].
+      Published right after publish_odometry in the main loop.
+    files: ["docker_src/.../FAST-LIO/src/laserMapping.cpp"]
+
+  - id: T6
+    title: "Bandwidth-friendly downsampled live scan /cloud_registered_lite"
+    status: done
+    detail: >
+      Raw /cloud_registered = ~20 MB/s (166 Mbit/s) saturates wifi tunnel. cloud_lite.launch:
+      topic_tools throttle /cloud_registered -> 5 Hz, then pcl/VoxelGrid leaf 0.4 m ->
+      /cloud_registered_lite (~4.7 Hz, ~443 KB/s, 47x lighter). Included in fastlio_to_fc.launch.
+    files: ["config/cloud_lite.launch", "config/fastlio_to_fc.launch"]
+
+  - id: T7
+    title: "Rebuild image + persist everything; reboot-verify"
+    status: done
+    detail: >
+      docker compose build slam-system -> new image 6849d0d18a89 with patched source + foxglove.
+      Verified image contents (source markers, fastlio_mapping binary, foxglove_bridge).
+      User rebooted twice; all topics auto-start under systemd at correct freqs. Persistence confirmed.
+
+  - id: T8
+    title: "Establish live MAVROS link to FC (this session)"
+    status: done
+    detail: >
+      FC (mRo Pixracer Pro) was unplugged at session start. After replug it enumerated on host
+      as /dev/ttyACM0+1 (udev: mRo mRoPixracerPro) but NOT inside the 2h-old container. Container
+      is privileged, so created device nodes in-container (mknod c 166 0/1) WITHOUT restarting it,
+      then launched config/mavros_only.launch (fcu_url /dev/ttyACM0:921600). Result: connected:True,
+      mode LOITER, armed:False, 107 /mavros/* topics, /mavros/vision_pose/pose now SUBSCRIBED by
+      /mavros, /mavros/local_position/pose @50Hz.
+    warning: "NON-PERSISTENT: mknod + hand-launched mavros are lost on container restart/reboot.
+      Durable fix = FC plugged in before `docker compose up` (compose maps ttyACM0), or add mavros to boot launch."
+
+  - id: T9
+    title: "Bench test: live FC-vs-SLAM odom/yaw analysis + bag (this session)"
+    status: done
+    detail: >
+      Hand-held move path (fwd/left/up/yawCW/yawCCW, home between each), motors DISARMED. Live readout
+      logs/odom_live.py (FC-prioritized, 2s). Recorded logs/bench_odom_vs_fc.bag (159s, 11.4MB:
+      /Odometry, /mavros/local_position/pose, /tf, /tf_static).
+    findings:
+      - "SLAM healthy throughout: covTr flat ~1.8e-05, returned to home each move."
+      - "FC /mavros/local_position/pose is a CORRECT ENU world frame (x=E,y=N,z=Up): Up->+z, horizontal moves stayed horizontal, fwd/left 90deg apart. Diagonal x/y split is just because drone wasn't facing East at boot."
+      - "REAL ISSUE (still open): forward move (fastest, v=1.18m/s) ran FC pos to 5.4m for a ~1.4m real move then snapped back -> vision REJECTED under fast motion, EKF coasts on IMU. Latency/innovation-gate tuning (VISO_DELAY_MS, EK3 gates). NOT a frame bug."
+      - "odom_live.py SLAM-yaw is computed about +z but SLAM up-axis is +y -> SLAM yaw/dyaw readings INVALID. FC yaw (true ENU) is valid. Fix readout axis before reuse."
+
+  - id: T10
+    title: "Yaw-datum fix in bridge: FC heading starts at 0 (forward=+x)"
+    status: done
+    detail: >
+      Root cause of -158.5deg start heading: EK3_SRC1_* all = 6 (ExternalNav/vision) incl YAW, so
+      heading comes from the vision pipeline, NOT compass. The -158.5deg = yaw baked into the bridge's
+      rotation_matrix R (FAST-LIO inits identity; published start yaw = yaw(R)).
+      FIX: fastlio_mavros_bridge.py now captures yaw0 from first pose and rotates EVERY pose by -yaw0
+      about vertical (BOTH position and orientation -> self-consistent). Param ~zero_initial_yaw (default true).
+      Deployed live (docker cp + rosnode restart, disarmed). VERIFIED: vision_pose yaw=0.0; FC EKF yaw
+      slewed (damped overshoot through 0 to +24 then back) and SETTLED at 0.0 +/-0.2deg, stable >60s.
+      Running EKF re-origined cleanly with NO reboot (user was right; my initial 'needs reboot' call was premature).
+    files: ["docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py"]
+
+  - id: T11
+    title: "P6 root cause + fix: vision timestamp on wrong clock (motion rejection)"
+    status: done
+    detail: >
+      Root cause of forward-motion runaway: the Hesai LiDAR stamps scans on its INTERNAL clock
+      (~23750s uptime); FAST-LIO + bridge forwarded that to /mavros/vision_pose/pose, ~1.78e9 s
+      (~56yr) off the system/FC clock. mavros timesync only syncs the SYSTEM clock to the FC, so
+      the sensor-clock stamp converted to garbage FC-time -> vision mis-timed -> EKF rejects it
+      under motion (timing matters), tolerates at rest. Measured in-container latency: lidar->odom
+      ~14ms, odom->vision ~0.3ms (bridge negligible).
+      FIX (3 parts, all live):
+        (1) Bridge re-stamps vision_pose with rospy.Time.now() (system clock). Param ~restamp_system_time (default true).
+        (2) VISO_DELAY_MS 60 -> 50 on FC (trims residual scan-period + processing latency). Persisted to EEPROM.
+        (3) Verified mavros timesync LOCKED: rtt ~3ms, est_offset stable <1ms. vision_pose stamp age now ~7ms (was ~1.78e12ms).
+      Still TODO: behavioral bench run to confirm translations track without runaway.
+    files: ["docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py"]
+
+  - id: T12
+    title: "Add HtDH translation eigenvalues to /fastlio_health (degeneracy metric)"
+    status: done
+    detail: >
+      laserMapping.cpp h_share_model: h_x cols 0-2 = plane normals = translation Jacobian. Compute
+      M3D HtDH = Hp^T Hp / LASER_POINT_COV, SelfAdjointEigenSolver -> ascending eigenvalues stored
+      in global V3D hdh_eig_pos. /fastlio_health extended 4 -> 7 floats: [...,4=eig_min,5=eig_mid,6=eig_max].
+      eig_min small => degenerate translation axis (corridor/tunnel). Compiles clean (catkin build fast_lio OK).
+      Live on next image (rebuild launched this session).
+    files: ["docker_src/.../FAST-LIO/src/laserMapping.cpp"]
+
+  - id: T13
+    title: "ROOT CAUSE of the motion runaway: EK3_SRC1_VELXY/VELZ=6 with no velocity source"
+    status: "fix-validated-then-user-reverted"
+    detail: >
+      THE big find. EK3_SRC1_VELXY=6 & VELZ=6 (ExternalNav velocity) but NOTHING publishes velocity
+      (FAST-LIO /Odometry twist is all-zero; bridge sends position-only vision_pose). So the EKF had
+      no velocity measurement -> dead-reckoned velocity on the FC IMU -> position ran away during ANY
+      motion, snapped back at rest. SET VELXY=0 & VELZ=0 (None) -> at-rest wander 0.25m -> 0.012m (20x),
+      and run-3 bench showed forward TRACKING+HOLDING cleanly (gap 0.10m @0.6m/s) - runaway gone.
+      ** END OF SESSION: user asked to set VELXY/VELZ back to 6 ** (current live state = 6).
+      With 6 and no velocity published, the runaway WILL return under motion. To make 6 valid, must
+      publish velocity (FAST-LIO twist is zero): (a) bridge differentiates position -> /mavros/vision_speed/speed_vector,
+      or (b) patch laserMapping to fill twist. NEITHER done yet. Validated-good value remains 0.
+    files: ["FC params (EEPROM): EK3_SRC1_VELXY, EK3_SRC1_VELZ"]
+
+  - id: T14
+    title: "NUC/FAST-LIO sweep fixes: pcd_save off, cube_side_length 1000->300"
+    status: done
+    detail: >
+      Full NUC-side audit. Found pcd_save_en=true (interval=-1) writing multi-GB PCDs (3.6GB found) with
+      periodic blocking disk I/O that stalls the SLAM loop + RAM-growth risk -> set pcd_save_en=false in
+      config/hesai_jt128.yaml. Found cube_side_length=1000 (local map never trims -> unbounded ikd-tree on
+      long runs) -> set 300 in config/fastlio_to_fc.launch. Both bind-mounted (reboot-persistent), applied
+      via docker restart. Verified clean: scan_line=128, deskew correct (per-pt time 0..0.05s), IMU good
+      (accel 9.804+/-0.019), NTP synced, no thermal/throttle. Filter sizes 0.5m (coarse, tuning lever).
+    files: ["config/hesai_jt128.yaml", "config/fastlio_to_fc.launch"]
+
+  - id: T15
+    title: "Bridge flip_position_y added (lateral-inversion patch) - SUSPECTED HARMFUL"
+    status: "applied-but-suspect"
+    detail: >
+      To address an observed LEFT->-y reading (should be +y per REP-103), added ~flip_position_y (default true)
+      to fastlio_mavros_bridge.py: negates ONLY published position.y, leaving x/z/orientation untouched.
+      Baked into image 3173572c612b. BUT: evidence it's HARMFUL under motion - it negates vision position-y
+      while the FC IMU senses TRUE motion -> vision fights IMU on y -> innovation spike -> divergence at
+      ~0.5m/s (vs 0.6m/s fine in run-3 WITHOUT flip). At-rest fine (1.6cm) either way. A position-only flip
+      is self-inconsistent (mirrors position not orientation). RECOMMENDED: disable it; if a real lateral
+      mirror exists, fix it consistently in the rotation_matrix/extrinsic (position+orientation together).
+      User chose to KEEP it for now. Toggle ~flip_position_y:=false to revert.
+    files: ["docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py"]
+
+  - id: T16
+    title: "Handedness / lateral-axis (mirror?) investigation - UNRESOLVED"
+    status: blocked
+    detail: >
+      Confirmed (user-labeled) a LEFT move read -y; forward=+x, up=+z, yaw signs correct (CW-,CCW+).
+      forward+x/left-y/up+z is a LEFT-HANDED (mirrored) triple - but a true mirror would ALSO flip yaw,
+      and yaw is correct -> contradiction. Could not resolve: ~7 freehand bench runs FAILED to capture a
+      clean, labeled, HELD, single-axis, fixed-heading LEFT move (moves were out-and-back, too fast >1m/s
+      causing runaway, heading drifting, or unlabeled). The world-ENU->body-FLU analysis (rotate by abs
+      heading) is the right method but needs HELD displaced positions we never captured.
+      NEXT: either brace the drone on a surface at each displaced spot (hand-holding too unsteady), or use
+      transform_calibrator (but it's ROS2/ros2-topic-echo, needs adapting to our ROS1).
+      *** RESOLVED by T18 (2026-06-15): held single-axis attitude bench showed SLAM orientation is a same-handed
+      3-axis CYCLIC PERMUTATION (det +1), NOT a mirror -> the yaw-sign "contradiction" was an axis relabel,
+      not handedness. See T18 fix_sketch for the ENU remap. ***
+    bags: ["logs/bench_run3.bag (cleanest holds: fwd+x gap7cm, up+z, yawCW-90, yawCCW+88)", "bench_run4-7 messy"]
+
+  - id: T17
+    title: "Image rebuilds + FC param dump + reproducibility"
+    status: partial
+    detail: >
+      Image rebuilt twice: e4b85ce4496e (yaw-datum+restamp+eigenvalues), then 3173572c612b (+flip_position_y).
+      All patches verified baked in. FC params dumped to config/fc_ekf_params.parm. STILL NOT IN GIT: configs
+      untracked, docker_src gitignored, FC params only dumped not committed -> a fresh clone/reflash reproduces
+      NONE of this session's work. Git commit + docker_src un-ignore decision still pending (P7).
+
+  - id: T18
+    title: "Attitude (RPY) bench validation -> SLAM orientation is a clean 3-axis cyclic PERMUTATION (frame, not error)"
+    status: done
+    detail: >
+      Static bench, motors DISARMED. Sequence: level home -> roll right -> home -> roll left -> home ->
+      pitch fwd -> home -> pitch back -> home (yaw not exercised). Recorded logs/bench_attitude.bag (66s),
+      analyzed with logs/attitude_check.py (auto-segments held poses, FC EKF vs FAST-LIO /Odometry, FC AHRS
+      /mavros/imu/data cross-check). FC EKF and AHRS agree to <1deg on every pose (roll +-50, pitch +-44) ->
+      FC attitude trustworthy. Matching each held pose, raw FAST-LIO /Odometry orientation maps to physical as:
+        physical ROLL  (FC roll +48 / -49)  -> SLAM YAW   (+49 / -48)
+        physical PITCH (FC pitch +42 / -43) -> SLAM ROLL  (+42 / -43)
+        physical YAW   (not tested)         -> SLAM PITCH (by elimination)
+      i.e. axis cycle  X->Z->Y->X. Magnitudes AND signs match within ~1deg on every pose -> FAST-LIO attitude
+      is ACCURATE; this is purely an axis-relabeling consistent with up=+y (T9), NOT an estimation error.
+      det of the permutation = +1 (proper rotation, no mirror) -> explains why yaw signs always read correct
+      (T16 contradiction RESOLVED: there is no handedness flip; the "mirror" was a same-handed axis permutation).
+    fix_sketch: >
+      Remap SLAM orientation into ENU in fastlio_mavros_bridge.py. Inverse of the measured mapping:
+        phys_roll = slam_yaw ; phys_pitch = slam_roll ; phys_yaw = slam_pitch
+      i.e. sr,sp,sy = euler_from_quaternion(q_slam); q_enu = quaternion_from_euler(sy, sr, sp).
+      Equivalent rotation_matrix (slam->enu, row-major) = [0,0,1, 1,0,0, 0,1,0] BUT note the bridge currently
+      LEFT-multiplies orientation (M*q) which is wrong for a body-axis permutation (needs conjugation M*q*M^-1,
+      or the euler-remap above). The same M is applied to POSITION too, so any change MUST be re-validated for
+      position AND orientation jointly (held single-axis translation test) before trusting -- likely supersedes
+      the flip_position_y hack (T15) and resolves the P8 handedness question.
+      APPLIED to host source fastlio_mavros_bridge.py (new param ~remap_axes default true; euler-remap form, NOT the
+      rotation_matrix left-multiply). NOT YET deployed/persistent: src is NOT bind-mounted (only config/logs/workspace
+      are), file is gitignored (P7), and the live node runs from a devel copy -> needs docker cp to BOTH
+      src/ and devel/lib/fast_lio/ + image rebuild to persist. Live FC still on old (permuted) bridge.
+      Position half (P8) still unvalidated -> run held single-axis TRANSLATION test before trusting full pose.
+    confirmation: >
+      SECOND independent run (logs/bench_attitude_rot.bag, 57s, same routine) reproduced the SAME
+      permutation cleanly: roll right FC roll +44.3 -> SLAM yaw +45.6 ; roll left FC -43.5 -> SLAM yaw -42.7 ;
+      pitch fwd FC pitch +40.5 -> SLAM roll +41.0 ; pitch back FC -41.7 -> SLAM roll -41.2 (all within ~1-2deg,
+      signs preserved). FC EKF vs AHRS agreed to 0.0deg on every segment. Mapping roll->yaw, pitch->roll
+      validated twice -> remap fix (roll<-slam_yaw, pitch<-slam_roll, yaw<-slam_pitch) is correct.
+      NOTE: attitude_check.py auto-segmenter needs >=5s holds; both runs' tilts were ~3-4s, so per-pose
+      numbers were read from the 1s time series, not the auto-segment table (segmenter tweak pending).
+    bags: ["logs/bench_attitude.bag (run1: roll+-50, pitch+-44)", "logs/bench_attitude_rot.bag (run2: roll+-44, pitch+-41)"]
+    files: ["logs/attitude_check.py (new, this session)"]
+    resolution: >
+      RESOLVED + DEPLOYED (2026-06-16). Combined translation+rotation bench (logs/bench_combined2.bag) + a
+      yaw-only run (logs/bench_yaw.bag) settled the full pose mapping:
+        - POSITION: raw /Odometry is ALREADY correct ENU (fwd->+x, left->+y, up->+z). NO transform needed
+          -> ~position_matrix = identity. The earlier "y<->z swap" seen vs /mavros was an artifact of the
+          broken downstream bridge + the VELXY=6 position runaway, NOT a real frame relation.
+        - ORIENTATION: the cyclic permutation, applied as a QUATERNION SIMILARITY transform
+          q_enu = qR * q_odom * qR^-1, qR from orientation_matrix [0,0,1, 1,0,0, 0,1,0].
+          The euler-remap form (first attempt) FAILED on large yaw: physical yaw -> odom_pitch ~90deg ->
+          euler_from_quaternion gimbal lock -> yaw CCW came out -108 (should +90) with spurious roll/pitch.
+          Quaternion form is gimbal-lock free. Live bridge output verified: yaw CW -92, CCW +90, roll/pitch ~0.
+      Bridge refactored: position+orientation DECOUPLED; flip_position_y REMOVED (retires T15); single
+      rotation_matrix coupling removed. DEPLOYED live (docker cp + pipeline relaunch, DISARMED) and PERSISTENT
+      via a docker-compose.override.yml bind-mount of the host bridge over the image copy. Still gitignored (P7).
+      Validation = bridge OUTPUT /mavros/vision_pose/pose (clean, upstream of EKF runaway) for ALL 9 moves.
+    files_final: ["docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py", "logs/pose_check.py (new)", "docker-compose.override.yml (bind-mount)"]
+
+  - id: T19
+    title: "Make the transform + EKF origin automatic & persistent; FC PRX1 prearm fix"
+    status: done
+    detail: >
+      (2026-06-16, all DISARMED.) Wrapped up persistence of this session's work:
+      (1) BRIDGE TRANSFORM persistent: docker-compose.override.yml bind-mounts the host
+          fastlio_mavros_bridge.py over the image copy; fastlio_to_fc.launch now PINS the validated
+          transform explicitly (remap_axes=true, position_matrix=identity, orientation_matrix=[0,0,1,1,0,0,0,1,0])
+          and the stale rotation_matrix rosparam was REMOVED. config/ is bind-mounted so the launch persists.
+      (2) EKF ORIGIN now AUTOMATIC: added node 'set_ekf_origin' to the launch = a repeating (rostopic pub -r 0.1)
+          publish of geographic_msgs/GeoPointStamped to /mavros/global_position/set_gp_origin. mavros-native
+          (no pymavlink). Verified: publishing that msg sets the origin (gp_origin populated 42.56335,12.64329,163);
+          node confirmed publishing the right msg to the right topic. Repeats so it survives the FC-connect race;
+          ArduPilot ignores re-sends once origin locked. *** COORDS ARE PLACEHOLDER (Terni, IT) -- set real
+          lat/lon/alt before geofence/RTL/global use; fine for local GPS-denied hold. ***
+      WHY set_origin.py was abandoned: vision_to_mavros/set_origin.py needs python2 + pymavlink (neither in the
+      container) AND publishes to /mavlink/to not /mavros/mavlink/to -> non-functional here. mavros-native topic
+      is the clean path. The docs/learned set_ekf_origin.py was from a different rig, never wired here.
+      (3) FC PRX1 prearm: PRX1_TYPE was 2 (MAVLink proximity) -> 'PreArm: PRX1: No Data'. Set PRX1_TYPE=0
+          (persisted to FC EEPROM) + rebooted FC -> prearm error cleared (no PreArm broadcast in 45s; system_status
+          back to 3 STANDBY). Reboot dropped the mavros serial link (known USB re-enumeration issue) -> recovered
+          by relaunching the pipeline; FC re-enumerated on the SAME /dev/ttyACM0, device was NOT stale.
+      (4) BAKED INTO IMAGE (2026-06-16): docker commit slam-hesai-fastlio -> slam-system:latest
+          (new id 5e5a726b8610, 12.5GB). Verified a FRESH container (no bind-mount) has the fixed bridge
+          (q_perm/position_matrix present). The earlier bridge bind-mount in docker-compose.override.yml was
+          then REMOVED (image is now authoritative; override keeps only the USB mount). systemd boot runs
+          'docker compose up -d slam-system' (no --build) so it reuses the baked image. A future 'compose build'
+          rebuilds from the Dockerfile which COPYs docker_src (still has the fix) -> stays consistent.
+      RESIDUAL (P7, deferred by user): still NOT in git. docker_src gitignored; a fresh clone lacks the fix
+          until committed/un-ignored. Reproducibility-only; runtime persistence is solid.
+    files: ["slam-system:latest (committed)", "docker-compose.override.yml", "config/fastlio_to_fc.launch", "FC param PRX1_TYPE=0 (EEPROM)"]
+
+  - id: T20
+    title: "Thumbdrive: stable UUID fstab mount (fixes broken container /mnt/usb)"
+    status: done
+    detail: >
+      (2026-06-16.) Post-reboot verify found the container /mnt/usb was NOT the thumbdrive: udisks auto-mounted
+      the SanDisk (UUID bd2f03a0-195c-498f-bb85-ec6119e529db, /dev/sda1, 931.5G ext4) at
+      /media/revolute/<uuid>1 (trailing '1' suffix), but docker-compose.override.yml bind-mounted
+      /media/revolute/<uuid> (NO '1') -> docker created an EMPTY dir there (on the internal NVMe) and mounted
+      THAT. So writes to /mnt/usb hit the internal disk, not the stick. Root cause: the stale docker-created
+      <uuid> dir made udisks append '1' -> self-perpetuating mismatch.
+      FIX: added an fstab entry by UUID to a FIXED path:
+        UUID=bd2f03a0-195c-498f-bb85-ec6119e529db  /mnt/thumbdrive  ext4  defaults,nofail,noatime  0  2
+      (nofail = boot won't hang if drive absent; being in fstab also stops udisks /media auto-mount + suffix drift).
+      Repointed override.yml: /mnt/thumbdrive:/mnt/usb:rw. Recreated container -> verified /mnt/usb == /dev/sda1,
+      writable, and a file written inside the container appears on the host /mnt/thumbdrive (= the real stick).
+      Persistent across reboot (fstab + override on disk, baked image). NOTE: gp_origin reads empty after a
+      mavros restart even though the FC origin is still set (ArduPilot doesn't re-broadcast a locked origin).
+      Also observed system_status=5 CRITICAL = 'PreArm: GCS failsafe on' (GCS was disconnected) -> clears on GCS reconnect.
+    files: ["/etc/fstab (host)", "docker-compose.override.yml"]
+
+  - id: T21
+    title: "ROOT CAUSE of the flight drift: position_matrix was identity (wrong) -> scrambled position frame to FC"
+    status: "fixed-and-bench-validated"
+    detail: >
+      (2026-06-16.) First flight after the transform work DRIFTED (right, then forward; pilot landed it).
+      User ruled out the velocity config (P9) and the flip_position_y theory. Diagnosis from the bench data +
+      user's frame spec: the raw /Odometry frame is (+x=LEFT, +y=UP, +z=FORWARD). My bench analysis MISLABELED
+      the translation moves (matched axes to assumed ENU instead of the actual move SEQUENCE), so I wrongly set
+      position_matrix=IDENTITY. With identity, the FC received position with scrambled axes (it read odom_x=left
+      as forward, odom_y=up as left, odom_z=fwd as up) -> position-hold corrections applied in the wrong axes ->
+      uncontrollable drift in flight. Orientation was fine (cyclic permutation, cross-checked vs FC IMU attitude).
+      The bench could not reveal it: hand-moving the vehicle made the numbers self-consistent under the wrong labels;
+      only closed-loop flight exposed it.
+      FIX: position needs the SAME cyclic permutation as orientation (one rigid rotation):
+        ENU_x(fwd)=odom_z ; ENU_y(left)=odom_x ; ENU_z(up)=odom_y  ->  position_matrix = [0,0,1, 1,0,0, 0,1,0]
+      Applied: config/fastlio_to_fc.launch pins position_matrix=[0,0,1,1,0,0,0,1,0]; bridge .py default corrected
+      to match; pipeline relaunched (verified live param + 20Hz vision_pose); image re-baked (docker commit ->
+      slam-system:latest sha 825038356ce3). Supersedes the identity-position claim in T18/T20.
+      *** DO NOT RE-FLY until a correctly-LABELED re-bench (label moves by SEQUENCE, not assumed ENU) confirms the
+      bridge OUTPUT gives fwd->+x, left->+y, up->+z. Bench-validate before flight. *** [[multimodal-robot-modes]]
+    files: ["config/fastlio_to_fc.launch", "docker_src/.../fastlio_mavros_bridge.py", "slam-system:latest (re-committed 825038356ce3)"]
+    rebench_2026_06_20: >
+      VALIDATED (motors DISARMED). New tool logs/vision_bench.py reads the BRIDGE OUTPUT
+      /mavros/vision_pose/pose directly (upstream of EKF runaway), captures a HOME baseline, prints
+      per-axis displacement + plain-language verdict so moves are labeled by ACTUAL physical action
+      in real time (fixes the T16/T21 mislabeling failure mode). Held single-axis moves, heading constant:
+        FORWARD -> dx=+0.63m (y=+0.04, z=+0.08)  -> +x  PASS
+        LEFT    -> dy=+0.65m (x=+/-0.04, z=+0.14) -> +y  PASS
+        UP      -> dz=+0.56m (x=-0.05, y=+0.02)   -> +z  PASS
+      covTr flat ~9e-06 throughout (no divergence). position_matrix=[0,0,1,1,0,0,0,1,0] CONFIRMED correct.
+      Bag: logs/bench_t21_pos.bag (7MB: vision_pose, Odometry, local_position, imu, tf). Live log: logs/vb_live.log.
+      ** Frame is proven, but flight still BLOCKED by P9: EK3_SRC1_VELXY/VELZ verified live = 6 with NO velocity
+         source published -> independent motion-runaway config (T13). Resolve P9 (publish velocity OR set VEL*=0)
+         before flight. ** Tools added: logs/vision_bench.py.
+
+# -----------------------------------------------------------------------------
+# CODE CHANGES (source of truth for what was modified)
+# -----------------------------------------------------------------------------
+changes:
+  - file: "Dockerfile"
+    change: "Added 'ros-${ROS_DISTRO}-foxglove-bridge' to apt install block."
+    tracked_in_git: true
+  - file: "config/fastlio_to_fc.launch"
+    change: "Added foxglove_bridge include (node 5) + cloud_lite.launch include (node 6)."
+    tracked_in_git: "untracked (new-ish file on boot-services)"
+  - file: "config/cloud_lite.launch"
+    change: "NEW. Throttle+VoxelGrid -> /cloud_registered_lite. Args: rate=5.0, leaf_size=0.4."
+    tracked_in_git: false
+  - file: "docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/src/laserMapping.cpp"
+    change: >
+      (1) <atomic> include + globals: std::mutex ikdtree_mtx, atomic map_pub_thread_run, double map_publish_rate.
+      (2) map_publish_thread() before main(): locked flatten snapshot -> publish /Laser_map.
+      (3) Wrapped Add_Points / Delete_Point_Boxes / Build in lock_guard(ikdtree_mtx).
+      (4) Uncommented publish_effect_world (enables /cloud_effected).
+      (5) Added /fastlio_health Float32MultiArray publisher after publish_odometry.
+      (6) Thread launch in main() + join on shutdown.
+    tracked_in_git: false
+    warning: "GITIGNORED. Lives on disk + baked into image only. Lost if docker_src is wiped."
+  - file: "docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/src/fastlio_mavros_bridge.py"
+    change: >
+      THREE param-gated additions (all default true): (1) yaw-datum ~zero_initial_yaw - capture yaw0 from
+      first pose, rotate every pose by -yaw0 about vertical (position+orientation) -> FC heading starts at 0.
+      (2) re-stamp ~restamp_system_time - stamp vision_pose with rospy.Time.now() (system clock) instead of
+      the LiDAR sensor clock, so mavros timesync aligns it to the FC. (3) ~flip_position_y - negates ONLY
+      position.y (T15, SUSPECTED HARMFUL under motion - see T15). Preserves rotation_matrix R.
+    tracked_in_git: false
+    warning: "GITIGNORED (docker_src). Baked into image 3173572c612b only, NOT in git. Lost if docker_src wiped."
+  - file: "docker_src/.../FAST-LIO/src/laserMapping.cpp (eigenvalues)"
+    change: "T12: HtDH translation-block eigenvalues -> global hdh_eig_pos; /fastlio_health 4->7 floats [..,eig_min,mid,max]."
+    tracked_in_git: false
+  - file: "config/hesai_jt128.yaml"
+    change: "T14: pcd_save_en true->false (was writing multi-GB PCDs + blocking disk I/O)."
+    tracked_in_git: "untracked"
+  - file: "config/fastlio_to_fc.launch"
+    change: "T14: cube_side_length 1000->300 (bound ikd-tree growth)."
+    tracked_in_git: "untracked"
+  - file: "config/fc_ekf_params.parm"
+    change: "T17 NEW: dumped FC params (EK3_SRC*, VISO_*) for reflash reproducibility. Lists VELXY/VELZ=0 (validated value)."
+    tracked_in_git: "untracked"
+
+# -----------------------------------------------------------------------------
+# TOPICS (current live state, verified post-reboot)
+# -----------------------------------------------------------------------------
+topics:
+  inputs:
+    - {name: /lidar_points, freq_hz: 20,  role: "raw LiDAR geometry input"}
+    - {name: /lidar_imu,    freq_hz: 430, role: "IMU propagation input"}
+  core:
+    - {name: /Odometry,                  freq_hz: 20, role: "pose + covariance + twist"}
+    - {name: /path,                      freq_hz: 2,  role: "trajectory history"}
+    - {name: /mavros/vision_pose/pose,   freq_hz: 20, role: "pose sent to FC (consumer)"}
+  map_and_registration:
+    - {name: /Laser_map,             freq_hz: 1,  bw: "243 KB/s", role: "internal ikd-tree map (ghosting=registration broken)"}
+    - {name: /cloud_registered,      freq_hz: 20, bw: "20.75 MB/s", role: "current scan in world frame (HEAVY - not for wifi)"}
+    - {name: /cloud_registered_body, freq_hz: 20, bw: "20.27 MB/s", role: "current scan body frame (HEAVY - not for wifi)"}
+    - {name: /cloud_registered_lite, freq_hz: 5,  bw: "443 KB/s",  role: "downsampled scan for remote viz"}
+    - {name: /cloud_effected,        freq_hz: 20, bw: "504 KB/s",  role: "matched points = degeneracy visual (BEST indicator)"}
+  diagnostics:
+    - name: /fastlio_health
+      freq_hz: 20
+      type: std_msgs/Float32MultiArray
+      data: ["[0]=matched_pts (drop=degeneracy)", "[1]=mean_residual (spike=bad fit)", "[2]=ekf_update_ms (->50=overload)", "[3]=input_pts", "[4]=HtDH_eig_min (small=degenerate axis)", "[5]=HtDH_eig_mid", "[6]=HtDH_eig_max"]
+      note: "eig_* added T12; live on the post-rebuild image. Old running binary still publishes 4 elements until reboot."
+  bridge:
+    - {name: "foxglove_bridge", port: 8765, status: "listening 0.0.0.0:8765"}
+
+# -----------------------------------------------------------------------------
+# REMOTE VISUALIZATION
+# -----------------------------------------------------------------------------
+remote_viz:
+  bridge_url: "ws://192.168.0.107:8765"
+  ssh_tunnel: "ssh -fN -L 8765:localhost:8765 revolute@192.168.0.107   # then connect ws://localhost:8765"
+  reason_for_tunnel: "wifi bandwidth-limited; ufw may block 8765; tunnel rides port 22"
+  fixed_frame: "camera_init"
+  light_topic_set_total: "~11 Mbit/s (fits wifi)"
+  light_topics: [/Laser_map, /cloud_registered_lite, /cloud_effected, /path, /Odometry, /fastlio_health]
+  do_not_subscribe: [/cloud_registered, /cloud_registered_body]  # ~330 Mbit/s combined, saturates link
+  remote_machine:
+    host: "shannon-mini (Ubuntu 22.04)"
+    foxglove: "Studio v2.54.0 (portable extract)"
+    layout: "/home/shannon-mini/Documents/fastlio_slam_layout.json"
+
+# -----------------------------------------------------------------------------
+# FAILURE-ANALYSIS REFERENCE (how to read the topics)
+# -----------------------------------------------------------------------------
+failure_signatures:
+  rule: "plots(health[0],[1] + covariance)=WHEN ; 3D clouds(Laser_map,cloud_effected)=HOW ; inputs=sensor-vs-algorithm"
+  modes:
+    geometric_degeneracy: "health[0] DOWN + covariance UP + cloud_effected sparse/planar, inputs OK"
+    sensor_dropout:        "lidar_points DOWN -> health[3] DOWN -> health[0] DOWN (geometry fine)"
+    fast_motion_imu_sat:   "IMU norm spike + health[1] UP + registered scan blurs vs map"
+    compute_overload:      "health[2] -> 50 ms + odometry stutter"
+    drift_accumulation:    "Laser_map ghosts + path z-drift + slow covariance creep"
+  cloud_effected_visual:
+    good: "dense, wraps sensor, normals span 3 axes (2 perp walls + floor), stable"
+    bad:  "sparse/collapsing, single plane/line, one-sided, flickering"
+    trap: "long corridor = HIGH count but degenerate (along-axis unconstrained). Count alone lies; check spatial spread."
+
+# -----------------------------------------------------------------------------
+# OPEN / PENDING ITEMS
+# -----------------------------------------------------------------------------
+pending:
+  - id: P1
+    title: "Container shows 'unhealthy' (cosmetic)"
+    status: pending
+    detail: "Docker HEALTHCHECK calls 'rostopic' without sourcing ROS -> always fails. Not a real issue. Fix: source ROS in healthcheck cmd."
+    priority: low
+
+  - id: P2
+    title: "Commit work to git (boot-services)"
+    status: pending
+    detail: "Uncommitted: Dockerfile, config/fastlio_to_fc.launch, config/cloud_lite.launch."
+    priority: medium
+
+  - id: P3
+    title: "Version-control the source patches"
+    status: pending
+    detail: "BOTH laserMapping.cpp AND fastlio_mavros_bridge.py changes are in gitignored docker_src/. A fresh clone+rebuild would LACK /Laser_map, /cloud_effected, /fastlio_health, AND the yaw-datum (heading-zeroing) fix. Options: un-ignore the files, or stash .patch files in repo."
+    priority: medium
+
+  - id: P5
+    title: "Rebuild image to persist all fixes"
+    status: done
+    detail: "Final image 3173572c612b (6849d0d18a89 -> e4b85ce4496e -> 3173572c612b). Bakes: bridge yaw-datum + re-stamp + flip_position_y, laserMapping eigenvalues + 7-elem health. All markers verified."
+    priority: done
+
+  - id: P6
+    title: "Motion runaway (flyaway risk) -- TRUE root cause was VELXY/VELZ, see T13"
+    status: "fixed-then-reverted-by-user"
+    detail: "Two compounding causes found+fixed: (1) timestamp clock (T11) and (2) THE BIG ONE: EK3_SRC1_VELXY/VELZ=6 with no velocity source (T13). With both fixed (VELXY=0), run-3 bench showed clean tracking+hold. *** User set VELXY/VELZ back to 6 at session end -> runaway will return under motion unless velocity is published (see P9). *** Also note y-flip (T15) re-introduces motion divergence independently."
+    priority: high
+
+  - id: P4
+    title: "Remote layout: add HtDH eigenvalue plots"
+    status: in_progress
+    detail: "Remote agent (shannon-mini) layout /home/shannon-mini/Documents/fastlio_slam_layout.json. Prompt drafted to plot /fastlio_health.data[4..6] (eig_min/mid/max) on log-Y + optional condition-number kappa=max/min (with caveat: kappa misses uniform weakness; pair with absolute eig_min). Application status unknown."
+    priority: medium
+
+  - id: P7
+    title: "Git: nothing from this session is version-controlled (reproducibility)"
+    status: pending
+    detail: "Configs untracked (hesai_jt128.yaml, fastlio_to_fc.launch, cloud_lite.launch, fc_ekf_params.parm), docker_src GITIGNORED (laserMapping.cpp + fastlio_mavros_bridge.py patches), FC params only in EEPROM+dumped. Fresh clone/reflash reproduces NOTHING. Decide: un-ignore the 2 patched src files or stash .patch; commit configs; commit fc_ekf_params.parm. Supersedes P2/P3."
+    priority: high
+
+  - id: P8
+    title: "Resolve y-flip + handedness (mirror?) -- the core open technical question"
+    status: blocked
+    status: done
+    detail: "RESOLVED (T18 resolution, 2026-06-16). The combined translation+rotation bench showed raw /Odometry POSITION is already correct ENU (fwd+x/left+y/up+z) -> position needs NO transform (identity); the old 'left=-y'/mirror confusion was an artifact of the broken downstream bridge + VELXY=6 runaway, not a real frame issue. ORIENTATION is a same-handed cyclic permutation fixed via a quaternion similarity transform. flip_position_y REMOVED (T15 retired). Bridge deployed + persistent; verified on /mavros/vision_pose output for all 9 moves."
+    priority: high
+
+  - id: P9
+    title: "Publish a velocity source so EK3_SRC1_VELXY=6 is valid"
+    status: pending
+    detail: "User set VELXY/VELZ=6 (T13) but FAST-LIO publishes no velocity. To make 6 work (and improve fast-motion tracking): (a) bridge differentiates position -> /mavros/vision_speed/speed_vector, or (b) patch laserMapping to fill the zeroed /Odometry twist with the IEKF velocity state. NEITHER done. Until done, VELXY=6 = runaway config."
+    priority: high
+
+# -----------------------------------------------------------------------------
+# QUICK VERIFICATION COMMANDS
+# -----------------------------------------------------------------------------
+verify_commands:
+  topic_rates: "docker exec slam-hesai-fastlio bash -lc 'source /opt/ros/noetic/setup.bash; rostopic hz /Laser_map'"
+  bridge_listening: "ss -tlnp | grep :8765"
+  services: "systemctl is-active slam-container.service slam-fastlio.service"
+  health_sample: "docker exec slam-hesai-fastlio bash -lc 'source /opt/ros/noetic/setup.bash; rostopic echo -n1 /fastlio_health/data'"
