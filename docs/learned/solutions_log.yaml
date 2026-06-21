@@ -82,3 +82,82 @@ solutions:
   - urdf
   - NED
   - FRD
+- id: 4
+  date: '2026-06-20'
+  phase: 6
+  hardware:
+    platform: NUC/x86 (slam-system:latest Docker, ROS1 Noetic)
+    lidar:
+      model: Hesai JT128
+      channels: 128
+      driver: HesaiLidar_ROS_2.0
+      has_imu: true
+      imu_topic: /lidar_imu
+    flight_controller:
+      model: mRo Pixracer Pro
+      autopilot: ardupilot
+      connection: USB CDC-ACM /dev/ttyACM0 @921600
+    slam:
+      algorithm: fast_lio
+      repo: RevoluteRobotics/FAST_LIO_SLAM
+    ros:
+      version: noetic
+      comm_method: mavros
+    fingerprint: nuc-hesai_jt128-fast_lio2-ardupilot-noetic
+  symptom: "LiDAR/IMU/Odometry topics are not on ROS/host time. header.stamp shows\
+    \ ~722s (seconds-since-lidar-poweron) while host wall clock is ~1.78e9 (Unix epoch)\
+    \ \u2014 a ~56-year skew. Breaks TF lookups between FAST-LIO frames (sensor time)\
+    \ and MAVROS frames (host time), corrupts rosbag/Foxglove cross-clock comparison,\
+    \ and forces the FAST-LIO->MAVROS bridge to throw away the sensor stamp and restamp\
+    \ with now()."
+  root_cause: "Hesai driver config.yaml had `use_timestamp_type: 0` (= point-cloud\
+    \ / sensor internal clock). The JT128's internal clock is free-running from power-on\
+    \ (no PTP/GPS discipline; `is_use_ptc:true` is the PTC config TCP channel, NOT\
+    \ PTP time sync). The driver stamps BOTH /lidar_points and /lidar_imu from the\
+    \ same field (udp1_4_parser.cc: imu_config.timestamp is derived from sensor_timestamp[]),\
+    \ so lidar<->IMU stay mutually consistent \u2014 good for FAST-LIO with time_sync_en:false\
+    \ \u2014 but everything is offset from host/ROS time. No code anywhere reconciles\
+    \ the offset; the bridge fastlio_mavros_bridge.py only clobbers the stamp with\
+    \ rospy.Time.now() at receipt (restamp, not correction)."
+  fix: "Set `use_timestamp_type: 1` in the Hesai driver config.yaml (= receive/local\
+    \ host time at packet parse). The driver then stamps both points and IMU with\
+    \ GetMicroTimeU64() (host clock) from the same field, so they stay consistent\
+    \ AND land on ROS time; /Odometry inherits it. Then disable the now-redundant\
+    \ bridge restamp with `restamp_system_time:=false` in fastlio_to_fc.launch so\
+    \ the bridge forwards FAST-LIO's (now host-clock) stamp \u2014 which is captured\
+    \ at packet-parse, an earlier/more honest scan time than the bridge's post-FAST-LIO\
+    \ now(). Persist the driver config via a single-file bind mount in docker-compose.yml\
+    \ (./config/hesai_driver_config.yaml -> .../HesaiLidar_ROS_2.0/config/config.yaml)\
+    \ because that config lives in the image layer and otherwise reverts on `docker\
+    \ compose up` recreate. NOTE the trade-off: type:1 stamps at host receive (carries\
+    \ UDP/scheduling jitter, slightly worse deskew under load) vs type:0's true hardware\
+    \ sampling instants; the strictly-better fix is PTP-disciplining the JT128 clock\
+    \ to the host and keeping type:0. After the change, RE-TUNE VISO_DELAY_MS: measured\
+    \ stamp-age at receipt is ~67ms (50ms scan period @20Hz + ~14ms compute), and\
+    \ since MAVROS (timesync_mode MAVLINK) forwards the header stamp to the FC, the\
+    \ conveyed measurement timestamp moved ~67ms EARLIER, so VISO_DELAY_MS should\
+    \ DECREASE from 50 toward ~0-15ms (it covers only residual mavros->serial->FC\
+    \ transport now). The provided measure_vision_latency.py is ROS2/rclpy and does\
+    \ NOT run on this ROS1 system \u2014 measure stamp-age manually with rospy (now()-header.stamp),\
+    \ which is only valid once topics are on host time."
+  files_changed:
+  - config/hesai_driver_config.yaml (new
+  - use_timestamp_type:1)
+  - HesaiLidar_ROS_2.0/config/config.yaml (in-container)
+  - config/fastlio_to_fc.launch (restamp_system_time:=false on fastlio_mavros_bridge
+    node)
+  - docker-compose.yml (single-file bind mount for driver config)
+  tags:
+  - time_sync
+  - timestamp
+  - ros_time
+  - hesai
+  - jt128
+  - use_timestamp_type
+  - lidar_imu_sync
+  - fast_lio
+  - viso_delay_ms
+  - mavros
+  - vision_pose
+  - ptp
+  - docker_persistence
