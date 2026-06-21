@@ -18,6 +18,8 @@
       - "^/cloud_scan$"          # registered current scan (cloud_registered); heavy ~63Mbps remote
       - "^/cloud_map$"           # accumulated map (laser_map)
       - "^/cloud_effected$"      # points that drove the EKF update (effective/matched points)
+      - "^/visualization_marker$"  # tensor-voting saliency ellipsoids: plane=blue line=green ball=yellow
+                                   # (accumulates, lifetime=0; can get heavy over a long run / remote link)
       - "^/ellipselio_path$"     # trajectory (now published natively by the node)
       - "^/ellipselio_odom$"
       - "^/analytics$"
