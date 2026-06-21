@@ -1,6 +1,9 @@
 #!/bin/bash
 # Foxglove demo of the COIN-LIO photometric fusion on the apartment bag.
 #
+# For an ARBITRARY field bag (parameterized), use run_iris_lio_foxglove.sh <bag_dir_name>
+# instead — same loop, same PID-based teardown. This script stays as the quick apartment demo.
+#
 # Starts a PERSISTENT whitelisted foxglove_bridge, then LOOPS: relaunch the EllipseLIO
 # node fresh + play the bag once. (A persistent node + `ros2 bag play --loop` is NOT
 # usable: sim-time jumps backward at loop restart and the node floods "Imu time out of
@@ -48,6 +51,7 @@ docker exec "$CTR" bash -lc '
     ros2 launch ellipselio ellipselio_standalone.launch.py \
         config_path:=$CFGDIR config_file:=os1_64_ouster.yaml \
         use_sim_time:=true rviz:=false > /tmp/ell_demo.log 2>&1 &
+    LAUNCH_PID=$!
     sleep 8
     echo "[demo] playing apartment bag (photometric fusion)..."
     ros2 bag play "$BAG" --clock --rate 1.0 > /tmp/play_demo.log 2>&1 &
@@ -62,8 +66,12 @@ docker exec "$CTR" bash -lc '
       echo "[demo] foxglove_bridge up on :8765 (QoS auto-detected from live publishers)"
     fi
     wait $BAGPID
-    echo "[demo] bag done; relaunching node for next cycle"
-    for pid in $(ps -eo pid,comm | awk "/component_container/{print \$1}"); do kill -INT $pid; done
-    sleep 3
+    echo "[demo] bag done; reaping node (PID-based) + relaunching for next cycle"
+    # Reap by PID, NOT by `ps -o comm` (which truncates to 15 chars -> "component_conta",
+    # so /component_container/ never matched and the old node leaked every cycle, leaving
+    # 2+ estimators fighting on /ellipselio_odom). kill the launch + its container child.
+    kill -INT $LAUNCH_PID 2>/dev/null; sleep 3
+    pkill -9 -P $LAUNCH_PID 2>/dev/null; kill -9 $LAUNCH_PID 2>/dev/null
+    sleep 2
   done
 '
