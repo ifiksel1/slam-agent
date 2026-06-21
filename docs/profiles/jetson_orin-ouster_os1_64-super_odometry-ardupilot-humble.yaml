@@ -1,0 +1,122 @@
+fingerprint: "jetson_orin-ouster_os1_64-super_odometry-ardupilot-humble"
+date: "2026-06-08"
+source: "curated"
+description: "Jetson Orin NX with Ouster OS1-64 running SuperOdometry (LIO with 6-DOF degeneracy/uncertainty estimation) on ArduPilot."
+
+hardware:
+  platform:
+    type: jetson
+    model: orin_nx
+    ram_gb: 8           # 7.65 GB usable — AT SuperOdom's 8GB floor (RAM-tight)
+    cpu_cores: 6
+    carrier: "CTI Hadron Dual MIPI"
+    gpu: "Ampere (not required — SuperOdom is CPU-only; --gpus all in Docker is for GL display only)"
+    os: "Ubuntu 20.04 (focal) — host has ROS Noetic only; NO native Humble. ROS 2 via Docker."
+  lidar:
+    model: ouster_os1_64
+    channels: 64
+    interface: ethernet
+    default_ip: "192.168.1.2"
+    points_per_second: 1310720
+    has_imu: true
+    imu_model: ICM-20948
+  camera: null
+  imu_source: lidar
+  flight_controller:
+    model: cube_orange
+    firmware: ardupilot
+    version: "4.5"
+    telemetry_port: "/dev/ttyTHS1"
+    telemetry_baud: 921600
+  communication: mavros
+  ros_version: humble
+  slam_algorithm: super_odometry
+
+phase1_config:
+  workspace_path: "~/ros2_ws"
+  ros_version: "ROS2"
+  ros_distro: "humble"          # Humble only — Dockerfile is osrf/ros:humble; Jazzy untested
+  slam_algorithm: "super_odometry"
+  repo_url: "https://github.com/v4rl-ucy/SuperOdom"
+  package_name: "super_odometry"
+  lidar:
+    type: "ouster"
+    model: "os1-64"
+    topic: "/ouster/points"
+    imu_topic: "/ouster/imu"
+  imu_source: "lidar"
+  flight_controller:
+    type: "ardupilot"
+    connection: "serial"
+    port: "/dev/ttyTHS1"
+    baud: 921600
+  communication: "mavros"
+  transforms:
+    base_to_lidar:
+      x: 0.0
+      y: 0.0
+      z: 0.10
+      roll: 0.0
+      pitch: 0.0
+      yaw: 0.0
+  docker: true          # MANDATORY: host is Ubuntu 20.04, Humble only via container
+
+phase2_validation:
+  date: "2026-06-09"
+  verdict: "COMPATIBLE via Docker only"
+  findings:
+    - "Host OS Ubuntu 20.04/focal -> ROS 2 Humble NOT installable natively. Must use Docker (ros:humble / ros2-jetson-humble images already present)."
+    - "RAM 8GB (7.65 usable) is AT SuperOdom's 8GB floor. Build GTSAM with -j4 max + 4GB swap; watch runtime map-pool RAM. EllipseLIO (4GB floor) is the safer fit on this rig."
+    - "6 cores (not 8). Fine for runtime; just cap build parallelism."
+    - "Ouster OS1-64 + built-in IMU supported (os1_128 config -> scan_line 64). ouster-ros already built in ~/super_ws."
+    - "ArduPilot path OK: /state_estimation (nav_msgs/Odometry) -> vision_to_mavros, gated on /state_estimation_health."
+    - "NOTE: ~/super_ws is the SUPER *planner* (HKU), NOT SuperOdometry — name collision. SuperOdom not yet installed."
+  install_path: "Build a Humble Docker image with SuperOdom + livox_ros_driver2 + GTSAM@4abef92(MARCH_NATIVE=OFF) + Sophus@97e7161 (reuse scripts/patch_sophus_cmake.py)."
+
+slam_io:
+  config_template: "config/os1_64.yaml (ROS params) + config/ouster/os1_64_calibration.yaml (OpenCV FileStorage)"
+  odom_topic: "/state_estimation"           # nav_msgs/Odometry, high-rate IMU-propagated -> vision_to_mavros
+  health_topic: "/state_estimation_health"  # std_msgs/Bool — HARD gate before fusing
+  stats_topic: "/super_odometry_stats"      # super_odometry_msgs/OptimizationStats — per-DoF uncertainty
+  tf_chain: "map -> sensor"
+  bridge: "vision_to_mavros (nav_msgs/Odometry in), gated on /state_estimation_health"
+  caveat: "odom pose.covariance NOT populated by current code; degeneracy_threshold params inert. Use health+stats, not odom covariance, for EKF trust."
+
+build_notes:
+  - "ROS 2 Humble ONLY. Workspace must also contain livox_ros_driver2 (HARD dep even for Ouster) + rviz_2d_overlay_plugins"
+  - "Source-build Sophus @97e7161 and GTSAM @4abef92. GTSAM cmake: -DGTSAM_USE_SYSTEM_EIGEN=ON -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF (MARCH_NATIVE=OFF MANDATORY on aarch64)"
+  - "Ceres: apt libceres-dev (2.1.0) is fine on ARM64, or build @f68321e. Also needs libsuitesparse-dev, libatlas-base-dev, glog"
+  - "GTSAM build ~20-30 min on Jetson; cap make to -j6 to avoid OOM on 8GB"
+  - "Build Livox SDK2 then 'cd src/livox_ros_driver2 && ./build.sh humble' BEFORE colcon build"
+  - "SLAM vs localization via laser_mapping_node.localization_mode (+ map_dir .pcd for localization)"
+
+phase5_bench:
+  date: "2026-06-09"
+  verdict: "PASS (bench + hand-carried motion). Built + run on the real rig."
+  image: "superodom:humble (arm64, ros:humble-ros-base base)"
+  setup: "single Humble container, host net; in-container ROS2 ouster_ros driver + SuperOdom. FAST-LIVO2 (ROS1) stopped to free the Ouster. See superodom_integration/."
+  results:
+    - "/state_estimation 25Hz, /state_estimation_health true, no NaN, valid map->sensor TF"
+    - "translation tracked (x -0.24..+1.03m), lift tracked (z -0.60..+0.12m)"
+    - "left-90deg rotation measured as -91deg (magnitude accurate)"
+    - "position loop-closure ~0.13m (excl. startup z transient)"
+  before_flight:
+    - "EXTRINSIC FIXED 2026-06-09: was identity (wrong) -> caused yaw instability/sign issues. Now [-1,0,0,0,-1,0,0,0,1] T[-0.006253,0.011775,0.028535] + use_imu_roll_pitch:true (from working FAST-LIO config). Path now STABLE."
+    - "World renders UPSIDE-DOWN: SuperOdom builds in sensor start orientation (not gravity-up). Viz via 180-roll map_view frame; flight via vision_to_mavros world-Z/heading correction"
+    - "re-verify yaw sign on fresh motion test (extrinsic now correct); odom pose.covariance not populated"
+
+degeneracy_test:
+  date: "2026-06-09"
+  method: "bag-record (driver only, clean 20Hz) + offline replay 0.5x — live is compute-marginal"
+  results:
+    - "54.67m featureless-corridor walk; drift ~0.79m (~1.4%); returned to ~start"
+    - "uncertainty x maxed ~94% of run, yaw maxed almost always; z best-constrained (min 0.14)"
+    - "ICP residual 0.03->0.81 tracks degeneracy; yaw jumped +/-130deg at deepest stretch"
+  critical_finding: "/state_estimation_health stayed TRUE the entire degenerate run -> health flag does NOT detect degeneracy. GATE EKF FUSION ON /super_odometry_stats UNCERTAINTY, not health."
+
+live_limitation_RESOLVED: "ROOT CAUSE = ROS2 MIDDLEWARE (default Fast-DDS), FIXED by CycloneDDS (2026-06-09). The /ouster/points drop to ~15Hz under SuperOdom was Fast-DDS (rmw_fastrtps_cpp) stalling the large PointCloud2 publish with multiple DDS participants — NOT compute. Ruled out by direct test: RAM, single-core (dedicated core @62% still 17Hz), UDP (0 drops), hz-reporter artifact, mem-bw (EMC 0%), thermal, CPU CLOCK (raised 1497->1984MHz: util dropped to ~50% but rate stayed ~15Hz), reliable-QoS (both BEST_EFFORT), /points subscription (~13Hz with 0 subs). DECISIVE: raw /ouster/lidar_packets held 1234Hz steady while /ouster/points collapsed -> loss is in driver's cloud-assembly/publish path. FIX: RMW_IMPLEMENTATION=rmw_cyclonedds_cpp on driver+SuperOdom -> /ouster/points 20.0Hz STEADY (std 0.011s), sustained, 69.8C @1984MHz. Baked into Dockerfile (ros-humble-rmw-cyclonedds-cpp + ENV) and run_superodom_bench.sh. LIVE 1024x20 now bench-viable; needs a live MOTION test to confirm tracking. Secondary: with Cyclone at 20Hz SuperOdom is CPU-bound (cores 73-84% @1984MHz); holding 20Hz at stock 25W/1497MHz is UNTESTED. nvpmodel -m 0/MAXN is BROKEN here (conf assumes 8 cores; this 8GB module has 6) -> used sysfs scaling_max_freq=1984000 override (non-persistent). See superodom_integration/results/DEGENERACY_FINDINGS.md"
+image_status: "FIXED 2026-06-09: superodom:humble REBUILT (sha 610cd9b) with libzip-dev baked in. Use DOCKER_BUILDKIT=1 for incremental rebuilds (reuses cached GTSAM/Sophus; classic builder does a full 30-min rebuild). Prior image predated the Dockerfile libzip-dev line (line 104) -> fresh containers aborted os_driver with 'libzip.so.4 not found'. No longer needs runtime apt-install."
+
+validated: true            # Phase 2 + Phase 5 bench validated 2026-06-09
+integration_complete: false  # NOT flight-tested; vision-bridge frame fix pending
+notes: "Phase 2 + Phase 5 bench/motion validated 2026-06-09 on the real rig (Orin NX 8GB, Ouster OS1-64). Runs Docker-only (host Ubuntu 20.04, no native Humble). Working setup in superodom_integration/. Build gotchas fixed: amd64-only desktop-full base -> ros-base arm64; libzip-dev for ouster-sdk; unified colcon build (livox build.sh wipes install/). NEXT: fix vision-bridge yaw-sign/frame, measure extrinsic, then progressive flight test."

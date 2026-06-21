@@ -6,5 +6,11 @@ __pycache__/
 mcp/__pycache__/
 *.yaml.tmp
 
-# Vendored Docker build sources (cloned by scripts/fetch_docker_sources.sh)
+# Vendored Docker build sources (cloned by scripts/fetch_docker_sources*.sh)
 docker_src/
+docker_src_fastlivo2/
+
+# Local tooling artifacts (machine-specific, not project content)
+.catkin_tools/
+.claude/projects/
+superodom_integration/**/*.db3

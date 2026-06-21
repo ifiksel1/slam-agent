@@ -1,0 +1,69 @@
+# SLAM Integration progress — resume file
+# Profile: jetson_orin_nx_8gb-ouster_os1_64-fast_livo2-ardupilot-noetic
+# Last updated: 2026-06-06
+
+current_phase: 5            # Phase 4 done; Phase 5 (testing) next
+phases_complete: [1, 2, 3, 4]
+
+phase4_result:
+  image: fast_livo2_slam:latest (4.61GB, ROS1 Noetic, ARM64) — verified 12/12
+  ouster_ip: 192.168.2.60/24 (static, set via HTTP API)
+  vendored: {fast_livo2: 0d2c034, rpg_vikit: 6c886c8, sophus: a621ff2e}
+  reconcile:
+    - FAST-LIVO2 publishes /mavros/vision_pose/pose directly — NO vision_to_mavros bridge (only set_origin.py)
+    - odom topic = /aft_mapped_to_init
+    - camera yaml required even at img_en=0 (camera_minimal.yaml)
+    - ouster os_lidar->os_imu extrinsic from metadata applied
+  build_files: [Dockerfile.fastlivo2, docker-compose.fastlivo2.yml, scripts/fetch_docker_sources_fastlivo2.sh, docker_src_fastlivo2/ (gitignored)]
+
+hardware:
+  platform: Jetson Orin NX 8GB (6-core, 7.3GiB), CTI Hadron-DM (NGX024)
+  os: Ubuntu 20.04 / JetPack 5.1.2 (L4T 35.4.1)
+  lidar: Ouster OS1-64, fw 2.4.0, hostname os-122224003549.local, link-local 169.254.56.220
+  lidar_interface: eth0 (host 192.168.2.50/24)
+  imu: Ouster ICM-20948 (/ouster/imu), topics /ouster/points + /ouster/imu
+  fc: CubeOrange (bdshot), /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00
+  camera: none (deferred — global-shutter + ext-trigger, pending Connect Tech reply)
+
+software:
+  slam: FAST-LIVO2 (LiDAR-inertial-only, img_en=0), repo hku-mars/FAST-LIVO2
+  ros: noetic (ROS1), comm: mavros
+  docker: true
+
+mission:
+  max_speed: 10            # m/s
+  duration_minutes: 40
+  loop_closure: false
+  drift_tolerance: "<6cm local consistency"
+  environment: indoor hangar/warehouse + outdoor
+
+physical:
+  base_frame: base_link
+  lidar_offset: [0.0, 0.0, -0.060]
+  lidar_rotation_deg: [0, 180, 0]   # upside-down (pitch pi)
+  urdf: ~/ultraviewdev_ws/.../dragunfly_tf.urdf (cleaned copy in package)
+
+generated_files:                      # Phase 3 output — all in ~/slam-agent/fast_livo2_integration/
+  - config/fast_livo2_ouster64.yaml
+  - config/ardupilot_params.parm
+  - urdf/drone.urdf
+  - launch/slam.launch
+  - launch/master.launch
+  - package.xml
+  - CMakeLists.txt
+install_config: ~/slam-agent/scripts/install_config.yaml
+
+phase4_reconcile_points:              # MUST resolve during installation
+  - FAST-LIVO2 node/param names + odom topic (assumed /Odometry) vs real cloned repo
+  - Ouster os_lidar->os_imu extrinsic from sensor metadata (currently identity; matters for 6cm)
+  - Network: align Ouster link-local 169.254.x with host 192.168.2.x before data flows
+  - Bake OpenCV 4.2/4.5 ABI fix (LD_PRELOAD + link order) into image for vision-enable later
+  - Vendor ouster_ros (ARM64-safe from ultraviewdev_ws), vision_to_mavros, fast_livo into workspace
+
+learning_state:
+  hardware_profile: saved (#3), validated=true, integration_complete=false
+  known_good_config: pending (save after Phase 5 success)
+
+camera_followup:
+  status: emailed Connect Tech support 2026-06-06 (Hadron-DM IMX296 external-trigger support + CSI lane mapping)
+  decision_tree: "trigger supported -> CTI IMX296 mono; free-running only -> VC MIPI (DT port) or USB3 industrial"

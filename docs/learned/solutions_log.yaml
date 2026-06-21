@@ -82,3 +82,160 @@ solutions:
   - urdf
   - NED
   - FRD
+- id: 4
+  date: '2026-06-11'
+  phase: 7
+  hardware:
+    platform: jetson_orin_nx_8gb_6core
+    lidar: ouster_os1_64
+    slam: super_odometry
+    autopilot: ardupilot
+    ros: humble_docker
+  symptom: SuperOdom shows a nondeterministic ~10m pose jump (max single-step 9-12m)
+    on some replay runs of clean data; looks like a random algorithm divergence. Loop
+    closure/endpoint stay fine so it hides on return-to-origin metrics.
+  root_cause: 'CPU contention, NOT an algorithm flaw. The transient fired every run
+    when another LIO/mapping node (e.g. a live EllipseLIO or FAST-LIO) was co-running
+    on the 6-core Jetson and stealing cores; SuperOdom is compute-marginal at 1024x20
+    and starves of real-time margin. Confirmed by isolation: with all competing nodes
+    killed and SuperOdom owning all 6 cores, max single-step dropped from 9-12m to
+    0.23m (no transient).'
+  fix: 'Isolate compute before/while running SuperOdom: run frameworks strictly sequentially,
+    kill all other LIO nodes first (docker exec <ctr> pkill -9 -f <node>; zombies
+    are fine, they hold no CPU), and boost the CPU clock (sudo ~/superodom_ws/set_cpu_clock.sh
+    boost -> 1984MHz). Lighter config (filter_point_size 4, max_surface_features 1500)
+    shrinks the transient further but isolation is the real fix. For flight: never
+    co-locate two heavy LIO nodes on one Jetson, and keep an external kinematic gate
+    (reject poses implying >5-10 m/s) as a safety net.'
+  files_changed:
+  - superodom_integration/config/os1_64.yaml
+  - docs/phases/phase7_optimization.md
+  tags:
+  - superodom
+  - super_odometry
+  - cpu_contention
+  - transient
+  - divergence
+  - benchmarking
+  - compute_isolation
+  - jetson
+  - clock_boost
+  - lio
+- id: 5
+  date: '2026-06-11'
+  phase: 7
+  hardware:
+    platform: jetson_orin_nx_8gb_6core
+    lidar: ouster_os1_64
+    slam: ellipse_lio
+    autopilot: ardupilot
+    ros: humble_docker
+  symptom: EllipseLIO tracks the loop fine then runs away terminally (smooth IMU runaway
+    to thousands of meters), or diverges ~50% of runs. /analytics shows num_feats
+    collapsing 1000->under 50, obs_score 1.0->under 0.5, nearly all points rejected.
+  root_cause: Feature starvation from too-fine map resolution. mapping.map_resolution
+    0.1 was FINER than FAST-LIO (0.5) / SuperOdom (0.2) and fragmented the few features
+    present at feature-poor spots, collapsing the tensor-voting plane/line/ball classification
+    -> EKF loses constraint -> IMU runaway. Finer resolution is NOT safer; it must
+    be >= the feature spacing in the sensor's sparsest region. Compounded by the rig
+    being compute-marginal at stock 1497MHz.
+  fix: 'Set mapping.map_resolution: 0.2 (also min_range 0.3, max_range 80) -> no runaway,
+    3/3 clean. Boost the CPU clock to 1984MHz (part of the validated config; ~50%
+    diverge at stock 1497). Watch /analytics.obs_score as a native degeneracy gate.
+    EllipseLIO has no online-extrinsic flag, so r_imu_lidar/t_imu_lidar must be the
+    correct lever-arm up front.'
+  files_changed:
+  - ellipselio_integration/config/os1_64_ouster.yaml
+  - .claude/skills/slam-integration/references/frameworks_ellipse_super.md
+  tags:
+  - ellipselio
+  - ellipse_lio
+  - feature_starvation
+  - map_resolution
+  - tensor_voting
+  - obs_score
+  - runaway
+  - divergence
+  - confined_space
+  - jetson
+  - clock_boost
+- id: 6
+  date: '2026-06-11'
+  phase: 7
+  hardware:
+    platform: jetson_orin_nx_8gb_6core
+    lidar: ouster_os1_64
+    slam: fast_lio2_gpu
+    autopilot: ardupilot
+    ros: humble_docker
+  symptom: FAST-LIO tracks the whole loop within a few meters then runs away ONLY
+    in the final seconds (smooth +z/+x IMU runaway to tens/thousands of meters) while
+    standing still at the endpoint. Streams are clean and full-length; 0 'No Effective
+    Points'.
+  root_cause: 'Two-part. (1) extrinsic_T was [0,0,0], ignoring the real ~3cm OS1-64
+    LiDAR->IMU lever-arm -> end-of-run IMU runaway. (2) After setting extrinsic_T,
+    extrinsic_est_en: true was HARMFUL: with a correct lever-arm, online extrinsic
+    estimation adds a free DOF that drifts during the bag''s feature-poor section
+    -> catastrophic nondeterministic divergence (observed 9044m). The earlier belief
+    that est_en:true was the fix was a lucky run.'
+  fix: 'Set the real extrinsic_T: [-0.006253, 0.011775, 0.028535] AND set extrinsic_est_en:
+    false. Result: deterministic, loop 0.96-1.27m, max-step 0.17m, no divergence (vs
+    catastrophic with est_en:true). Rule: set the real lever-arm and turn online extrinsic
+    estimation OFF; don''t let est_en paper over a missing extrinsic.'
+  files_changed:
+  - slam-gpu/config/fast_lio_gpu.yaml
+  tags:
+  - fast_lio
+  - fast_lio2
+  - extrinsic_T
+  - extrinsic_est_en
+  - lever_arm
+  - imu_runaway
+  - divergence
+  - end_of_run
+  - jetson
+- id: 7
+  date: '2026-06-11'
+  phase: 7
+  hardware:
+    platform: jetson_orin_nx_8gb_6core
+    lidar: ouster_os1_64
+    slam: multi_framework_ellipselio_superodom_fastlio
+    autopilot: ardupilot
+    ros: humble_docker
+  symptom: 'Benchmarking/comparing multiple LIO frameworks gives misleading or non-reproducible
+    results: a framework looks unstable, frameworks'' x/y/z don''t agree, or numbers
+    vary run-to-run.'
+  root_cause: Benchmark methodology errors, not framework behavior. (a) Frameworks
+    share /ouster topics and the 6-core Jetson; running them concurrently makes them
+    re-process the same stream and steal CPU, manufacturing instability in compute-marginal
+    stacks. (b) Comparing raw x/y/z is invalid because frameworks use different world
+    conventions (SuperOdom = sensor-start orientation + inverted yaw; FAST-LIO/EllipseLIO
+    = gravity-aligned). (c) A bag with a sensor blackout (simultaneous gap in /ouster/points
+    AND /ouster/imu) diverges every framework on resume.
+  fix: 'LIO benchmarking protocol: (1) Run frameworks SEQUENTIALLY, one at a time,
+    kill all other LIO nodes first (zombies are fine). (2) Validate the bag first
+    with scripts/check_bag_gaps.py; a RE-RECORD verdict = numbers past the gap are
+    meaningless. (3) Compare only FRAME-INVARIANT metrics: peak excursion from start
+    (agree to <0.1m on same path), path length, loop closure (final disp from start),
+    max single-step (>0.3m = divergence). (4) Boost the clock (1984MHz) for compute-marginal
+    stacks; it''s part of the validated config, not an afterthought. Proof this matters:
+    SuperOdom''s ''random'' 9-12m transient was pure CPU contention and dropped to
+    0.23m once isolated.'
+  files_changed:
+  - docs/phases/phase7_optimization.md
+  - superodom_integration/scripts/benchmark_bag.sh
+  - superodom_integration/scripts/check_bag_gaps.py
+  tags:
+  - benchmarking
+  - methodology
+  - compute_isolation
+  - frame_invariant_metrics
+  - loop_closure
+  - peak_excursion
+  - max_step
+  - bag_validation
+  - sensor_dropout
+  - clock_boost
+  - lio
+  - comparison

@@ -206,3 +206,112 @@ profiles:
       next_phase: 3
   validated: true
   integration_complete: true
+- id: 3
+  date: '2026-06-06'
+  last_verified: '2026-06-06'
+  fingerprint: jetson_orin_nx_8gb-ouster_os1_64-fast_livo2-ardupilot-noetic
+  hardware:
+    platform:
+      model: Jetson Orin NX 8GB
+      ram_gb: 8
+      cpu_cores: 6
+      gpu: Ampere 1024-core (SM 8.7)
+      os: Ubuntu 20.04 / JetPack 5.1.2 (L4T 35.4.1)
+      carrier: Connect Tech Hadron-DM (NGX024)
+    lidar:
+      model: Ouster OS1-64
+      part_number: 840-103575-06
+      serial: '122224003549'
+      channels: 64
+      firmware: ousteros 2.4.0
+      connection: ethernet
+      hostname: os-122224003549.local
+      ip: 169.254.56.220
+      computer_ip: 192.168.2.50
+      interface: eth0
+      has_imu: true
+      imu_model: ICM-20948
+    camera:
+      model: none
+      type: none
+    flight_controller:
+      model: CubeOrange (Hex/ProfiCNC, bdshot)
+      autopilot: ardupilot
+      firmware_version: TBD
+      connection: usb
+      device_path: /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00
+      baud_rate: 115200
+      imu_model: Cube triple-IMU (ICM-42688/ICM-20649)
+  phase1_config:
+    platform:
+      model: Jetson Orin NX 8GB
+      ram_gb: 8
+      cpu_cores: 6
+      gpu: Ampere 1024-core (SM 8.7)
+      os: Ubuntu 20.04 / JetPack 5.1.2 (L4T 35.4.1)
+      carrier: Connect Tech Hadron-DM (NGX024)
+    lidar:
+      model: Ouster OS1-64
+      channels: 64
+      firmware: ousteros 2.4.0
+      connection: ethernet
+      hostname: os-122224003549.local
+      ip: 169.254.56.220
+      computer_ip: 192.168.2.50
+      interface: eth0
+      has_imu: true
+      imu_model: ICM-20948
+    camera:
+      model: "none (deferred \u2014 global-shutter + ext-trigger, pending Connect\
+        \ Tech reply)"
+      type: none
+    flight_controller:
+      model: CubeOrange (Hex/ProfiCNC, bdshot)
+      autopilot: ardupilot
+      firmware_version: TBD
+      connection: usb
+      device_path: /dev/serial/by-id/usb-Hex_ProfiCNC_CubeOrange-bdshot_450035000851313231383238-if00
+      baud_rate: 115200
+      imu_model: Cube triple-IMU (ICM-42688/ICM-20649)
+    slam:
+      algorithm: fast_livo2
+      mode: lidar_inertial_only (img_en=0, vision disabled until camera arrives)
+      repo_url: https://github.com/hku-mars/FAST-LIVO2
+    ros:
+      version: noetic
+      comm_method: mavros
+    imu_source: lidar
+    imu_topic: /ouster/imu
+    imu_reasoning: Ouster ICM-20948, hardware-synced w/ LiDAR, 100Hz, simplest extrinsic
+    physical:
+      base_frame: base_link
+      lidar_offset:
+      - 0.0
+      - 0.0
+      - -0.06
+      lidar_rotation:
+      - 0
+      - 180
+      - 0
+      urdf_status: exists
+      urdf_path: ~/ultraviewdev_ws/src/Ultra-onboard/onboard_utilities/dragunfly_urdf_onb/urdf/dragunfly_tf.urdf
+    environment:
+      type: both
+      area_size: large (hangar/warehouse + outdoor)
+      features: rich
+    mission:
+      max_speed: 10
+      duration_minutes: 40
+      loop_closure: false
+      drift_tolerance: <6cm local consistency
+    docker: true
+    notes:
+    - "8GB module (6-core) \u2014 do NOT reuse 16GB profile config; tune LiDAR mode\
+      \ (1024x20 needs point_filter_num:4 + filter_size:0.5, else 512x20)"
+    - "Ouster on link-local 169.254.x but host eth0 on 192.168.2.50 \u2014 align networking\
+      \ before data flows"
+    - CubeOrange firmware version to be queried over MAVLink in Phase 4
+    - FAST-LIVO2 run vision-disabled now; camera (global-shutter + ext-trigger via
+      Ouster SYNC_PULSE_OUT) drops in later
+  validated: true
+  integration_complete: false

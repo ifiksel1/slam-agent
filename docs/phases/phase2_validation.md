@@ -18,6 +18,8 @@
 | OpenVINS | 2GB | 2 | No | Lightest VIO |
 | VINS-Fusion | 4GB | 4 | No | |
 | Point-LIO | 4GB | 4 | No | |
+| EllipseLIO | 4GB | 4 | No | FAST-LIO2 lineage; vendored IKFoM/i-Octree, no GTSAM/Ceres. Strong in confined/degenerate spaces |
+| SuperOdom | 8GB | 4 | No | GTSAM+Ceres source build; 6-DOF degeneracy estimation. Heavier ARM64 build |
 
 ### Sensor Support
 | Algorithm | LiDAR Types | Camera Types | IMU Required |
@@ -31,6 +33,8 @@
 | VINS-Fusion | N/A | Mono/Stereo | Yes (required) |
 | LVI-SAM | Any PointCloud2 | Mono | Yes |
 | R3LIVE | Any PointCloud2 | Mono | Yes |
+| EllipseLIO | Any PointCloud2 (Ouster/Velodyne/Livox/Hesai) | N/A | Yes (LiDAR or external) |
+| SuperOdom | Any PointCloud2 (Ouster/Velodyne/Livox) | N/A | Yes (LiDAR or external) |
 
 ### ROS Distribution Lifecycle
 | Distro | Ubuntu | EOL | Status |
@@ -55,6 +59,8 @@ If user selects an EOL distro, warn them and recommend the active alternative fo
 | OpenVINS | Yes | Yes | Yes | Pure CMake, distro-independent |
 | VINS-Fusion | Yes | Community | Untested | cv_bridge API may differ on Jazzy |
 | Point-LIO | Yes | Yes | Yes (builds clean) | Same as FAST-LIO2 |
+| EllipseLIO | **No** | Yes | Yes | ROS 2 only; CMake auto-detects Jazzy via `ROS_JAZZY` define. No GTSAM/Ceres |
+| SuperOdom | **No** | Yes | Untested | ROS 2 Humble only (Dockerfile is humble). GTSAM `MARCH_NATIVE=OFF` mandatory on ARM64 |
 
 ### Communication Method
 | ROS + FC | Method | Package |

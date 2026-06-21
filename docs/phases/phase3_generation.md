@@ -105,6 +105,134 @@ pcd_save:
   interval: -1
 ```
 
+#### EllipseLIO Template (ROS 2 only)
+
+EllipseLIO uses a single nested params file. `lidar.type`: LIVOX=1, VELODYNE=2,
+OUSTER=3, HESAI=4. `r_imu_lidar` auto-detects 9-element row-major matrix **or**
+4-element quaternion `[x,y,z,w]` by array length. There is **no** `point_filter_num`
+/ `filter_size` to tune — the tensor-voting method self-adapts; `map_resolution`
+(floor 0.1 m) is the only resolution knob. `vertical_fov` is critical: wrong value
+silently degrades accuracy (OS64=42.4, OS128=90.0).
+
+```yaml
+/**:
+    ros__parameters:
+        mapping:
+            map_resolution: 0.1     # >=0.1; raise to 0.15-0.2 if RAM-bound on Orin NX 8GB
+            pub_map_n_secs: 10      # keep >=5 on embedded (CPU/bandwidth)
+        lidar:
+            type: 3                 # OUSTER
+            rate: 10
+            scan_lines: 64          # OS1-64
+            vertical_fov: 42.4      # OS64=42.4, OS128=90.0  (TUNE-CRITICAL)
+            min_range: 0.5
+            max_range: 100.0
+            topic: "/ouster/points"
+            # Ouster built-in IMU -> LiDAR reference extrinsic (measure for your unit):
+            t_imu_lidar: [-0.006253, 0.011775, 0.028535]
+            r_imu_lidar: [-1.,  0., 0.,
+                           0., -1., 0.,
+                           0.,  0., 1.]
+        imu:
+            rate: 100
+            acc_noise: 0.001249
+            gyr_noise: 0.000208
+            acc_bias:  0.000106
+            gyr_bias:  0.000004
+            topic: "/ouster/imu"
+```
+
+Launch (standalone container, live data):
+```bash
+ros2 launch ellipselio ellipselio_standalone.launch.py \
+    config_file:=os1_64_ouster.yaml use_sim_time:=false rviz:=false
+```
+- **Output for vision bridge:** `/ellipselio_odom` (`nav_msgs/Odometry`, IMU rate, frames `odom_ellipselio` -> `imu_prop_ellipselio`). Low-latency path = `imu_prop_ellipselio`; LiDAR-corrected = `imu_ellipselio`.
+- `use_sim_time:=false` is **mandatory** for live sensors (default is `true` for bags).
+
+#### SuperOdom Template (ROS 2 Humble only — TWO files)
+
+SuperOdom splits config into a **ROS params YAML** and a **separate OpenCV
+calibration YAML** (`!!opencv-matrix`), passed via the `calibration_file` launch
+arg. Copy `os1_128.yaml` -> `os1_64.yaml` and set `scan_line: 64` (valid values:
+4, 16, 32, 64, 128). `localization_mode: false` = mapping; `true` loads a `.pcd`
+prior via `map_dir`.
+
+**File A — `config/os1_64.yaml`:**
+```yaml
+/**:
+  ros__parameters:
+    imu_topic: "/ouster/imu"
+    laser_topic: "/ouster/points"
+    sensor: "ouster"
+    use_imu_roll_pitch: false
+    world_frame: "map"
+    world_frame_rot: "map_rot"
+    sensor_frame: "sensor"
+    sensor_frame_rot: "sensor_rot"
+    imu_acc_x_limit: 0.5
+    imu_acc_y_limit: 0.2
+    imu_acc_z_limit: 0.4
+    feature_extraction_node:
+        scan_line: 64           # OS1-64
+        min_range: 0.2
+        filter_point_size: 3
+    laser_mapping_node:
+        mapping_line_resolution: 0.1
+        mapping_plane_resolution: 0.2
+        max_iterations: 5
+        max_surface_features: 2000
+        localization_mode: false
+        read_pose_file: false
+        init_x: 0.0
+        init_y: 0.0
+        init_z: 0.0
+        init_roll: 0.0
+        init_pitch: 0.0
+        init_yaw: 0.0
+    imu_preintegration_node:
+        lidar_correction_noise: 0.01
+        acc_n: 3.9939570888238808e-03
+        gyr_n: 1.5636343949698187e-03
+        acc_w: 6.4356659353532566e-05
+        gyr_w: 3.5640318696367613e-05
+        g_norm: 9.80511
+```
+
+**File B — `config/ouster/os1_64_calibration.yaml`** (OpenCV FileStorage; rotation
+is LiDAR->IMU `imu^R_laser`, translation `imu^T_laser` in meters):
+```yaml
+%YAML:1.0
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [-0.006253, 0.011775, -0.007645]   # MEASURE your LiDAR-IMU lever arm
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+yaw_ratio: 0.0
+```
+
+Launch (3 nodes: feature_extraction, laser_mapping, imu_preintegration):
+```bash
+ros2 launch super_odometry os1_128.launch.py \
+    config_file:=<pkg>/config/os1_64.yaml \
+    calibration_file:=<pkg>/config/ouster/os1_64_calibration.yaml
+```
+- **Output for vision bridge:** `/state_estimation` (`nav_msgs/Odometry`, high-rate IMU-propagated, frames `map` -> `sensor`).
+- **Health gate:** `/state_estimation_health` (`std_msgs/Bool`) — use as a hard gate before fusing. Soft quality from `/super_odometry_stats` (`super_odometry_msgs/OptimizationStats`, per-DoF `uncertainty_*`).
+- ⚠️ The `nav_msgs/Odometry` `pose.covariance` is **not populated** by the current code, and `pos/ori_degeneracy_threshold` params are inert (never read from YAML). Drive EKF trust from `/state_estimation_health` + stats, not the odom covariance.
+
 #### OpenVINS (3 files required)
 
 **estimator_config.yaml** -- Copy from OpenVINS examples, adjust:

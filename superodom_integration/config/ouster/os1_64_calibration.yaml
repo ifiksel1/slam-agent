@@ -1,0 +1,29 @@
+%YAML:1.0
+
+# Ouster OS1-64, built-in IMU. Extrinsic taken from this rig's working FAST-LIO config.
+# Ouster OS1: lidar_to_sensor R=[[-1,0,0],[0,-1,0],[0,0,1]] (180 yaw), imu_to_sensor R=I.
+# -> lidar_to_imu R = [[-1,0,0],[0,-1,0],[0,0,1]]  (the OS1 IMU is yaw-flipped vs the LiDAR).
+# Rotation from laser frame to imu frame, imu^R_laser:
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [-1., 0., 0.,
+          0., -1., 0.,
+          0., 0., 1.]
+
+# Translation from laser frame to imu frame, imu^T_laser (meters), from FAST-LIO extrinsic_T:
+#   lidar_to_sensor T=[0,0,36.18mm] - imu_to_sensor T=[6.253,-11.775,7.645mm]
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [-0.006253, 0.011775, 0.028535]
+
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+yaw_ratio: 0.0

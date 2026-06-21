@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>fast_livo2_integration</name>
+  <version>0.1.0</version>
+  <description>FAST-LIVO2 + ArduPilot integration for the Dragunfly (Ouster OS1-64, CubeOrange, Jetson Orin NX 8GB). LiDAR-inertial-only until camera arrives.</description>
+  <maintainer email="idan@ultraview.io">Idan</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Runtime deps: this package ships config/launch/urdf only -->
+  <exec_depend>fast_livo</exec_depend>
+  <exec_depend>ouster_ros</exec_depend>
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>mavros_extras</exec_depend>
+  <exec_depend>vision_to_mavros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
+</package>

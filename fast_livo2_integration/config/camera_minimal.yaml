@@ -1,0 +1,16 @@
+# Minimal camera intrinsics for FAST-LIVO2 node.
+# FAST-LIVO2 always loads a camera yaml (even when img_en=0) because the
+# LIVMapper::initializeSubscribersAndPublishers() always reads these params.
+# Replace with real Kalibr-calibrated values when camera is added.
+cam_model: Pinhole
+cam_width: 640
+cam_height: 480
+scale: 1.0
+cam_fx: 500.0
+cam_fy: 500.0
+cam_cx: 320.0
+cam_cy: 240.0
+cam_d0: 0.0
+cam_d1: 0.0
+cam_d2: 0.0
+cam_d3: 0.0

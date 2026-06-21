@@ -1,0 +1,34 @@
+/**:
+  ros__parameters:
+    port: 8765
+    address: 0.0.0.0
+    # use_sim_time:=true for bag replay (follow /clock); set false for live sensor.
+    use_sim_time: true
+    # Whitelist ONLY the EllipseLIO viz topics. The raw /ouster/points organized
+    # cloud is ~3MB/msg @20Hz (~480Mbps) and saturates any remote link (Tailscale/
+    # wifi) -> the websocket send queue backs up and NOTHING renders. NEVER stream the
+    # raw organized Ouster cloud over a remote bridge.
+    # /cloud_scan itself is also heavy (48B/pt x ~8k pts @20Hz ~= 63Mbps) -> stream the
+    # throttled /cloud_scan_lite (~5Hz ~= 16Mbps) from cloud_throttle.py instead.
+    # Photometric debug images (64x1024 @20Hz): intensity_image mono8 ~= 10Mbps,
+    # feature_image bgr8 ~= 30Mbps. OK on a local link; over Tailscale watch the Send-Q
+    # and drop feature_image (or throttle) if it backs up.
+    topic_whitelist:
+      - "^/cloud_scan_lite$"
+      - "^/cloud_scan$"          # registered current scan (cloud_registered); heavy ~63Mbps remote
+      - "^/cloud_map$"           # accumulated map (laser_map)
+      - "^/cloud_effected$"      # points that drove the EKF update (effective/matched points)
+      - "^/ellipselio_path$"     # trajectory (now published natively by the node)
+      - "^/ellipselio_odom$"
+      - "^/analytics$"
+      - "^/photometric/intensity_image$"
+      - "^/photometric/feature_image$"
+      # photometric CONTRIBUTION diagnostics (Float64, for Foxglove Plot panels):
+      # info_frac = photo share of Fisher info (the "how much is COIN-LIO helping" number),
+      # n_rows = active photo residual rows, res_rms = intensity-residual strength,
+      # geo_info/photo_info = raw Fisher-info magnitudes.
+      - "^/photometric/(n_rows|res_rms|info_frac|geo_info|photo_info)$"
+      - "^/tf$"
+      - "^/tf_static$"
+      - "^/clock$"
+    send_buffer_limit: 100000000
