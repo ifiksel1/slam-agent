@@ -63,10 +63,10 @@ phase1_config:
 
 slam_io:
   config_template: "config/os1_64_ouster.yaml (single nested params file)"
-  odom_topic: "/ellipselio_odom"          # nav_msgs/Odometry, IMU rate -> vision_to_mavros
-  tf_chain: "odom_ellipselio -> imu_prop_ellipselio (low-latency) / imu_ellipselio (corrected)"
-  bridge: "vision_to_mavros (nav_msgs/Odometry in)"
-  tune_critical: "lidar.vertical_fov=42.4 for OS64; map_resolution floor 0.1"
+  odom_topic: "/ellipselio_odom"          # nav_msgs/Odometry, IMU rate (~79Hz) -> vision_to_mavros. BEST_EFFORT QoS — a RELIABLE subscriber gets ZERO msgs.
+  tf_chain: "/odom_ellipselio -> /imu_prop_ellipselio (low-latency) / /imu_ellipselio (corrected). NOTE leading slash (hardcoded map_processing.cpp) breaks static_transform_publisher view frames."
+  bridge: "vision_to_mavros (nav_msgs/Odometry in). MUST NEGATE YAW: physical CCW reads as yaw DECREASE (inverted sign, same as SuperOdom)."
+  tune_critical: "lidar.vertical_fov=42.4 for OS64; map_resolution 0.2 (0.1 starves features -> runaway); lidar.rate=20 MUST match real scan Hz (not dataset 10)"
 
 build_notes:
   - "ROS 2 ONLY — no Noetic. colcon build --packages-select ellipselio --cmake-args -DCMAKE_BUILD_TYPE=Release --symlink-install"
@@ -75,6 +75,17 @@ build_notes:
   - "Jetson aarch64: if EKF diverges, override -Ofast -> -O3. PCL_NO_PRECOMPILE makes builds slow — limit -j on 8GB"
   - "use_sim_time:=false mandatory for live sensors (default true = bag playback)"
 
-validated: false
-integration_complete: false
-notes: "Newly added framework (2026-06-08). Configs/scripts staged but NOT yet bench/flight-tested on this rig. Run Phase 2 validation + Phase 5 testing before trusting. EllipseLIO is claimed superior to FAST-LIO2 in confined spaces via adaptive ellipsoid (tensor-voting) residuals."
+validated: true            # bench + live motion validated 2026-06-21 on the real rig
+integration_complete: false  # flight (vision_to_mavros + MAVROS) not yet flown; needs flight-scale loop
+notes: |
+  Newly added 2026-06-08; bench+bag tuned 2026-06-11 (EllipseLIO won the 3-way apartment
+  benchmark: 0.01m loop closure, smoothest per-scan, no divergence — at BOOST clock).
+  PHASE 5 LIVE VALIDATED 2026-06-21 (boost 1984MHz, CycloneDDS): live Ouster driver +
+  EllipseLIO co-run, /ouster/points 20.02Hz steady, /ellipselio_odom ~79Hz single publisher.
+  Hand-carried motion test #2 (translate + 90 CCW then 90 CW, return to origin):
+  loop closure 0.02m, max single-step 0.01m (zero divergence), yaw drift -3.2deg, no terminal
+  runaway. YAW SIGN INVERTED: physical CCW reads as yaw DECREASE (~-90.6deg for a 90 turn) ->
+  vision_to_mavros must negate yaw (same as SuperOdom). Magnitude accurate.
+  REMAINING for integration_complete: flight-scale walking loop (this was a ~1m handheld
+  envelope), then vision_to_mavros (negate yaw + world-Z/heading) + GPS-denied flight.
+  Requires CLOCK BOOST (compute-marginal/diverges ~50% at stock 1497MHz) and CycloneDDS."

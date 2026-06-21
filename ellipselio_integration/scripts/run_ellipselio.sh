@@ -55,14 +55,19 @@ sleep 8
 # 4. Viz helpers: odom->Path republisher (/ellipselio_path; EllipseLIO has no Path)
 #    and /cloud_scan throttle (/cloud_scan_lite @5Hz; full /cloud_scan is ~63Mbps,
 #    too heavy for a remote Foxglove link).
+#    rollX = bake a 180deg X-roll into the cloud DATA so it renders upright in Foxglove.
+#    EllipseLIO stamps clouds in frame "/odom_ellipselio" (LEADING SLASH, hardcoded in
+#    map_processing.cpp) -> static_transform_publisher strips the slash so a view frame
+#    can't attach, and some Foxglove clients won't list/apply it. Rotating the points
+#    sidesteps TF entirely. (Display only; /ellipselio_odom is untouched.)
 docker exec -d "$CTR" bash -lc "
   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
-  python3 /root/ros2_ws/odom_to_path.py"
+  python3 /root/ros2_ws/odom_to_path.py rollX"
 docker exec -d "$CTR" bash -lc "
   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
-  python3 /root/ros2_ws/cloud_throttle.py 5"
+  python3 /root/ros2_ws/cloud_throttle.py 5 rollX"
 
 # 5. Foxglove bridge (port 8765), WHITELISTED. The raw /ouster/points organized cloud
 #    (~480Mbps) saturates remote links and stalls the websocket, so the bridge streams

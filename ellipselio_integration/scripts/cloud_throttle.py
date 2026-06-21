@@ -8,12 +8,19 @@
 # Gates on the message STAMP so the rate is correct under sim time (bag replay) too,
 # and resets on stamp rewind (bag restart).
 import sys
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import PointCloud2
 
 RATE_HZ = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
+# 180-deg VIEW rotation baked into the cloud DATA (EllipseLIO's frame is /odom_ellipselio
+# with a leading slash -> static_transform_publisher can't attach a view frame to it and
+# some Foxglove clients won't apply it; rotating the points sidesteps TF entirely).
+#   native = unchanged, rollX = flip y,z, pitchY = flip x,z, yawZ = flip x,y
+MODE = sys.argv[2] if len(sys.argv) > 2 else 'native'
+_NEG = {'native': (), 'rollX': ('y', 'z'), 'pitchY': ('x', 'z'), 'yawZ': ('x', 'y')}
 
 class CloudThrottle(Node):
     def __init__(self):
@@ -24,11 +31,26 @@ class CloudThrottle(Node):
         self.sub = self.create_subscription(PointCloud2, '/cloud_scan', self.cb, be)
         self.min_dt = 1.0 / RATE_HZ
         self.last = None
+        self.neg = _NEG.get(MODE, ())
+        self.get_logger().info(f'cloud_throttle {RATE_HZ}Hz, rotate mode={MODE} (negate {self.neg})')
+
+    def _rotate(self, m):
+        # x,y,z are float32 at byte offsets 0,4,8 of each point_step-byte point; only
+        # those bytes are touched, all other fields (intensity/ring/range...) preserved.
+        dt = np.dtype({'names': ['x', 'y', 'z'], 'formats': ['<f4', '<f4', '<f4'],
+                       'offsets': [0, 4, 8], 'itemsize': m.point_step})
+        a = np.frombuffer(bytes(m.data), dtype=dt).copy()
+        for ax in self.neg:
+            a[ax] = -a[ax]
+        m.data = a.tobytes()
+        return m
 
     def cb(self, m):
         t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
         if self.last is None or t < self.last or (t - self.last) >= self.min_dt:
             self.last = t
+            if self.neg:
+                m = self._rotate(m)
             self.pub.publish(m)
 
 def main():
