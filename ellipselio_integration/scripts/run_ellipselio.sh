@@ -54,7 +54,8 @@ sleep 8
 
 # 4. Viz helpers: odom->Path republisher (/ellipselio_path; EllipseLIO has no Path)
 #    and /cloud_scan throttle (/cloud_scan_lite @5Hz; full /cloud_scan is ~63Mbps,
-#    too heavy for a remote Foxglove link).
+#    too heavy for a remote Foxglove link). Both run NATIVE (no data rotation) now that
+#    the upright view is done properly in TF below.
 docker exec -d "$CTR" bash -lc "
   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
@@ -63,6 +64,26 @@ docker exec -d "$CTR" bash -lc "
   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
   python3 /root/ros2_ws/cloud_throttle.py 5"
+
+# 4b. Upright view as a PROPER TF rotation: map_view -> odom_ellipselio, 180deg Y-pitch.
+#    EllipseLIO's native frame has Z-down (a lift reads as -z) AND X pointing backward; a
+#    180deg PITCH (flips X and Z, keeps Y) stands the scene upright AND points the X axes
+#    forward (a 180deg X-roll also stands it upright but leaves X pointing backward). This
+#    parents EllipseLIO's whole tree under map_view, so the cloud, path AND the imu_ellipselio
+#    /imu_prop_ellipselio frame axes all render correctly TOGETHER (the old data-rotation hack
+#    only fixed clouds, not the TF frames). REQUIRES the leading-slash frame-name patch in
+#    map_processing.cpp (node_namespace_ + "odom_ellipselio", no slash) — without it the
+#    frame can't attach. Uses /tf_static (timeless): a constant transform on /tf_static
+#    applies at ANY message stamp, so it correctly transforms EllipseLIO's sensor-stamped
+#    clouds; a continuous /tf broadcast with a node-clock stamp does NOT (time-base
+#    mismatch breaks the chain). Set Foxglove Fixed Frame to map_view. NOTE: Foxglove caches
+#    /tf_static, so if you CHANGE this rotation you must reconnect the client to see it.
+docker exec -d "$CTR" bash -lc "
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash &&
+  ros2 run tf2_ros static_transform_publisher --x 0 --y 0 --z 0 \
+    --roll 0 --pitch 3.14159265 --yaw 0 \
+    --frame-id map_view --child-frame-id odom_ellipselio"
 
 # 5. Foxglove bridge (port 8765), WHITELISTED. The raw /ouster/points organized cloud
 #    (~480Mbps) saturates remote links and stalls the websocket, so the bridge streams
@@ -74,7 +95,7 @@ docker exec -d "$CTR" bash -lc "
   ros2 run foxglove_bridge foxglove_bridge --ros-args \
     --params-file /root/ros2_ws/foxglove_params.yaml -p use_sim_time:=false"
 echo
-echo "Foxglove: connect to ws://<jetson-ip>:8765  (fixed frame: odom_ellipselio)"
+echo "Foxglove: connect to ws://<jetson-ip>:8765  (fixed frame: map_view (upright; odom_ellipselio = native Z-down))"
 echo "  topics: /cloud_scan_lite (dense scan @5Hz)  /cloud_map (set Decay=0)  /ellipselio_path  /ellipselio_odom"
 echo "Verify:  docker exec $CTR bash -lc 'source /opt/ros/humble/setup.bash && ros2 topic hz /ellipselio_odom'"
 echo "Map:     /cloud_map   Scan: /cloud_scan   Analytics: /analytics (watch ram_usage)"
