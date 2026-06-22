@@ -53,17 +53,24 @@ scripts/agent_memory.sh status    # show link + worktree + branch head
   `MEMORY.md` (the index) is the one file two machines might both edit — if it conflicts,
   resolve it like any text merge (keep both machines' new bullet lines).
 
-### Optional: automate the sync with hooks
-To pull on session start and push on stop, add to `.claude/settings.json` (or use the
-`update-config` skill). Not enabled by default — pushing on every Stop can be chatty:
+### Auto-sync (enabled)
+Committed project hooks in `.claude/settings.json` run `scripts/agent_memory.sh sync`
+on **SessionStart** (pull others' updates) and **Stop** (commit + push yours), so sharing
+is automatic once a machine has run `join`. They travel with the repo, so the other
+machine gets them on pull. On a machine that hasn't run `join`, `sync` no-ops (the hook is
+`… || true`), so it's harmless there.
+
 ```jsonc
+// .claude/settings.json (committed)
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "bash scripts/agent_memory.sh sync || true" }] }],
-    "Stop":         [{ "hooks": [{ "type": "command", "command": "bash scripts/agent_memory.sh sync || true" }] }]
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/agent_memory.sh\" sync || true", "timeout": 60 }] }],
+    "Stop":         [{ "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/agent_memory.sh\" sync || true", "timeout": 60 }] }]
   }
 }
 ```
+To disable on one machine, set these to `false` in `.claude/settings.local.json`, or run
+`scripts/agent_memory.sh sync` manually instead. Review/toggle hooks anytime via `/hooks`.
 
 ## Reverting a machine
 The symlink is reversible: `rm ~/.claude/projects/<hash>/memory` and restore the

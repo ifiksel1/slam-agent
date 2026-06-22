@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/agent_memory.sh\" sync || true",
+            "timeout": 60,
+            "statusMessage": "Syncing shared agent memory…"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/agent_memory.sh\" sync || true",
+            "timeout": 60,
+            "statusMessage": "Pushing shared agent memory…"
+          }
+        ]
+      }
+    ]
+  }
+}
