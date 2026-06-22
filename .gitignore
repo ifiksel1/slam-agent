@@ -14,3 +14,7 @@ docker_src_fastlivo2/
 .catkin_tools/
 .claude/projects/
 superodom_integration/**/*.db3
+
+# Shared agent-memory worktree (checkout of the 'agent-memory' branch; per-machine,
+# registered locally via scripts/agent_memory.sh). The MEMORY lives on its branch, not here.
+.agent-memory/
