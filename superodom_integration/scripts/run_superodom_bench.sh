@@ -13,8 +13,12 @@
 # Host is Ubuntu 20.04 (Noetic only) -> ROS2 runs ONLY in this container.
 set -e
 CTR=superodom
-SENSOR_IP=192.168.2.60
-HOST_IP=192.168.2.50
+# Rig defaults (env-overridable). SENSOR_IP/HOST_IP here are DISPLAY ONLY — the driver
+# binds to the IPs in src/ouster_os1_64_driver.yaml; edit that file for your network.
+SENSOR_IP="${SENSOR_IP:-192.168.2.60}"
+HOST_IP="${HOST_IP:-192.168.2.50}"
+WS="${SUPERODOM_WS:-$HOME/superodom_ws}"
+IMAGE="${SUPERODOM_IMAGE:-superodom:humble}"
 
 # 1. Start the container (host net so the in-container ROS2 driver reaches the sensor)
 # --init: run tini as PID 1 so killed SuperOdom nodes get REAPED instead of piling up as <defunct>
@@ -22,8 +26,8 @@ HOST_IP=192.168.2.50
 docker rm -f "$CTR" 2>/dev/null || true
 docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size=4gb \
   -e ROS_DOMAIN_ID=0 \
-  -v "$HOME/superodom_ws:/root/ros2_ws" \
-  superodom:humble sleep infinity
+  -v "$WS:/root/ros2_ws" \
+  "$IMAGE" sleep infinity
 # NOTE: mount the WHOLE workspace (not just src/) so build/ + install/ persist on the
 # host — otherwise a container restart loses the colcon build and needs a full rebuild.
 

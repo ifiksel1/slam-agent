@@ -14,31 +14,37 @@ BAGNAME="${1:?usage: run_bag_foxglove.sh <bag_dir_name>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTR=ellipselio
 RMW=rmw_cyclonedds_cpp
-FIELD_HOST="$HOME/superodom_ws/field"
+WS="${ELLIPSELIO_WS:-$HOME/ellipselio_ws}"
+IMAGE="${ELLIPSELIO_IMAGE:-ellipselio:humble}"
+FIELD_HOST="${FIELD_HOST:-${SUPERODOM_WS:-$HOME/superodom_ws}/field}"
 BAG=/root/field/$BAGNAME
 OUTDIR=/root/ros2_ws/results/field/$BAGNAME
-HOSTOUT="$HOME/ellipselio_ws/results/field/$BAGNAME"
+HOSTOUT="$WS/results/field/$BAGNAME"
 SRC='source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash'
 CFG=/root/ros2_ws/src/ellipselio/config
 
 [ -f "$FIELD_HOST/$BAGNAME/metadata.yaml" ] || { echo "no bag at $FIELD_HOST/$BAGNAME"; exit 1; }
 mkdir -p "$HOSTOUT"
 # stage helper nodes + foxglove params into the mounted workspace
-cp "$HERE/ellipselio_traj_sampler.py" "$HOME/ellipselio_ws/ellipselio_traj_sampler.py"
-cp "$HERE/ellipselio_diag.py"         "$HOME/ellipselio_ws/ellipselio_diag.py"
-cp "$HERE/odom_to_path.py"            "$HOME/ellipselio_ws/odom_to_path.py"
-cp "$HERE/cloud_throttle.py"          "$HOME/ellipselio_ws/cloud_throttle.py"
-cp "$HERE/../config/foxglove_params.yaml" "$HOME/ellipselio_ws/foxglove_params.yaml"
+cp "$HERE/ellipselio_traj_sampler.py" "$WS/ellipselio_traj_sampler.py"
+cp "$HERE/ellipselio_diag.py"         "$WS/ellipselio_diag.py"
+cp "$HERE/odom_to_path.py"            "$WS/odom_to_path.py"
+cp "$HERE/cloud_throttle.py"          "$WS/cloud_throttle.py"
+cp "$HERE/../config/foxglove_params.yaml" "$WS/foxglove_params.yaml"
 
 # Recreate the container WITH the field bags mounted read-only (the live driver must stop
 # for replay anyway). Whole-ws mount persists build/install.
 echo "=== (re)starting $CTR with bag mount ==="
+# OMP_NUM_THREADS must be a CONTAINER-level -e: launch_ros spawns component_container_mt with a
+# sanitized env, so an `export` in the launching shell does NOT reach it (only docker -e does,
+# same as RMW_IMPLEMENTATION). Set ELL_OMP_THREADS=1 to force deterministic OpenMP reductions.
+OMPENV=""; [ -n "${ELL_OMP_THREADS:-}" ] && OMPENV="-e OMP_NUM_THREADS=${ELL_OMP_THREADS}"
 docker rm -f "$CTR" 2>/dev/null || true
 docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size=4gb \
-  -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=$RMW \
-  -v "$HOME/ellipselio_ws:/root/ros2_ws" \
+  -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=$RMW $OMPENV \
+  -v "$WS:/root/ros2_ws" \
   -v "$FIELD_HOST:/root/field:ro" \
-  ellipselio:humble sleep infinity
+  "$IMAGE" sleep infinity
 docker exec "$CTR" bash -c "mkdir -p $OUTDIR"
 
 F=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo 0)
@@ -46,11 +52,16 @@ F=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || ech
 DUR=$(docker exec "$CTR" bash -lc "$SRC && ros2 bag info $BAG 2>/dev/null | grep -oE 'Duration:.*' | head -1")
 echo "  bag: $BAGNAME   $DUR"
 
-# 1. EllipseLIO in BAG mode (follows the bag's /clock)
-echo "=== launching EllipseLIO (use_sim_time:=true) ==="
+# 1. EllipseLIO in BAG mode (follows the bag's /clock).
+#    Determinism knobs (env-overridable, defaults = stock multi-threaded behavior):
+#      ELL_OMP_THREADS   -> export OMP_NUM_THREADS (e.g. 1 to force deterministic OpenMP reductions)
+#      ELL_CONTAINER_EXEC-> component_container_mt (default) | component_container (single-threaded)
+CEXEC="${ELL_CONTAINER_EXEC:-component_container_mt}"   # component_container starves EllipseLIO (FAST-LIO needs the MT executor); keep _mt
+echo "=== launching EllipseLIO (use_sim_time:=true, container=$CEXEC, OMP=${ELL_OMP_THREADS:-default}) ==="
 docker exec -d "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && \
   ros2 launch ellipselio ellipselio_standalone.launch.py \
     config_path:=$CFG config_file:=os1_64_ouster.yaml \
+    container_executable:=$CEXEC \
     use_sim_time:=true rviz:=false > $OUTDIR/ellipselio.log 2>&1"
 sleep 8
 

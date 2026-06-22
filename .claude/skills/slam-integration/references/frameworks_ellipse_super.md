@@ -9,7 +9,8 @@ only** and both bridge to ArduPilot via `vision_to_mavros` (they output
 
 ## EllipseLIO (`ellipse_lio`)
 
-- **Repo:** https://github.com/v4rl-ucy/ellipselio · **Package:** `ellipselio` · **Paper:** arXiv 2605.21150
+- **Repo:** https://github.com/v4rl-ucy/ellipselio (upstream) · **Package:** `ellipselio` · **Paper:** arXiv 2605.21150
+- **Rig-validated turnkey path:** `ellipselio_integration/scripts/setup.sh` (Docker). The WORKING source is the fork `github.com/ifiksel1/ellipselio` @ `fix/frame-names-no-leading-slash` (leading-slash frame-name fix + `container_executable` launch patch) — **not** on v4rl-ucy `main`. `ouster-ros` = `ouster-lidar/ouster-ros` @ `ros2`.
 - **What it is:** "Adaptive LiDAR-Inertial Odometry with an Ellipsoid Representation." Built on **FAST-LIO2 + IKFoM + i-Octree** (all vendored in `include/` — no GTSAM/Ceres/Sophus). Replaces FAST-LIO2's point-to-plane residuals with two-pass **tensor voting** that classifies each map point as plane/line/ball and adaptively reweights the EKF. This is the source of its confined/feature-poor-space advantage and why there are **no `point_filter_num`/`filter_size` knobs** to tune.
 - **ROS:** Humble **and** Jazzy. `CMakeLists.txt` auto-detects Jazzy and sets a `ROS_JAZZY` compile define — no manual flag.
 - **Sensors:** Ouster (OS64/OS128), Velodyne VLP-16, Hesai QT64, Livox. Ships dataset configs in `config/`.
@@ -53,7 +54,8 @@ Low risk: no CUDA, no x86 intrinsics, OpenMP-based. Watchpoints: (1) `-Ofast` im
 
 ## SuperOdom (`super_odometry`)
 
-- **Repo:** https://github.com/v4rl-ucy/SuperOdom · **Package:** `super_odometry` · **Paper:** SuperLoc, ICRA 2025
+- **Repo:** https://github.com/superxslam/SuperOdom @ `ros2` (public; rig-validated source) · **Package:** `super_odometry` · **Paper:** SuperLoc, ICRA 2025
+- **Rig-validated turnkey path:** `superodom_integration/scripts/setup.sh` (Docker) — clones SuperOdom + `ouster-lidar/ouster-ros@ros2` + `Livox-SDK/livox_ros_driver2` + `teamspatzenhirn/rviz_2d_overlay_plugins`, builds image + workspace.
 - **What it is:** LiDAR-inertial odometry with bidirectional LiDAR↔IMU fusion, ICP alignment-risk prediction, and **6-DOF degeneracy/uncertainty estimation**. Three nodes: `feature_extraction_node`, `laser_mapping_node`, `imu_preintegration_node`. SLAM and localization modes.
 - **ROS:** Humble only (Dockerfile `osrf/ros:humble-desktop-full`; Jazzy untested).
 - **Sensors:** Ouster (OS1-128 config; use for OS1-64 with `scan_line: 64`), Velodyne VLP-16, Livox Mid360.

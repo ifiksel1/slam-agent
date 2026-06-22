@@ -17,6 +17,7 @@ the Ouster.
 ## Files
 | File | Purpose |
 |---|---|
+| `scripts/setup.sh` | **Turnkey: clone sources → stage configs → build image + workspace.** Run this first on a fresh clone. |
 | `Dockerfile` | `ros:humble-ros-base` (arm64) + Sophus@97e7161, GTSAM@4abef92 (`MARCH_NATIVE=OFF`, `-j4`), Ceres, Livox SDK2, **libzip-dev** + ouster_ros deps. torch/numba/scikit pip lines dropped (no aarch64 wheels, unused). |
 | `config/os1_64.yaml` | SuperOdom params, `scan_line: 64`, topics `/ouster/points` + `/ouster/imu`. |
 | `config/ouster/os1_64_calibration.yaml` | OpenCV extrinsic (identity rot + ref translation — CALIBRATE before flight). |
@@ -24,6 +25,31 @@ the Ouster.
 | `scripts/run_superodom_bench.sh` | Full bringup: container → ouster driver → SuperOdom. |
 | `scripts/odom_trajectory_sampler.py` | Logs `/state_estimation` x/y/z/yaw @25Hz + return-to-start summary. |
 | `results/bench_motion_2026-06-09.log` | Captured motion-test trajectory (below). |
+
+### Sources (pinned by `setup.sh`) — all PUBLIC
+| Package | Repo | Branch |
+|---|---|---|
+| `SuperOdom` | `github.com/superxslam/SuperOdom` | `ros2` |
+| `ouster-ros` | `github.com/ouster-lidar/ouster-ros` | `ros2` |
+| `livox_ros_driver2` | `github.com/Livox-SDK/livox_ros_driver2` | `master` |
+| `rviz_2d_overlay_plugins` | `github.com/teamspatzenhirn/rviz_2d_overlay_plugins` | `main` |
+
+## Quickstart (fresh clone → running)
+```bash
+# 0. One-time turnkey setup: clones all sources (pinned, public), stages configs, builds
+#    the image (source-builds GTSAM/Sophus/Ceres — slow first run) + workspace. Idempotent.
+cd ~/slam-agent/superodom_integration && ./scripts/setup.sh
+
+# 1. Set YOUR sensor + host IP / lidar_mode, and CALIBRATE the extrinsic before flight
+$EDITOR ~/superodom_ws/src/ouster_os1_64_driver.yaml
+$EDITOR ~/superodom_ws/src/SuperOdom/super_odometry/config/ouster/os1_64_calibration.yaml
+
+# 2. Free the Ouster (stop ROS1 FAST-LIVO2), then bring up
+docker update --restart=no fast_livo2_slam_autostart && docker stop fast_livo2_slam_autostart 2>/dev/null
+./scripts/run_superodom_bench.sh
+```
+Env overrides: `SUPERODOM_WS`, `SUPERODOM_SRC_URL`/`SUPERODOM_BRANCH` (+ `OUSTER_ROS_*`,
+`LIVOX_*`, `OVERLAY_*`), `SUPERODOM_IMAGE`, `SENSOR_IP`/`HOST_IP` (display only).
 
 ## Build notes (gotchas hit + fixed)
 - **Base image:** `osrf/ros:humble-desktop-full` is **amd64-only** → built under QEMU on the Jetson. Switched to multi-arch `ros:humble-ros-base`; build with `--platform linux/arm64`.

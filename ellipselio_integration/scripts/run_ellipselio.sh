@@ -11,16 +11,20 @@
 # Host is Ubuntu 20.04 (Noetic only) -> ROS2 runs ONLY in this container.
 set -e
 CTR=ellipselio
-SENSOR_IP=192.168.2.60
-HOST_IP=192.168.2.50
+# Rig defaults (env-overridable). SENSOR_IP/HOST_IP here are DISPLAY ONLY — the driver
+# binds to the IPs in src/ouster_os1_64_driver.yaml; edit that file for your network.
+SENSOR_IP="${SENSOR_IP:-192.168.2.60}"
+HOST_IP="${HOST_IP:-192.168.2.50}"
+WS="${ELLIPSELIO_WS:-$HOME/ellipselio_ws}"
+IMAGE="${ELLIPSELIO_IMAGE:-ellipselio:humble}"
 CONFIG=${1:-/root/ros2_ws/src/ellipselio/config/os1_64_ouster.yaml}
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stage the Foxglove params + helper nodes into the mounted workspace so the container
 # sees them at /root/ros2_ws/ (same pattern run_bag.sh uses for the sampler).
-cp "$HERE/../config/foxglove_params.yaml" "$HOME/ellipselio_ws/foxglove_params.yaml"
-cp "$HERE/odom_to_path.py"               "$HOME/ellipselio_ws/odom_to_path.py"
-cp "$HERE/cloud_throttle.py"             "$HOME/ellipselio_ws/cloud_throttle.py"
+cp "$HERE/../config/foxglove_params.yaml" "$WS/foxglove_params.yaml"
+cp "$HERE/odom_to_path.py"               "$WS/odom_to_path.py"
+cp "$HERE/cloud_throttle.py"             "$WS/cloud_throttle.py"
 
 # 1. Start the container. host net so the in-container ROS2 driver reaches the sensor.
 #    --init: tini as PID 1 reaps killed nodes instead of leaving <defunct> zombies.
@@ -28,8 +32,8 @@ cp "$HERE/cloud_throttle.py"             "$HOME/ellipselio_ws/cloud_throttle.py"
 docker rm -f "$CTR" 2>/dev/null || true
 docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size=4gb \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-  -v "$HOME/ellipselio_ws:/root/ros2_ws" \
-  ellipselio:humble sleep infinity
+  -v "$WS:/root/ros2_ws" \
+  "$IMAGE" sleep infinity
 
 # 2. ROS2 Ouster driver (publishes /ouster/points 20Hz, /ouster/imu ~100Hz).
 #    CycloneDDS holds 20Hz; default Fast-DDS stalls the large cloud publish (proven on this rig).

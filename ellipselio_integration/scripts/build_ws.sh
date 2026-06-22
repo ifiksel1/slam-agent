@@ -8,11 +8,13 @@
 #   - If the EKF diverges on aarch64 ONLY, rebuild ellipselio with -O3 (override -Ofast).
 set -e
 CTR=ellipselio_build
+WS="${ELLIPSELIO_WS:-$HOME/ellipselio_ws}"
+IMAGE="${ELLIPSELIO_IMAGE:-ellipselio:humble}"
 docker rm -f "$CTR" 2>/dev/null || true
 
 docker run --rm --name "$CTR" \
-  -v "$HOME/ellipselio_ws:/root/ros2_ws" \
-  ellipselio:humble bash -lc '
+  -v "$WS:/root/ros2_ws" \
+  "$IMAGE" bash -lc '
     set -e
     source /opt/ros/humble/setup.bash
     cd /root/ros2_ws
@@ -27,4 +29,4 @@ docker run --rm --name "$CTR" \
     echo "=== build complete ==="
     ls install/
   '
-echo "Workspace built at ~/ellipselio_ws/install (persisted on host)."
+echo "Workspace built at $WS/install (persisted on host)."

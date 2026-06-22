@@ -1,0 +1,39 @@
+diff --git a/launch/ellipselio_standalone.launch.py b/launch/ellipselio_standalone.launch.py
+index e3771e0..6a5ec5f 100644
+--- a/launch/ellipselio_standalone.launch.py
++++ b/launch/ellipselio_standalone.launch.py
+@@ -22,6 +22,7 @@ def generate_launch_description():
+     rviz_use = LaunchConfiguration('rviz')
+     rviz_cfg = LaunchConfiguration('rviz_cfg')
+     container_name = LaunchConfiguration('container_name')
++    container_executable = LaunchConfiguration('container_executable')
+ 
+     declare_use_sim_time_cmd = DeclareLaunchArgument(
+         'use_sim_time', default_value='true',
+@@ -47,10 +48,17 @@ def generate_launch_description():
+         name='container_name',
+         default_value='ellipselio_container',
+         description='container name')
++    # component_container_mt (multi-threaded executor) is the default. Override to
++    # component_container (single-threaded) to test/remove ROS-executor scheduling
++    # non-determinism on a knife-edge degenerate scene (see IRIS-LIO determinism probe).
++    container_executable_arg = DeclareLaunchArgument(
++        name='container_executable',
++        default_value='component_container_mt',
++        description='component_container_mt (multi-threaded) or component_container (single-threaded)')
+ 
+     container = Node(
+         package='rclcpp_components',
+-        executable='component_container_mt',
++        executable=container_executable,
+         name=container_name,
+         output='screen',
+         parameters=[{'use_sim_time': use_sim_time}],
+@@ -77,6 +85,7 @@ def generate_launch_description():
+     ld.add_action(declare_rviz_cmd)
+     ld.add_action(declare_rviz_config_path_cmd)
+     ld.add_action(container_name_arg)
++    ld.add_action(container_executable_arg)
+     ld.add_action(container)
+     ld.add_action(base_launch)
+ 

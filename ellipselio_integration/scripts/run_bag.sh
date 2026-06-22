@@ -12,17 +12,19 @@ BAGNAME="${1:?usage: run_bag.sh <bag_dir_name>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTR=ellipselio
 RMW=rmw_cyclonedds_cpp
-FIELD_HOST="$HOME/superodom_ws/field"
+WS="${ELLIPSELIO_WS:-$HOME/ellipselio_ws}"
+IMAGE="${ELLIPSELIO_IMAGE:-ellipselio:humble}"
+FIELD_HOST="${FIELD_HOST:-${SUPERODOM_WS:-$HOME/superodom_ws}/field}"
 BAG=/root/field/$BAGNAME
 OUTDIR=/root/ros2_ws/results/field/$BAGNAME
-HOSTOUT="$HOME/ellipselio_ws/results/field/$BAGNAME"
+HOSTOUT="$WS/results/field/$BAGNAME"
 SRC='source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash'
 CFG=/root/ros2_ws/src/ellipselio/config
 
 [ -f "$FIELD_HOST/$BAGNAME/metadata.yaml" ] || { echo "no bag at $FIELD_HOST/$BAGNAME"; exit 1; }
 mkdir -p "$HOSTOUT"
 # put the standalone sampler where the (mounted) workspace can see it
-cp "$HERE/ellipselio_traj_sampler.py" "$HOME/ellipselio_ws/ellipselio_traj_sampler.py"
+cp "$HERE/ellipselio_traj_sampler.py" "$WS/ellipselio_traj_sampler.py"
 
 # Recreate the ellipselio container WITH the field bags mounted read-only (the live driver
 # must stop for replay anyway; EllipseLIO stays the active stack). Whole-ws mount persists build/install.
@@ -30,9 +32,9 @@ echo "=== (re)starting $CTR with bag mount ==="
 docker rm -f "$CTR" 2>/dev/null || true
 docker run -d --name "$CTR" --init --privileged --net=host --ipc=host --shm-size=4gb \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=$RMW \
-  -v "$HOME/ellipselio_ws:/root/ros2_ws" \
+  -v "$WS:/root/ros2_ws" \
   -v "$FIELD_HOST:/root/field:ro" \
-  ellipselio:humble sleep infinity
+  "$IMAGE" sleep infinity
 docker exec "$CTR" bash -c "mkdir -p $OUTDIR"
 
 # clock advisory

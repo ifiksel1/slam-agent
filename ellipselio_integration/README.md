@@ -19,30 +19,46 @@ confined / feature-poor-space advantage. Candidate replacement for FAST-LIO2.
 | `ros_entrypoint.sh` | Sources ROS 2 + workspace overlay. |
 | `config/os1_64_ouster.yaml` | Live OS1-64 config: `/ouster/points` + `/ouster/imu`, `vertical_fov: 42.4`, rig extrinsics. |
 | `config/ouster_os1_64_driver.yaml` | Ouster ROS 2 driver params (reused from validated SuperOdom setup). |
-| `scripts/build_ws.sh` | One-shot `colcon build` of `ellipselio` + `ouster_ros` in-container. |
+| `scripts/setup.sh` | **Turnkey: clone sources → patch → stage configs → build image + workspace.** Run this first on a fresh clone. |
+| `patches/0001-container-executable-launch-arg.patch` | Adds the `container_executable` launch arg (needed by `run_bag_foxglove.sh`); applied by `setup.sh`. |
+| `scripts/build_ws.sh` | One-shot `colcon build` of `ellipselio` + `ouster_ros` in-container (called by `setup.sh`). |
 | `scripts/run_ellipselio.sh` | Live bringup: container → Ouster driver → EllipseLIO. |
 
-Host workspace: `~/ellipselio_ws/` (mounted to `/root/ros2_ws`; `build/`+`install/`
-persist on host). Sources: `ellipselio` (github.com/v4rl-ucy/ellipselio, main),
-`ouster-ros` (reused from `superodom_ws`).
+### Sources (pinned by `setup.sh`)
+| Package | Repo | Branch | Notes |
+|---|---|---|---|
+| `ellipselio` | `github.com/ifiksel1/ellipselio` (fork) | `fix/frame-names-no-leading-slash` | Leading-slash frame-name fix + `container_executable` patch. **Not on v4rl-ucy upstream.** |
+| `ouster-ros` | `github.com/ouster-lidar/ouster-ros` (official) | `ros2` | Public. |
 
-## Quickstart
+Host workspace: `~/ellipselio_ws/` (mounted to `/root/ros2_ws`; `build/`+`install/`
+persist on host). Override with `ELLIPSELIO_WS=...`.
+
+## Quickstart (fresh clone → running)
 
 ```bash
-# 1. Build the image (once)
-cd ~/slam-agent/ellipselio_integration && docker build -t ellipselio:humble .
+# 0. One-time turnkey setup: clones sources (pinned), applies the launch patch, stages
+#    configs, builds the image + workspace. Idempotent — safe to re-run.
+cd ~/slam-agent/ellipselio_integration && ./scripts/setup.sh
 
-# 2. Build the workspace (once; ~/ellipselio_ws/install persists)
-./scripts/build_ws.sh
+# 1. Set YOUR sensor + host IP and lidar_mode (real binding lives here, not in the scripts)
+$EDITOR ~/ellipselio_ws/src/ouster_os1_64_driver.yaml   # sensor_hostname / udp_dest / lidar_mode
 
-# 3. Free the Ouster, then bring up live
+# 2. Free the Ouster, then bring up live
 docker stop superodom slam_gpu_system fast_livo2_slam_autostart 2>/dev/null
 ./scripts/run_ellipselio.sh
 
-# 4. Verify odometry
+# 3. Verify odometry
 docker exec ellipselio bash -lc \
   'source /opt/ros/humble/setup.bash && ros2 topic hz /ellipselio_odom'
 ```
+
+> **Source access:** the EllipseLIO branch lives on a fork. Over HTTPS, a private fork
+> needs `gh auth setup-git`; point `ELLIPSELIO_SRC_URL=...` at your own mirror to override.
+> Everything else (`ouster-ros`) is public.
+>
+> **Env overrides:** `ELLIPSELIO_WS` (workspace), `ELLIPSELIO_SRC_URL` / `ELLIPSELIO_BRANCH`
+> (source), `OUSTER_ROS_URL` / `OUSTER_ROS_BRANCH`, `ELLIPSELIO_IMAGE`, `SENSOR_IP` / `HOST_IP`
+> (display only). Bag scripts read `SUPERODOM_WS` for the `field/` bag location.
 
 ## Topics
 

@@ -74,11 +74,17 @@ case "$SLAM_ALGORITHM" in
             log_warn "EllipseLIO is ROS 2 only — no ROS 1 / Noetic support exists. Aborting."
             exit 1
         fi
+        # NOTE: the rig-validated path is ellipselio_integration/scripts/setup.sh (Docker,
+        # pinned branch + container_executable patch + config staging). This generic clone
+        # is the bare-metal fallback. The WORKING branch (leading-slash frame-name fix +
+        # container_executable arg) lives on the fork, not v4rl-ucy upstream.
+        ELLIPSELIO_SRC_URL="${ELLIPSELIO_SRC_URL:-https://github.com/ifiksel1/ellipselio.git}"
+        ELLIPSELIO_BRANCH="${ELLIPSELIO_BRANCH:-fix/frame-names-no-leading-slash}"
         if [[ -d "ellipselio" ]]; then
             log_success "EllipseLIO already cloned"
         else
-            log_info "Cloning EllipseLIO..."
-            git clone https://github.com/v4rl-ucy/ellipselio.git
+            log_info "Cloning EllipseLIO ($ELLIPSELIO_BRANCH)..."
+            git clone --branch "$ELLIPSELIO_BRANCH" "$ELLIPSELIO_SRC_URL"
             log_success "EllipseLIO cloned"
         fi
         # OpenMP is required (-fopenmp throughout); OpenCV only for camera path.
@@ -100,11 +106,15 @@ case "$SLAM_ALGORITHM" in
             log_warn "SuperOdom is ROS 2 Humble only — no ROS 1 support. Aborting."
             exit 1
         fi
+        # Rig-validated turnkey path: superodom_integration/scripts/setup.sh (Docker).
+        # Working source is the PUBLIC superxslam/SuperOdom @ ros2 branch.
+        SUPERODOM_SRC_URL="${SUPERODOM_SRC_URL:-https://github.com/superxslam/SuperOdom.git}"
+        SUPERODOM_BRANCH="${SUPERODOM_BRANCH:-ros2}"
         if [[ -d "SuperOdom" ]]; then
             log_success "SuperOdom already cloned"
         else
-            log_info "Cloning SuperOdom + workspace companions..."
-            git clone https://github.com/v4rl-ucy/SuperOdom.git
+            log_info "Cloning SuperOdom ($SUPERODOM_BRANCH) + workspace companions..."
+            git clone --branch "$SUPERODOM_BRANCH" "$SUPERODOM_SRC_URL"
         fi
         # livox_ros_driver2 is a HARD build dependency even for Ouster-only use.
         [[ -d "livox_ros_driver2" ]] || git clone https://github.com/Livox-SDK/livox_ros_driver2.git
