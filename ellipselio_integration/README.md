@@ -73,6 +73,11 @@ docker exec ellipselio bash -lc \
 ArduPilot bridge: feed `/ellipselio_odom` to `vision_to_mavros` (nav_msgs/Odometry in),
 same pattern as FAST-LIO/SuperOdom on this rig.
 
+> **Field lessons (read before flight):** [`docs/lessons/ellipselio_superodom_findings.md`](../docs/lessons/ellipselio_superodom_findings.md)
+> (non-determinism/flyaways, yaw-sign inversion, `lidar.rate` must = 20, extrinsic, QoS) and
+> [`docs/lessons/jetson_orin_ouster_operational.md`](../docs/lessons/jetson_orin_ouster_operational.md)
+> (CycloneDDS, clock boost, bag validation).
+
 ## Tuning & gotchas
 
 - `lidar.vertical_fov` is **tune-critical** (OS1-64 = 42.4). Wrong value silently degrades accuracy.

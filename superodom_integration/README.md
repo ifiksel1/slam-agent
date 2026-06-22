@@ -51,6 +51,11 @@ docker update --restart=no fast_livo2_slam_autostart && docker stop fast_livo2_s
 Env overrides: `SUPERODOM_WS`, `SUPERODOM_SRC_URL`/`SUPERODOM_BRANCH` (+ `OUSTER_ROS_*`,
 `LIVOX_*`, `OVERLAY_*`), `SUPERODOM_IMAGE`, `SENSOR_IP`/`HOST_IP` (display only).
 
+> **Field lessons (read before flight):** [`docs/lessons/ellipselio_superodom_findings.md`](../docs/lessons/ellipselio_superodom_findings.md)
+> (don't trust health/uncertainty — gate externally on kinematics; yaw-sign inversion; transient is
+> CPU-contention-driven) and [`docs/lessons/jetson_orin_ouster_operational.md`](../docs/lessons/jetson_orin_ouster_operational.md)
+> (CycloneDDS, clock boost, bag validation, STANDBY).
+
 ## Build notes (gotchas hit + fixed)
 - **Base image:** `osrf/ros:humble-desktop-full` is **amd64-only** → built under QEMU on the Jetson. Switched to multi-arch `ros:humble-ros-base`; build with `--platform linux/arm64`.
 - **ouster-sdk needs `libzip-dev`** (not in the upstream Dockerfile).

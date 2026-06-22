@@ -5,6 +5,12 @@ Load this when the user selects `ellipse_lio` or `super_odometry`. Both are **RO
 only** and both bridge to ArduPilot via `vision_to_mavros` (they output
 `nav_msgs/Odometry`). Phase 3 config templates live in `phase3_generation.md`.
 
+> **Rig-validated field lessons** (durable, in-repo): `docs/lessons/ellipselio_superodom_findings.md`
+> (validation status, 3-way benchmark, non-determinism/flyaways + gating, must-get-right config:
+> `lidar.rate`=20, extrinsic, BEST_EFFORT QoS, yaw-sign inversion) and
+> `docs/lessons/jetson_orin_ouster_operational.md` (CycloneDDS, clock boost, LiDAR mode, bag
+> validation, STANDBY, node teardown). Cite these before recommending flight or trusting single-run numbers.
+
 ---
 
 ## EllipseLIO (`ellipse_lio`)
