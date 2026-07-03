@@ -64,9 +64,13 @@ RUN git clone --recursive ${ADAPTIVE_LIO_REPO} adaptive_lio \
 COPY patches/namespace_frames.sh /tmp/namespace_frames.sh
 COPY patches/fix_ouster_ring.py  /tmp/fix_ouster_ring.py
 COPY patches/fix_ouster_timespan.py /tmp/fix_ouster_timespan.py
+COPY patches/fix_queue_cap.py    /tmp/fix_queue_cap.py
 COPY config/mapping_ouster.yaml  /tmp/mapping_ouster.yaml
 RUN bash /tmp/namespace_frames.sh ${CATKIN_WS}/src/adaptive_lio \
  && cp /tmp/mapping_ouster.yaml ${CATKIN_WS}/src/adaptive_lio/config/mapping_m.yaml \
+ # lidar_buffer_ (input queue) is unbounded -> backlog balloons RAM when processing < 20Hz ingress.
+ # Cap it to a rolling 40-scan window (drop oldest under overload) to hard-bound memory. (Fable dx.)
+ && python3 /tmp/fix_queue_cap.py ${CATKIN_WS}/src/adaptive_lio \
  # ouster_ros::Point.ring is uint8_t upstream but modern Ouster drivers / this rig's bags publish
  # ring as UINT16 -> PCL field-type mismatch -> garbage ring -> SIGSEGV on the first cloud. Fix to uint16.
  && python3 /tmp/fix_ouster_ring.py ${CATKIN_WS}/src/adaptive_lio \
