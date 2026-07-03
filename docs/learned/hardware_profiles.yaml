@@ -410,13 +410,17 @@ profiles:
       (smooth, zero divergence) but RESOURCE-heavy: unbounded voxel-map RSS ~20MB/s (->3.3GB@120s)
       + compute-bound (<<1x realtime), so at rate 1.0 it only covers ~92s of the 395s 3rd_floor bag.
       NOT estimator runaway (cf EllipseLIO). 6 build+runtime fixes in solution #8."
-    - "MEMORY WALL CONFIRMED (2026-07-03): rate 0.5 + odometry.max_distance 500->100 did NOT bound it.
-      RSS 766MB->3072MB by ~56s sim then node stalls/OOMs — same wall. max_distance prunes voxels by
-      EXTENT (>100m from pose), which an indoor walk never triggers; the unbounded growth is the GLOBAL
-      multi-resolution voxel hashmap (map_options), which has NO extent-prune knob. CONCLUSION: on the
-      8GB Jetson, Adaptive-LIO cannot complete a 395s indoor-exploration bag regardless of replay rate.
-      Options: 16GB module, shorter runs, much coarser/fewer voxel resolutions, or a memory-bounded SLAM
-      (FAST-LIO/COIN-LIO) for long indoor missions. Estimator quality itself is excellent."
+    - "MEMORY SOLVED (2026-07-03, Fable dx). Real cause was NOT the global map (my first guess): the
+      dominant consumer is the UNBOUNDED input queue lidar_buffer_ (deque, no cap) — 20Hz ingress vs
+      slower processing -> ~6MB/scan backlog -> OOM. Secondary: the 3-res mmap is inserted+iterated
+      every scan but NEVER queried (read path commented out, lidarodom.cpp:467) = pure dead weight.
+      FIX (config + 1 patch): point_filter_num 1->4, mmap neutered to a single trivial resolution,
+      max_num_iteration 10->5, max_num_residuals 1200->800, size_voxel_map 0.5->0.8; patch
+      fix_queue_cap.py caps lidar_buffer_ at 40. RESULT on 3rd_floor: FULL bag (7887 samples), loop
+      closure 2.69m, RSS FLAT ~64MB (was 3.7GB). Runs at rate 0.5 (compute-bound ~0.5x realtime on
+      8GB Jetson) so the node keeps pace and the cap never fires. CAVEAT: if the cap DOES fire (rate
+      1.0, node falls behind), dropped scans break CT-ICP's const-velocity model -> divergence
+      (max_step 120m). So realtime/live needs faster HW, lower lidar rate, or more compute cuts."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
