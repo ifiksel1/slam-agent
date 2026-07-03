@@ -442,6 +442,14 @@ profiles:
       DIVERGES (238m). Committed config=MODERATE (best for bounded inspection). Long ops: LIGHT.
       Offline best = 20Hz@0.5x = 2.69m. So for the hangar-inspection mission: 1024x10 + MODERATE
       cfg gives clean realtime LIO at 3.32m/57m (~5.8% drift) -- pair with absolute anchor for cm-pose."
+    - "DRIFT FLOOR CONFIRMED — tuning CANNOT reduce it further (2026-07-03). Adaptive-LIO is PURE LIO
+      (no loop closure / pose graph), so 3.32m is odometry drift, not a closable loop. Attempts to
+      push below 3.32m at 10Hz all made it WORSE: (a) tighter accuracy knobs (surf_res 0.5->0.3,
+      voxel 0.6->0.5, plane 0.3->0.25, iter 6->8) = heavier (~0.7x, RSS->1.1GB near cap) AND worse
+      registration -> 15.2m. (b) Ceres num_threads 3->6 (patch) = no speedup (small per-scan problem,
+      thread overhead) AND worse (7.7m, likely FP-reduction-order non-determinism, same as EllipseLIO).
+      Reverted both. CONCLUSION: 3.32m (10Hz realtime) / 2.69m (20Hz offline) are the pure-LIO floors;
+      going lower needs LOOP CLOSURE or absolute-anchor/prior-map FUSION, not parameter tuning."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
