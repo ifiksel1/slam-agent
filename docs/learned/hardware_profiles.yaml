@@ -433,6 +433,15 @@ profiles:
       20Hz/0.5x offline run (2.69m) because half the scans + the aggressive compute cuts. OPPORTUNITY:
       10Hz has spare compute, so restore accuracy (iter 5->10, resid 800->1200, filter 4->2, finer
       voxel) while staying realtime. RECIPE for live: set Ouster to 1024x10 (run_live.sh LIDAR_MODE)."
+    - "10Hz ACCURACY LADDER (2026-07-03, cap raised 40->300 so transient dips are BUFFERED not dropped
+      -- any dropped scan diverges CT-ICP). filter/iter/voxel/resid vs result on 3rd_floor 10Hz@1x:
+      LIGHT 4/5/0.8/800 = ~1.5x avg, RSS flat ~60MB, sustainable realtime, loop closure 8.35m.
+      MODERATE 3/6/0.6/1000 = ~0.9x avg, RSS creeps to ~700MB over 6min (buffer absorbs, 0 drops),
+      loop closure 3.32m, max_step 0.66m CLEAN -- best accuracy that stays clean, borderline for
+      indefinitely-long missions. FULL 2/10/0.5/1200 = ~0.83x avg -> buffer fills -> drops ->
+      DIVERGES (238m). Committed config=MODERATE (best for bounded inspection). Long ops: LIGHT.
+      Offline best = 20Hz@0.5x = 2.69m. So for the hangar-inspection mission: 1024x10 + MODERATE
+      cfg gives clean realtime LIO at 3.32m/57m (~5.8% drift) -- pair with absolute anchor for cm-pose."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
