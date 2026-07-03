@@ -426,6 +426,13 @@ profiles:
       ~2100/7887 scans dropped -> max_step 16m -> diverges (final 60m). Adaptive-LIO tolerates ZERO
       dropped scans. CONCLUSION: a clean run REQUIRES the node to never fall behind = rate 0.5 on 8GB
       Orin NX. For live 20Hz: faster HW, a 10Hz lidar mode (halves load), or deeper compute cuts."
+    - "10Hz LIDAR MODE = REALTIME VIABLE (2026-07-03). Simulated 1024x10 by decimating the 20Hz bag to
+      10Hz clouds (keep 100Hz IMU): ~/coinlio_ws/bags/3rd_floor_10hz.bag. At rate 1.0 the node holds a
+      STEADY 1.0x with NO dips (2x headroom) -> cap never fires -> 0 drops -> CLEAN: full bag (3948
+      samples), max_step 0.43m (no divergence), RSS FLAT ~60MB. Loop closure 8.35m — ~3x worse than the
+      20Hz/0.5x offline run (2.69m) because half the scans + the aggressive compute cuts. OPPORTUNITY:
+      10Hz has spare compute, so restore accuracy (iter 5->10, resid 800->1200, filter 4->2, finer
+      voxel) while staying realtime. RECIPE for live: set Ouster to 1024x10 (run_live.sh LIDAR_MODE)."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
