@@ -239,3 +239,75 @@ solutions:
   - clock_boost
   - lio
   - comparison
+- id: 8
+  date: '2026-07-03'
+  phase: 5
+  hardware:
+    platform: jetson_orin_nx (8GB, ARM64, boosted 1984MHz)
+    lidar: ouster_os1_64 (internal ICM-20948 IMU)
+    slam: adaptive_lio (ROS1 Noetic, Ceres CT-ICP, container adaptive-lio:noetic)
+    autopilot: ardupilot cube_orange
+    bag: 3rd_floor_20260613_222459.bag (ROS1, /ouster/points+/ouster/imu, 395s handheld
+      loop)
+  symptom: 'Adaptive-LIO on Ouster OS1-64: image build fails, then node produces zero
+    /odom (SIGSEGV / static-init terminate), then in bag battery every run flagged
+    100% runaway (~15m final) with only ~2000 samples (covers ~92s of 395s).'
+  root_cause: "SIX independent issues, peeled back in order: (1) BUILD: cloning livox_ros_driver\
+    \ into src/ collides with Adaptive-LIO's VENDORED thirdparty/livox_ros_driver\
+    \ (duplicate _generate_messages target) \u2014 Livox-SDK not needed either. (2)\
+    \ BUILD: CMakeLists hardcodes -std=c++14 but eigen_types.h uses a constexpr captureless\
+    \ lambda (less_vec2i) requiring C++17. (3) HARNESS: `docker exec ... bash -s <<heredoc`\
+    \ without -i does not attach stdin -> inner script runs nothing (exit 0). (4)\
+    \ HARNESS: `set -u` + sourcing ROS setup.bash aborts on unbound ROS_MASTER_URI.\
+    \ (5) LAUNCH: `--clock` (a double-hyphen) inside an XML comment = invalid roslaunch\
+    \ XML. (6) RUNTIME crash chain on real Ouster data: (a) ouster_ros::Point.ring\
+    \ is uint8_t but modern driver/bag publishes ring as UINT16 -> PCL field mismatch\
+    \ -> segfault; (b) Oust64Handler derives sweep timespan from points.back().t which\
+    \ on ORGANIZED clouds is NOT the max-t (145430 vs 49370610) -> tiny delta_time\
+    \ -> id~340 with a broken clamp (id=id-1) -> out-of-bounds v_cloud write -> segfault;\
+    \ (c) gnorm MULTIPLIES accel (main_ada.cpp: linear_acceleration*gnorm); Ouster\
+    \ IMU is already m/s^2 so gnorm must be 1 (not 9.805) \u2014 9.805 gave 9.67*9.805=94.9\
+    \ -> static_imu_init 'accel noise too large' -> terminate. FINAL FINDING: estimator\
+    \ is stable (smooth, sub-0.11m steps, ZERO divergence) but Adaptive-LIO (Ceres\
+    \ CT-ICP + multi-resolution voxel map that never prunes) is RESOURCE-heavy: RSS\
+    \ climbs unbounded ~20MB/s (18MB->3.3GB by 120s) and it is compute-bound (<<1x\
+    \ realtime) on the 8GB Jetson, so at rate 1.0 it only covers ~92s of the 395s\
+    \ bag. The '100% runaway/15m' is an artifact \u2014 15m is the walker's mid-walk\
+    \ position at t=92s, NOT loop-closure drift. Contrast: EllipseLIO fails by ESTIMATOR\
+    \ divergence; Adaptive-LIO fails by RESOURCE ceiling."
+  fix: 'Build: do NOT clone livox_ros_driver/Livox-SDK (use vendored thirdparty/);
+    sed CMakeLists c++14->c++17. Harness: docker exec -i; `set +u` around sourcing
+    ROS setup.bash. Launch: remove ''--'' from XML comments. Runtime: patches/fix_ouster_ring.py
+    (ring uint8->uint16), patches/fix_ouster_timespan.py (timespan_=max t + hard-clamp
+    id to [0,sweep_cut_num-1]), config gnorm=1. Next for a valid full-bag number:
+    replay at rate 0.5 (compute-bound, per run_coinlio_bag.sh convention) AND bound
+    map memory (lower odometry.max_distance 500->~100, coarser voxels) or the map
+    OOMs the 8GB Jetson before 395s.'
+  files_changed:
+  - adaptive_lio_ws/Dockerfile
+  - adaptive_lio_ws/patches/fix_ouster_ring.py
+  - adaptive_lio_ws/patches/fix_ouster_timespan.py
+  - adaptive_lio_ws/patches/namespace_frames.sh
+  - adaptive_lio_ws/config/mapping_ouster.yaml
+  - adaptive_lio_ws/launch/adaptive_lio.launch
+  - adaptive_lio_ws/scripts/run_bag.sh
+  tags:
+  - adaptive_lio
+  - ouster
+  - ring_uint16
+  - pcl_field_mismatch
+  - segfault
+  - gnorm
+  - static_imu_init
+  - organized_cloud
+  - timespan
+  - ceres
+  - ct_icp
+  - memory
+  - oom
+  - compute_bound
+  - ros1
+  - docker
+  - livox_vendored
+  - c++17
+  - docker_exec_stdin

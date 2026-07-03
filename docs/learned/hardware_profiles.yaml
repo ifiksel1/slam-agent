@@ -406,8 +406,11 @@ profiles:
         \ EllipseLIO/SuperOdom needed negation on this rig; measure a known +90 CCW\
         \ turn before flight."
     build_notes:
-    - BUILDS CLEAN on ARM64 Noetic (adaptive-lio:noetic, 4.18GB, 2026-07-03) after
-      TWO fixes below.
+    - "BUILDS + RUNS + tracks on ARM64 Noetic (adaptive-lio:noetic, 2026-07-03). Estimator STABLE
+      (smooth, zero divergence) but RESOURCE-heavy: unbounded voxel-map RSS ~20MB/s (->3.3GB@120s)
+      + compute-bound (<<1x realtime), so at rate 1.0 it only covers ~92s of the 395s 3rd_floor bag.
+      NOT estimator runaway (cf EllipseLIO). 6 build+runtime fixes in solution #8. Next: rate 0.5 +
+      bound map (odometry.max_distance 500->~100) for a full-bag loop-closure number."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
