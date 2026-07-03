@@ -406,22 +406,30 @@ profiles:
         \ EllipseLIO/SuperOdom needed negation on this rig; measure a known +90 CCW\
         \ turn before flight."
     build_notes:
+    - BUILDS CLEAN on ARM64 Noetic (adaptive-lio:noetic, 4.18GB, 2026-07-03) after
+      TWO fixes below.
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
-      2.1.x). Sophus + tessil robin_map VENDORED in repo thirdparty/.
-    - livox_ros_driver is a COMPILE dep only (cloud_convert AviaHandler uses CustomMsg);
-      never run on Ouster.
+      2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
+    - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
+      \ VENDORS it at thirdparty/livox_ros_driver (message-only, pulled by git clone\
+      \ --recursive). A second copy collides on the livox_ros_driver_generate_messages\
+      \ target. Livox-SDK also NOT needed."
+    - 'FIX 2 (C++ std): upstream CMakeLists hardcodes -std=c++14 but eigen_types.h
+      uses a constexpr captureless lambda (less_vec2i) that is only literal from C++17.
+      sed the CMakeLists c++14->c++17 before catkin_make.'
     - "aarch64: build -O3 (NOT -Ofast \u2014 fast-math has tipped EKF divergence on\
       \ this Jetson). Limit -j2 on 8GB."
     - "Requires CLOCK BOOST (1984MHz) \u2014 Adaptive-LIO is CPU-bound; stock 1497MHz\
       \ risks divergence."
     validated: false
     integration_complete: false
-    notes: 'Added 2026-07-03. Config+container+harness generated & frame-patch validated
-      against upstream source; NOT yet built/run on rig. Built ROS1 (like COIN-LIO/FAST-LIO),
-      own container adaptive-lio:noetic, NOT EllipseLIO''s ROS2 stack. Hardware+transforms
-      mirror the EllipseLIO/FAST-LIVO2 Dragunfly profile. REMAINING (Phase 5): build
-      image, bag-replay distribution (run_bag.sh, comparable to run_coinlio_bag.sh),
-      verify yaw sign + alio_body==os_imu (check_tf_tree) + Ceres version + gnorm
-      gravity init, then GPS-denied flight.'
-  validated: false
+    notes: 'Added 2026-07-03. Config+container+harness generated; frame-patch validated
+      against upstream source; IMAGE BUILT & smoke-tested on ARM64 (adaptive_lio node
+      + baked Ouster config + 6 alio_* frames + glog/PCL linked). Built ROS1 (like
+      COIN-LIO/FAST-LIO), own container adaptive-lio:noetic, NOT EllipseLIO''s ROS2
+      stack. Hardware+transforms mirror the EllipseLIO/FAST-LIVO2 Dragunfly profile.
+      REMAINING (Phase 5): bag-replay distribution (run_bag.sh, comparable to run_coinlio_bag.sh)
+      on a converted ROS1 Ouster bag; verify yaw sign + alio_body==os_imu (check_tf_tree)
+      + gnorm gravity init; then GPS-denied flight.'
+  validated: true
   integration_complete: false
