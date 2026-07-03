@@ -23,7 +23,11 @@ preprocess:
 common:
   imu_topic: /ouster/imu     # CHANGED /livox/imu  -> Ouster built-in ICM-20948 (100 Hz)
   lid_topic: /ouster/points  # CHANGED /livox/lidar -> Ouster OS1-64 (1024x20 => 20 Hz)
-  gnorm: 9.805               # CHANGED 1 -> 9.805 : Ouster IMU reports accel in m/s^2 (NOT normalized to 1 g)
+  # gnorm is a MULTIPLIER on the raw accel (main_ada.cpp: linear_acceleration * gnorm), NOT the
+  # gravity norm. The Ouster ICM-20948 already reports accel in m/s^2 (gravity ~9.67-9.8 measured),
+  # so it must NOT be rescaled -> gnorm=1. (gnorm=9.805 is only for IMUs normalized to 1g; setting
+  # it here gave 9.67*9.805=94.9 -> static_imu_init "accel noise too large" -> terminate.)
+  gnorm: 1
 
 mapping:
   # Lidar<-IMU extrinsic. On the ROS1 Ouster driver the point cloud (os_lidar) and IMU (os_imu)

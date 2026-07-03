@@ -62,9 +62,17 @@ RUN git clone --recursive ${ADAPTIVE_LIO_REPO} adaptive_lio \
 # Rename hardcoded frames -> alio_* so they don't collide with MAVROS map / base_link, and bake
 # the Ouster config over the compile-time default config/mapping_m.yaml.
 COPY patches/namespace_frames.sh /tmp/namespace_frames.sh
+COPY patches/fix_ouster_ring.py  /tmp/fix_ouster_ring.py
+COPY patches/fix_ouster_timespan.py /tmp/fix_ouster_timespan.py
 COPY config/mapping_ouster.yaml  /tmp/mapping_ouster.yaml
 RUN bash /tmp/namespace_frames.sh ${CATKIN_WS}/src/adaptive_lio \
  && cp /tmp/mapping_ouster.yaml ${CATKIN_WS}/src/adaptive_lio/config/mapping_m.yaml \
+ # ouster_ros::Point.ring is uint8_t upstream but modern Ouster drivers / this rig's bags publish
+ # ring as UINT16 -> PCL field-type mismatch -> garbage ring -> SIGSEGV on the first cloud. Fix to uint16.
+ && python3 /tmp/fix_ouster_ring.py ${CATKIN_WS}/src/adaptive_lio \
+ # Oust64Handler derives sweep timespan from points.back().t (wrong for organized clouds) and has a
+ # broken id clamp -> out-of-bounds v_cloud write -> SIGSEGV. Use max-t + hard clamp id.
+ && python3 /tmp/fix_ouster_timespan.py ${CATKIN_WS}/src/adaptive_lio \
  # Upstream CMakeLists hardcodes -std=c++14, but eigen_types.h uses a constexpr captureless lambda
  # (less_vec2i) that is only a literal type from C++17 on. The code is really C++17 — bump it.
  && sed -i 's/c++14/c++17/g; s/CMAKE_CXX_STANDARD 14/CMAKE_CXX_STANDARD 17/g' \

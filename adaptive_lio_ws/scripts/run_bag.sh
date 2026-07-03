@@ -29,12 +29,18 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$CTR"; then
     "$IMAGE" sleep infinity >/dev/null
 fi
 
-# the whole battery runs INSIDE the container; pass params through the environment
-docker exec -e BAGBASE="$BAGBASE" -e N="$N" -e RUNAWAY="$RUNAWAY" -e RATE="$RATE" \
+# the whole battery runs INSIDE the container; pass params through the environment.
+# -i is REQUIRED: without it docker exec does not attach stdin, so `bash -s <<INNER` reads EOF
+# immediately and silently runs nothing (exit 0, no roscore, no results).
+docker exec -i -e BAGBASE="$BAGBASE" -e N="$N" -e RUNAWAY="$RUNAWAY" -e RATE="$RATE" \
   -e TAG="$(basename "$BAG" .bag)" "$CTR" bash -s <<'INNER'
 set -uo pipefail
+# ROS setup.bash is NOT set -u safe (references ROS_MASTER_URI etc. before defining them) — relax
+# nounset around sourcing, same as run_coinlio_bag.sh, or the inner script aborts before any work.
+set +u
 source /opt/ros/noetic/setup.bash
 source /root/catkin_ws/devel/setup.bash
+set -u
 # make the mounted integration package discoverable to roslaunch/$(find) without a rebuild
 export ROS_PACKAGE_PATH=/root/catkin_ws/src/adaptive_lio_ws:$ROS_PACKAGE_PATH
 BAG="/bags/$BAGBASE"

@@ -11,7 +11,7 @@
        /odometry_path   nav_msgs/Path
        /scan            sensor_msgs/PointCloud2 (frame alio_odom)
        TF: alio_world->alio_odom, alio_odom->alio_body
-     Set use_sim_time:=true for bag replay (rosbag play --clock); false for live sensor. -->
+     Set use_sim_time:=true for bag replay (rosbag play drives /clock); false for live sensor. -->
 <launch>
   <arg name="rviz"         default="false"/>
   <arg name="use_sim_time" default="true"/>
