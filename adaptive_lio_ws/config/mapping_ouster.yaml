@@ -14,7 +14,7 @@ YAML: 1.0
 # adaptive-map tuning parameter is left at the author's default unless noted.
 
 preprocess:
-  point_filter_num: 4    # CHANGED 1->4 : the node ingests 20 Hz clouds into an UNBOUNDED lidar_buffer_
+  point_filter_num: 3    # MODERATE (10Hz realtime): 3 pts kept -> more than the clean-light cfg(4), still keeps up
                          # deque but processes ~9 Hz -> ~6 MB/scan backlog -> OOM death spiral. Decimating
                          # 4x cuts both queue ingress AND per-scan map-insert compute ~4x so processing
                          # exceeds realtime and the queue stays empty. Negligible accuracy cost (ICP caps
@@ -64,11 +64,11 @@ delay_time: 0.2
 odometry:
   surf_res: 0.5
   log_print: false
-  max_num_iteration: 5      # TUNED 10->5: halve ICP iters -> faster per-scan so the node keeps up
+  max_num_iteration: 6      # MODERATE: 6 ICP iters (light=5, full=10 diverged: too heavy for 10Hz realtime)
                             # at rate 0.5 without falling behind (cap-drops -> CT-ICP const-vel breaks -> divergence)
   # ct_icp
   icpmodel: CT_POINT_TO_PLANE # Options: [CT_POINT_TO_PLANE, POINT_TO_PLANE]
-  size_voxel_map: 0.8 # TUNED 0.5->0.8: coarser local map -> faster neighbor search + less RAM
+  size_voxel_map: 0.6 # MODERATE: finer local map than 0.8 for accuracy, coarser than 0.5 for speed
   min_distance_points: 0.15
   max_num_points_in_voxel: 20 # The maximum number of points per voxel of the map
   max_distance: 100.0 # TUNED 500->100: suppress voxels >100 m from current pose -> bounds the
@@ -87,7 +87,7 @@ odometry:
   num_closest_neighbors: 1
 
   sampling_rate: 1.5
-  max_num_residuals: 800  # TUNED 1200->800: fewer residuals per solve -> faster
+  max_num_residuals: 1000 # MODERATE: more residuals than light(800), cheaper than full(1200)
   min_num_residuals: 50
   motion_compensation: CONSTANT_VELOCITY #NONE, CONSTANT_VELOCITY, ITERATIVE, CONTINUOUS
   beta_location_consistency: 0.001

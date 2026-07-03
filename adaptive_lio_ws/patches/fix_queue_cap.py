@@ -12,7 +12,7 @@ root = sys.argv[1]
 path = f"{root}/src/lio/lidarodom.cpp"
 src = open(path).read()
 
-CAP = "lidar_buffer_.size() > 40"
+CAP = "lidar_buffer_.size() > 300"
 if CAP in src:
     print("fix_queue_cap: already applied")
     sys.exit(0)
@@ -22,8 +22,9 @@ if CAP in src:
 ANCHOR = ("          lidar_buffer_.push_back(msg);\n"
           "          time_buffer_.push_back(data);\n"
           "          last_timestamp_lidar_ = data.first;\n")
-INSERT = ("          // cap backlog: drop oldest scans under overload -> bounded RAM (added)\n"
-          "          while (lidar_buffer_.size() > 40) { lidar_buffer_.pop_front(); time_buffer_.pop_front(); }\n")
+INSERT = ("          // cap backlog: buffer up to 300 scans (absorbs transient processing dips without\n"
+          "          // dropping); only sustained <1x processing hits the cap. Bounds RAM (~1 GB worst). (added)\n"
+          "          while (lidar_buffer_.size() > 300) { lidar_buffer_.pop_front(); time_buffer_.pop_front(); }\n")
 
 if ANCHOR not in src:
     print("ERROR: pushData anchor not found — upstream lidarodom.cpp changed", file=sys.stderr)
@@ -35,4 +36,4 @@ if src.count(ANCHOR) != 1:
 src = src.replace(ANCHOR, ANCHOR + INSERT, 1)
 open(path, "w").write(src)
 assert CAP in src
-print("fix_queue_cap: applied (lidar_buffer_ capped at 40 scans)")
+print("fix_queue_cap: applied (lidar_buffer_ capped at 300 scans)")
