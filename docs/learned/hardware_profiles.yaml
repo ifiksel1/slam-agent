@@ -315,3 +315,113 @@ profiles:
       Ouster SYNC_PULSE_OUT) drops in later
   validated: true
   integration_complete: false
+- id: 4
+  date: '2026-07-03'
+  last_verified: '2026-07-03'
+  fingerprint: jetson_orin-ouster_os1_64-adaptive_lio-ardupilot-noetic
+  hardware:
+    platform:
+      type: jetson
+      model: orin_nx
+      ram_gb: 8
+      cpu_cores: 6
+      carrier: CTI Hadron Dual MIPI
+      gpu: "Ampere (not required \u2014 Adaptive-LIO is CPU-only, Ceres-based, no\
+        \ CUDA)"
+      os: "Ubuntu 20.04 (focal) \u2014 native ROS Noetic. Adaptive-LIO runs ROS1 in\
+        \ its own Docker (adaptive-lio:noetic)."
+    lidar:
+      model: ouster_os1_64
+      channels: 64
+      interface: ethernet
+      default_ip: 192.168.2.60
+      computer_ip: 192.168.2.50
+      lidar_mode: 1024x20
+      has_imu: true
+      imu_model: ICM-20948
+    camera: null
+    imu_source: lidar
+    flight_controller:
+      model: cube_orange
+      firmware: ardupilot
+      version: '4.5'
+      telemetry_port: /dev/ttyTHS1
+      telemetry_baud: 921600
+    communication: mavros
+    ros_version: noetic
+    slam_algorithm: adaptive_lio
+  phase1_config:
+    workspace_path: ~/catkin_ws
+    ros_version: ROS1
+    ros_distro: noetic
+    slam_algorithm: adaptive_lio
+    repo_url: https://github.com/chengwei0427/adaptive_lio
+    package_name: adaptive_lio
+    integration_dir: slam-agent/adaptive_lio_ws
+    container: adaptive-lio:noetic
+    lidar:
+      type: ouster
+      model: os1-64
+      topic: /ouster/points
+      imu_topic: /ouster/imu
+    imu_source: lidar
+    flight_controller:
+      type: ardupilot
+      connection: serial
+      port: /dev/ttyTHS1
+      baud: 921600
+    communication: mavros
+    docker: true
+    transforms:
+      base_to_lidar:
+        x: 0.0
+        y: 0.0
+        z: -0.06
+        roll: 0.0
+        pitch: 3.14159265
+        yaw: 0.0
+      lidar_imu_extrinsic_T:
+      - 0.0
+      - 0.0
+      - 0.0
+      lidar_imu_extrinsic_R:
+      - 1
+      - 0
+      - 0
+      - 0
+      - 1
+      - 0
+      - 0
+      - 0
+      - 1
+    slam_io:
+      config_file: config/mapping_ouster.yaml
+      config_is_compile_time: true
+      odom_topic: /odom
+      tf_broadcast: alio_world->alio_odom, alio_odom->alio_body (frames renamed from
+        map/base_link/world via patches/namespace_frames.sh to avoid MAVROS collision)
+      lidar_type: 3
+      gnorm: 9.805
+      bridge: "vision_to_mavros (use_tf, base_link in map). YAW SIGN UNVERIFIED \u2014\
+        \ EllipseLIO/SuperOdom needed negation on this rig; measure a known +90 CCW\
+        \ turn before flight."
+    build_notes:
+    - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
+      2.1.x). Sophus + tessil robin_map VENDORED in repo thirdparty/.
+    - livox_ros_driver is a COMPILE dep only (cloud_convert AviaHandler uses CustomMsg);
+      never run on Ouster.
+    - "aarch64: build -O3 (NOT -Ofast \u2014 fast-math has tipped EKF divergence on\
+      \ this Jetson). Limit -j2 on 8GB."
+    - "Requires CLOCK BOOST (1984MHz) \u2014 Adaptive-LIO is CPU-bound; stock 1497MHz\
+      \ risks divergence."
+    validated: false
+    integration_complete: false
+    notes: 'Added 2026-07-03. Config+container+harness generated & frame-patch validated
+      against upstream source; NOT yet built/run on rig. Built ROS1 (like COIN-LIO/FAST-LIO),
+      own container adaptive-lio:noetic, NOT EllipseLIO''s ROS2 stack. Hardware+transforms
+      mirror the EllipseLIO/FAST-LIVO2 Dragunfly profile. REMAINING (Phase 5): build
+      image, bag-replay distribution (run_bag.sh, comparable to run_coinlio_bag.sh),
+      verify yaw sign + alio_body==os_imu (check_tf_tree) + Ceres version + gnorm
+      gravity init, then GPS-denied flight.'
+  validated: false
+  integration_complete: false
