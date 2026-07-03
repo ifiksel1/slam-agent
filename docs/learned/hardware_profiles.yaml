@@ -421,6 +421,11 @@ profiles:
       8GB Jetson) so the node keeps pace and the cap never fires. CAVEAT: if the cap DOES fire (rate
       1.0, node falls behind), dropped scans break CT-ICP's const-velocity model -> divergence
       (max_step 120m). So realtime/live needs faster HW, lower lidar rate, or more compute cuts."
+    - "RATE 1.0 RE-TESTED w/ full reduced-compute config (iter5/resid800/voxel0.8): node AVERAGES
+      ~1.0x and RSS stays bounded ~200MB, BUT scene-complexity dips to 0.7-0.9x fire the cap ->
+      ~2100/7887 scans dropped -> max_step 16m -> diverges (final 60m). Adaptive-LIO tolerates ZERO
+      dropped scans. CONCLUSION: a clean run REQUIRES the node to never fall behind = rate 0.5 on 8GB
+      Orin NX. For live 20Hz: faster HW, a 10Hz lidar mode (halves load), or deeper compute cuts."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
