@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- Integration package for Adaptive-LIO on the Dragunfly rig. Holds the launch files, URDF,
+     Ouster config, and vision-bridge wiring — the Adaptive-LIO estimator itself is the separate
+     upstream `adaptive_lio` package. This package carries no compiled code; it exists so that
+     $(find adaptive_lio_ws) resolves in the launch/URDF paths and rosrun finds the helper scripts. -->
+<package format="2">
+  <name>adaptive_lio_ws</name>
+  <version>0.1.0</version>
+  <description>Adaptive-LIO + ArduPilot integration (launch, URDF, config, vision bridge) for Ouster OS1-64.</description>
+  <maintainer email="idan@ultraview.io">SLAM Agent</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>adaptive_lio</exec_depend>
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>vision_to_mavros</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+</package>
