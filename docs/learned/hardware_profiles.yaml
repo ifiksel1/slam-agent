@@ -450,6 +450,17 @@ profiles:
       thread overhead) AND worse (7.7m, likely FP-reduction-order non-determinism, same as EllipseLIO).
       Reverted both. CONCLUSION: 3.32m (10Hz realtime) / 2.69m (20Hz offline) are the pure-LIO floors;
       going lower needs LOOP CLOSURE or absolute-anchor/prior-map FUSION, not parameter tuning."
+    - "LIVE SENSOR VALIDATED (2026-07-03, SLAM-only bench). All fixes hold on the real Ouster
+      (SN 122224003549, OS-1-64, FW2.4.0, 192.168.2.60). Working live setup: the IN-CONTAINER ouster
+      ROS1 driver is UNRELIABLE on ARM64 (known) -- instead run the HOST's proven driver from
+      ~/coinlio_ws (roslaunch ouster_ros driver.launch sensor_hostname:=192.168.2.60 udp_dest:=192.168.2.50
+      lidar_mode:=1024x10 timestamp_mode:=TIME_FROM_INTERNAL_OSC metadata:=~/coinlio_ws/src/coin-lio/config/os1-64-1024.json)
+      and run the adaptive_lio NODE in its container on the SAME master (--network host,
+      ROS_MASTER_URI=http://localhost:11311, use_sim_time:=false). Driver init is SLOW (~30-60s to
+      stream -- wait 90s). Result: /ouster/points 10Hz (81% real returns), IMU static-init succeeds
+      (gravity 9.81), /odom LIVE at 10.02Hz, RSS 52MB, stable ~cm while stationary. dt_=384588 skip at
+      startup is a one-time transient (sensor-osc timestamps). REMAINING: hand-carry motion test, then
+      MAVROS+vision bridge (master.launch), then GPS-denied flight."
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
