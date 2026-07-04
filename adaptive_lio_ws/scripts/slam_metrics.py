@@ -9,14 +9,24 @@
 # Usage:
 #   ./slam_metrics.sh                          # convenience wrapper (sets ROS env + master)
 #   python3 slam_metrics.py [--topic /odom] [--csv out.csv] [--raw]
-import sys, math, time, signal
+import sys, os, math, time, signal, tempfile
 
 # ---- args -------------------------------------------------------------
 def arg(flag, default=None):
     return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else default
 TOPIC = arg('--topic', '/odom')
-CSV   = arg('--csv', '/tmp/slam_metrics.csv')
+# unique per-run default so a stale/other-owned file never blocks writing
+CSV   = arg('--csv', os.path.join(tempfile.gettempdir(), f'slam_metrics_{os.getpid()}.csv'))
 RAW   = '--raw' in sys.argv
+
+def open_csv(path):
+    for p in (path, os.path.join(os.path.expanduser('~'), os.path.basename(path)),
+              tempfile.mkstemp(prefix='slam_metrics_', suffix='.csv')[1]):
+        try:
+            return open(p, 'w'), p
+        except PermissionError:
+            continue
+    raise SystemExit("could not open any CSV path for writing")
 
 import rospy
 from nav_msgs.msg import Odometry
@@ -35,7 +45,7 @@ class Metrics:
         self.last_print = 0.0
         # Adaptive-LIO's own extras (optional)
         self.alio_vel = None; self.alio_dist = None
-        self.f = open(CSV, 'w')
+        self.f, self.csv_path = open_csv(CSV)
         self.f.write("t,x,y,z,roll_deg,pitch_deg,yaw_deg,vx,vy,vz,speed,dist_travelled,disp_from_start\n")
         rospy.Subscriber(TOPIC, Odometry, self.cb, queue_size=200)
         try:
@@ -98,7 +108,7 @@ def main():
     rospy.init_node('slam_metrics', anonymous=True, disable_signals=True)
     m = Metrics()
     frame = "raw alio_odom" if RAW else "upright (pitch-180 corrected)"
-    print(f"SLAM metrics on {TOPIC}  [frame: {frame}]  csv={CSV}\n(Ctrl-C for summary)\n")
+    print(f"SLAM metrics on {TOPIC}  [frame: {frame}]  csv={m.csv_path}\n(Ctrl-C for summary)\n")
     stop = {'v': False}
     for s in (signal.SIGINT, signal.SIGTERM):
         signal.signal(s, lambda *a: stop.update(v=True))
@@ -113,7 +123,7 @@ def main():
     print(f" peak excursion     : {m.peak:.2f} m")
     print(f" max speed          : {m.vmax:.2f} m/s")
     if m.prev_p: print(f" final position     : ({m.prev_p[0]:+.2f}, {m.prev_p[1]:+.2f}, {m.prev_p[2]:+.2f}) m")
-    print(f" csv                : {CSV}")
+    print(f" csv                : {m.csv_path}")
 
 if __name__ == '__main__':
     main()
