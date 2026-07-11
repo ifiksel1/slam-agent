@@ -393,3 +393,47 @@ solutions:
   - c++20
   - arm64
   - jetson
+- id: 11
+  date: '2026-07-11'
+  phase: 5
+  hardware:
+    platform: Jetson Orin NX 8GB (arm64)
+    lidar: Ouster OS1-64
+    slam: BIEVR-LIO (ethz-asl, RSS 2026)
+    ros: noetic (Docker, bievr_lio:noetic)
+  symptom: Need to know whether BIEVR-LIO is trustworthy on the hard 3rd_floor bag,
+    given EllipseLIO on the same bag is non-deterministic (7/14 tight, 6/14 blew up
+    to 302m from multi-threaded FP-reduction-order variance) making single-run numbers
+    meaningless.
+  root_cause: 'Determinism must be established before accuracy numbers mean anything.
+    Ran a 9-run battery: 8x max_num_threads=0 (all cores) + 1x max_num_threads=1 (single-thread
+    control), each a fresh --rm container (clean slate), identical bag + sensor config,
+    dashboard off.'
+  fix: "RESULT: BIEVR-LIO is FULLY deterministic \u2014 all 8 multi-thread trajectories\
+    \ AND the single-thread control are byte-identical (same md5 835accd6...). Return-to-origin\
+    \ drift = 1.35cm over a 374m/57m-out loop (vs COIN-LIO ~3.8m, adaptive_lio 3.32m\
+    \ floor), 0/8 blow-ups. BIEVR's parallel reduction is order-invariant, so single-run\
+    \ numbers are trustworthy \u2014 opposite of EllipseLIO. Real-time on Orin (~30-36ms/scan\
+    \ avg vs 50ms 20Hz budget); multi-thread 2.6x faster than single with identical\
+    \ output. Battery harness: /home/dev/coinlio_ws/results/bievr/run_determinism.sh.\
+    \ Verify determinism with md5sum of the TUM trajectory files, and only score return-to-origin\
+    \ drift on COMPLETED runs (7915 poses) \u2014 a partial run's start-vs-current\
+    \ distance is a mid-loop artifact, not drift."
+  files_changed:
+  - config/sensor_configs/ouster_os1.yaml
+  - /home/dev/coinlio_ws/results/bievr/run_determinism.sh
+  - /home/dev/coinlio_ws/results/bievr/params_ouster.yaml
+  tags:
+  - bievr_lio
+  - determinism
+  - 3rd_floor
+  - loop_closure
+  - drift
+  - ellipselio_comparison
+  - coinlio_comparison
+  - multi_thread
+  - reproducibility
+  - hangar_737
+  - ouster_os1_64
+  - jetson
+  - bag_replay
