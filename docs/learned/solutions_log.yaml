@@ -311,3 +311,85 @@ solutions:
   - livox_vendored
   - c++17
   - docker_exec_stdin
+- id: 9
+  date: '2026-07-11'
+  phase: 4
+  hardware:
+    platform: Jetson Orin NX 8GB (arm64/aarch64)
+    slam: BIEVR-LIO (ethz-asl, RSS 2026)
+    ros: noetic (Docker)
+  symptom: 'BIEVR-LIO ROS1 Docker builds successfully on Jetson but the resulting
+    image is amd64 and the ~1hr Ceres compile ran under QEMU emulation; `docker image
+    inspect` shows arch=amd64 on an arm64 host. BuildKit emits `InvalidBaseImagePlatform:
+    Base image osrf/ros:noetic-desktop-full was pulled with platform linux/amd64,
+    expected linux/arm64`.'
+  root_cause: "BIEVR-LIO's docker/Dockerfile_ros1 hardcodes `FROM osrf/ros:noetic-desktop-full`,\
+    \ which is amd64-ONLY (no arm64 manifest). Neither `osrf/ros` nor the official\
+    \ `ros` library publishes a `noetic-desktop-full` arm64 image at all. On an arm64\
+    \ host BuildKit silently falls back to pulling the amd64 base and emulating the\
+    \ entire build via QEMU \u2014 slow (~5x) and produces a wrong-arch image useless\
+    \ for real-time LIO on the Jetson."
+  fix: "Swap the base to an arm64-native official image: `FROM --platform=linux/arm64\
+    \ ros:noetic-perception` (perception variant includes PCL + geometry/tf_conversions,\
+    \ the right dep set for LiDAR-inertial). Build with `docker build --platform=linux/arm64`.\
+    \ Also explicitly apt-install Ceres math deps (libeigen3-dev libgoogle-glog-dev\
+    \ libgflags-dev liblapack-dev libblas-dev libsuitesparse-dev) so the Ceres build\
+    \ is base-image-independent. Verify with `docker image inspect <img> --format\
+    \ '{{.Architecture}}'` \u2192 must be arm64. Native Ceres 2.2 compile ~10min vs\
+    \ ~56min emulated."
+  files_changed:
+  - docker/Dockerfile_ros1.ceres (new
+  - arm64-native Ceres stage)
+  - docker/Dockerfile_ros1.stage2
+  tags:
+  - bievr_lio
+  - ethz-asl
+  - arm64
+  - jetson
+  - docker
+  - qemu
+  - emulation
+  - ceres
+  - osrf_ros
+  - noetic
+  - base_image
+  - desktop-full
+  - ros_noetic_perception
+- id: 10
+  date: '2026-07-11'
+  phase: 4
+  hardware:
+    platform: Jetson Orin NX 8GB (arm64)
+    slam: BIEVR-LIO (ethz-asl)
+    ros: noetic (Docker, base ros:noetic-perception)
+  symptom: 'catkin build of bievr_lio_ros fails at CMake configure: `Could not find
+    a package configuration file provided by "tf_conversions"` (catkinConfig.cmake:83,
+    CMakeLists.txt:14 find_package COMPONENTS). bievr_lio and bievr_ros_common build
+    fine; only the ROS1 interface package fails.'
+  root_cause: '`ros:noetic-perception` does not ship `tf_conversions` (part of the
+    geometry stack, needs orocos-kdl). bievr_lio_ros lists it as a catkin REQUIRED
+    COMPONENT. Also find_package(TBB REQUIRED) and find_package(yaml-cpp REQUIRED)
+    need libtbb-dev / libyaml-cpp-dev which are likewise absent. (Only tf_conversions
+    actually errored first; TBB/yaml added defensively.)'
+  fix: "apt-install `ros-noetic-tf-conversions libtbb-dev libyaml-cpp-dev` before\
+    \ catkin build. NOTE: BIEVR-LIO ROS1 node builds as C++20 with -fconcepts (GCC\
+    \ 9/arm64 handles it). Livox is optional (find_package QUIET) so livox_ros_driver/driver2\
+    \ can be dropped for Ouster-only rigs \u2014 no need to build Livox SDK1/SDK2.\
+    \ Also: build_ros1.sh re-clones BIEVR via SSH (git@github.com) \u2014 replace\
+    \ with a local COPY of the tree to build headless without an SSH agent."
+  files_changed:
+  - docker/Dockerfile_ros1.stage2
+  tags:
+  - bievr_lio
+  - ethz-asl
+  - catkin
+  - tf_conversions
+  - ros_noetic_perception
+  - missing_dependency
+  - tbb
+  - yaml-cpp
+  - livox_optional
+  - ssh_clone
+  - c++20
+  - arm64
+  - jetson

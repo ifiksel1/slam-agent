@@ -406,61 +406,74 @@ profiles:
         \ EllipseLIO/SuperOdom needed negation on this rig; measure a known +90 CCW\
         \ turn before flight."
     build_notes:
-    - "BUILDS + RUNS + tracks on ARM64 Noetic (adaptive-lio:noetic, 2026-07-03). Estimator STABLE
-      (smooth, zero divergence) but RESOURCE-heavy: unbounded voxel-map RSS ~20MB/s (->3.3GB@120s)
-      + compute-bound (<<1x realtime), so at rate 1.0 it only covers ~92s of the 395s 3rd_floor bag.
-      NOT estimator runaway (cf EllipseLIO). 6 build+runtime fixes in solution #8."
-    - "MEMORY SOLVED (2026-07-03, Fable dx). Real cause was NOT the global map (my first guess): the
-      dominant consumer is the UNBOUNDED input queue lidar_buffer_ (deque, no cap) — 20Hz ingress vs
-      slower processing -> ~6MB/scan backlog -> OOM. Secondary: the 3-res mmap is inserted+iterated
-      every scan but NEVER queried (read path commented out, lidarodom.cpp:467) = pure dead weight.
-      FIX (config + 1 patch): point_filter_num 1->4, mmap neutered to a single trivial resolution,
-      max_num_iteration 10->5, max_num_residuals 1200->800, size_voxel_map 0.5->0.8; patch
-      fix_queue_cap.py caps lidar_buffer_ at 40. RESULT on 3rd_floor: FULL bag (7887 samples), loop
-      closure 2.69m, RSS FLAT ~64MB (was 3.7GB). Runs at rate 0.5 (compute-bound ~0.5x realtime on
-      8GB Jetson) so the node keeps pace and the cap never fires. CAVEAT: if the cap DOES fire (rate
-      1.0, node falls behind), dropped scans break CT-ICP's const-velocity model -> divergence
-      (max_step 120m). So realtime/live needs faster HW, lower lidar rate, or more compute cuts."
-    - "RATE 1.0 RE-TESTED w/ full reduced-compute config (iter5/resid800/voxel0.8): node AVERAGES
-      ~1.0x and RSS stays bounded ~200MB, BUT scene-complexity dips to 0.7-0.9x fire the cap ->
-      ~2100/7887 scans dropped -> max_step 16m -> diverges (final 60m). Adaptive-LIO tolerates ZERO
-      dropped scans. CONCLUSION: a clean run REQUIRES the node to never fall behind = rate 0.5 on 8GB
-      Orin NX. For live 20Hz: faster HW, a 10Hz lidar mode (halves load), or deeper compute cuts."
-    - "10Hz LIDAR MODE = REALTIME VIABLE (2026-07-03). Simulated 1024x10 by decimating the 20Hz bag to
-      10Hz clouds (keep 100Hz IMU): ~/coinlio_ws/bags/3rd_floor_10hz.bag. At rate 1.0 the node holds a
-      STEADY 1.0x with NO dips (2x headroom) -> cap never fires -> 0 drops -> CLEAN: full bag (3948
-      samples), max_step 0.43m (no divergence), RSS FLAT ~60MB. Loop closure 8.35m — ~3x worse than the
-      20Hz/0.5x offline run (2.69m) because half the scans + the aggressive compute cuts. OPPORTUNITY:
-      10Hz has spare compute, so restore accuracy (iter 5->10, resid 800->1200, filter 4->2, finer
-      voxel) while staying realtime. RECIPE for live: set Ouster to 1024x10 (run_live.sh LIDAR_MODE)."
-    - "10Hz ACCURACY LADDER (2026-07-03, cap raised 40->300 so transient dips are BUFFERED not dropped
-      -- any dropped scan diverges CT-ICP). filter/iter/voxel/resid vs result on 3rd_floor 10Hz@1x:
-      LIGHT 4/5/0.8/800 = ~1.5x avg, RSS flat ~60MB, sustainable realtime, loop closure 8.35m.
-      MODERATE 3/6/0.6/1000 = ~0.9x avg, RSS creeps to ~700MB over 6min (buffer absorbs, 0 drops),
-      loop closure 3.32m, max_step 0.66m CLEAN -- best accuracy that stays clean, borderline for
-      indefinitely-long missions. FULL 2/10/0.5/1200 = ~0.83x avg -> buffer fills -> drops ->
-      DIVERGES (238m). Committed config=MODERATE (best for bounded inspection). Long ops: LIGHT.
-      Offline best = 20Hz@0.5x = 2.69m. So for the hangar-inspection mission: 1024x10 + MODERATE
-      cfg gives clean realtime LIO at 3.32m/57m (~5.8% drift) -- pair with absolute anchor for cm-pose."
-    - "DRIFT FLOOR CONFIRMED — tuning CANNOT reduce it further (2026-07-03). Adaptive-LIO is PURE LIO
-      (no loop closure / pose graph), so 3.32m is odometry drift, not a closable loop. Attempts to
-      push below 3.32m at 10Hz all made it WORSE: (a) tighter accuracy knobs (surf_res 0.5->0.3,
-      voxel 0.6->0.5, plane 0.3->0.25, iter 6->8) = heavier (~0.7x, RSS->1.1GB near cap) AND worse
-      registration -> 15.2m. (b) Ceres num_threads 3->6 (patch) = no speedup (small per-scan problem,
-      thread overhead) AND worse (7.7m, likely FP-reduction-order non-determinism, same as EllipseLIO).
-      Reverted both. CONCLUSION: 3.32m (10Hz realtime) / 2.69m (20Hz offline) are the pure-LIO floors;
-      going lower needs LOOP CLOSURE or absolute-anchor/prior-map FUSION, not parameter tuning."
-    - "LIVE SENSOR VALIDATED (2026-07-03, SLAM-only bench). All fixes hold on the real Ouster
-      (SN 122224003549, OS-1-64, FW2.4.0, 192.168.2.60). Working live setup: the IN-CONTAINER ouster
-      ROS1 driver is UNRELIABLE on ARM64 (known) -- instead run the HOST's proven driver from
-      ~/coinlio_ws (roslaunch ouster_ros driver.launch sensor_hostname:=192.168.2.60 udp_dest:=192.168.2.50
-      lidar_mode:=1024x10 timestamp_mode:=TIME_FROM_INTERNAL_OSC metadata:=~/coinlio_ws/src/coin-lio/config/os1-64-1024.json)
-      and run the adaptive_lio NODE in its container on the SAME master (--network host,
-      ROS_MASTER_URI=http://localhost:11311, use_sim_time:=false). Driver init is SLOW (~30-60s to
-      stream -- wait 90s). Result: /ouster/points 10Hz (81% real returns), IMU static-init succeeds
-      (gravity 9.81), /odom LIVE at 10.02Hz, RSS 52MB, stable ~cm while stationary. dt_=384588 skip at
-      startup is a one-time transient (sensor-osc timestamps). REMAINING: hand-carry motion test, then
-      MAVROS+vision bridge (master.launch), then GPS-denied flight."
+    - 'BUILDS + RUNS + tracks on ARM64 Noetic (adaptive-lio:noetic, 2026-07-03). Estimator
+      STABLE (smooth, zero divergence) but RESOURCE-heavy: unbounded voxel-map RSS
+      ~20MB/s (->3.3GB@120s) + compute-bound (<<1x realtime), so at rate 1.0 it only
+      covers ~92s of the 395s 3rd_floor bag. NOT estimator runaway (cf EllipseLIO).
+      6 build+runtime fixes in solution #8.'
+    - "MEMORY SOLVED (2026-07-03, Fable dx). Real cause was NOT the global map (my\
+      \ first guess): the dominant consumer is the UNBOUNDED input queue lidar_buffer_\
+      \ (deque, no cap) \u2014 20Hz ingress vs slower processing -> ~6MB/scan backlog\
+      \ -> OOM. Secondary: the 3-res mmap is inserted+iterated every scan but NEVER\
+      \ queried (read path commented out, lidarodom.cpp:467) = pure dead weight. FIX\
+      \ (config + 1 patch): point_filter_num 1->4, mmap neutered to a single trivial\
+      \ resolution, max_num_iteration 10->5, max_num_residuals 1200->800, size_voxel_map\
+      \ 0.5->0.8; patch fix_queue_cap.py caps lidar_buffer_ at 40. RESULT on 3rd_floor:\
+      \ FULL bag (7887 samples), loop closure 2.69m, RSS FLAT ~64MB (was 3.7GB). Runs\
+      \ at rate 0.5 (compute-bound ~0.5x realtime on 8GB Jetson) so the node keeps\
+      \ pace and the cap never fires. CAVEAT: if the cap DOES fire (rate 1.0, node\
+      \ falls behind), dropped scans break CT-ICP's const-velocity model -> divergence\
+      \ (max_step 120m). So realtime/live needs faster HW, lower lidar rate, or more\
+      \ compute cuts."
+    - 'RATE 1.0 RE-TESTED w/ full reduced-compute config (iter5/resid800/voxel0.8):
+      node AVERAGES ~1.0x and RSS stays bounded ~200MB, BUT scene-complexity dips
+      to 0.7-0.9x fire the cap -> ~2100/7887 scans dropped -> max_step 16m -> diverges
+      (final 60m). Adaptive-LIO tolerates ZERO dropped scans. CONCLUSION: a clean
+      run REQUIRES the node to never fall behind = rate 0.5 on 8GB Orin NX. For live
+      20Hz: faster HW, a 10Hz lidar mode (halves load), or deeper compute cuts.'
+    - "10Hz LIDAR MODE = REALTIME VIABLE (2026-07-03). Simulated 1024x10 by decimating\
+      \ the 20Hz bag to 10Hz clouds (keep 100Hz IMU): ~/coinlio_ws/bags/3rd_floor_10hz.bag.\
+      \ At rate 1.0 the node holds a STEADY 1.0x with NO dips (2x headroom) -> cap\
+      \ never fires -> 0 drops -> CLEAN: full bag (3948 samples), max_step 0.43m (no\
+      \ divergence), RSS FLAT ~60MB. Loop closure 8.35m \u2014 ~3x worse than the\
+      \ 20Hz/0.5x offline run (2.69m) because half the scans + the aggressive compute\
+      \ cuts. OPPORTUNITY: 10Hz has spare compute, so restore accuracy (iter 5->10,\
+      \ resid 800->1200, filter 4->2, finer voxel) while staying realtime. RECIPE\
+      \ for live: set Ouster to 1024x10 (run_live.sh LIDAR_MODE)."
+    - '10Hz ACCURACY LADDER (2026-07-03, cap raised 40->300 so transient dips are
+      BUFFERED not dropped -- any dropped scan diverges CT-ICP). filter/iter/voxel/resid
+      vs result on 3rd_floor 10Hz@1x: LIGHT 4/5/0.8/800 = ~1.5x avg, RSS flat ~60MB,
+      sustainable realtime, loop closure 8.35m. MODERATE 3/6/0.6/1000 = ~0.9x avg,
+      RSS creeps to ~700MB over 6min (buffer absorbs, 0 drops), loop closure 3.32m,
+      max_step 0.66m CLEAN -- best accuracy that stays clean, borderline for indefinitely-long
+      missions. FULL 2/10/0.5/1200 = ~0.83x avg -> buffer fills -> drops -> DIVERGES
+      (238m). Committed config=MODERATE (best for bounded inspection). Long ops: LIGHT.
+      Offline best = 20Hz@0.5x = 2.69m. So for the hangar-inspection mission: 1024x10
+      + MODERATE cfg gives clean realtime LIO at 3.32m/57m (~5.8% drift) -- pair with
+      absolute anchor for cm-pose.'
+    - "DRIFT FLOOR CONFIRMED \u2014 tuning CANNOT reduce it further (2026-07-03).\
+      \ Adaptive-LIO is PURE LIO (no loop closure / pose graph), so 3.32m is odometry\
+      \ drift, not a closable loop. Attempts to push below 3.32m at 10Hz all made\
+      \ it WORSE: (a) tighter accuracy knobs (surf_res 0.5->0.3, voxel 0.6->0.5, plane\
+      \ 0.3->0.25, iter 6->8) = heavier (~0.7x, RSS->1.1GB near cap) AND worse registration\
+      \ -> 15.2m. (b) Ceres num_threads 3->6 (patch) = no speedup (small per-scan\
+      \ problem, thread overhead) AND worse (7.7m, likely FP-reduction-order non-determinism,\
+      \ same as EllipseLIO). Reverted both. CONCLUSION: 3.32m (10Hz realtime) / 2.69m\
+      \ (20Hz offline) are the pure-LIO floors; going lower needs LOOP CLOSURE or\
+      \ absolute-anchor/prior-map FUSION, not parameter tuning."
+    - 'LIVE SENSOR VALIDATED (2026-07-03, SLAM-only bench). All fixes hold on the
+      real Ouster (SN 122224003549, OS-1-64, FW2.4.0, 192.168.2.60). Working live
+      setup: the IN-CONTAINER ouster ROS1 driver is UNRELIABLE on ARM64 (known) --
+      instead run the HOST''s proven driver from ~/coinlio_ws (roslaunch ouster_ros
+      driver.launch sensor_hostname:=192.168.2.60 udp_dest:=192.168.2.50 lidar_mode:=1024x10
+      timestamp_mode:=TIME_FROM_INTERNAL_OSC metadata:=~/coinlio_ws/src/coin-lio/config/os1-64-1024.json)
+      and run the adaptive_lio NODE in its container on the SAME master (--network
+      host, ROS_MASTER_URI=http://localhost:11311, use_sim_time:=false). Driver init
+      is SLOW (~30-60s to stream -- wait 90s). Result: /ouster/points 10Hz (81% real
+      returns), IMU static-init succeeds (gravity 9.81), /odom LIVE at 10.02Hz, RSS
+      52MB, stable ~cm while stationary. dt_=384588 skip at startup is a one-time
+      transient (sensor-osc timestamps). REMAINING: hand-carry motion test, then MAVROS+vision
+      bridge (master.launch), then GPS-denied flight.'
     - ROS1 Noetic / catkin / Ceres 2.1.0 (from source; README says 2.10, family is
       2.1.x; 2.1.0 built fine). Sophus + tessil robin_map VENDORED in repo thirdparty/.
     - "FIX 1 (livox): DO NOT clone livox_ros_driver into src/ \u2014 Adaptive-LIO\
@@ -484,5 +497,111 @@ profiles:
       REMAINING (Phase 5): bag-replay distribution (run_bag.sh, comparable to run_coinlio_bag.sh)
       on a converted ROS1 Ouster bag; verify yaw sign + alio_body==os_imu (check_tf_tree)
       + gnorm gravity init; then GPS-denied flight.'
+  validated: true
+  integration_complete: false
+- id: 5
+  date: '2026-07-11'
+  last_verified: '2026-07-11'
+  fingerprint: jetson_orin_nx-ouster_os1_64-bievr_lio-ardupilot-noetic
+  hardware:
+    platform:
+      model: Jetson Orin NX 8GB
+      ram_gb: 8
+      cpu_cores: 6
+      gpu: Ampere (unused by BIEVR-LIO; CPU registration)
+      os: Ubuntu 20.04 (in Docker on L4T host)
+    lidar:
+      model: Ouster OS1-64
+      channels: 64
+      connection: ethernet
+      ip: 169.254.56.220
+      lidar_mode: 1024x10
+      has_imu: true
+      imu_model: BMI088
+    camera:
+      type: none
+    flight_controller:
+      model: Cube Orange
+      autopilot: ardupilot
+      connection: usb
+      imu_model: ICM-20xxx (unused by SLAM)
+    slam:
+      algorithm: bievr_lio
+      repo_url: https://github.com/ethz-asl/BIEVR-LIO.git
+      notes: RSS 2026, ethz-asl. Bump-Image-Enhanced Voxel maps for degenerate/feature-sparse
+        LIO. Deps Eigen + Ceres 2.2.0. Repo ships ROS1 Noetic Dockerfile (Ubuntu 20.04)
+        + ROS2 Jazzy. Launch process_topics.launch (live) / process_bag.launch (replay).
+    ros:
+      version: noetic
+      comm_method: mavros
+    imu_source: lidar
+    imu_topic: /ouster/imu
+  phase1_config:
+    platform:
+      model: Jetson Orin NX 8GB
+      ram_gb: 8
+      cpu_cores: 6
+      gpu: Ampere (unused by BIEVR-LIO)
+      os: Ubuntu 20.04 (Docker)
+    lidar:
+      model: Ouster OS1-64
+      channels: 64
+      connection: ethernet
+      ip: 169.254.56.220
+      computer_ip: 169.254.56.x
+      lidar_mode: 1024x10
+      has_imu: true
+      imu_model: BMI088
+    camera:
+      model: ''
+      type: none
+    flight_controller:
+      model: Cube Orange
+      autopilot: ardupilot
+      firmware_version: ''
+      connection: usb
+      device_path: /dev/ttyACM0
+      baud_rate: 921600
+      imu_model: ICM-20xxx
+    slam:
+      algorithm: bievr_lio
+      repo_url: https://github.com/ethz-asl/BIEVR-LIO.git
+    ros:
+      version: noetic
+      comm_method: mavros
+    imu_source: lidar
+    imu_topic: /ouster/imu
+    imu_reasoning: Ouster BMI088 200Hz hardware-synced, matches all prior validated
+      LIO on this rig; BIEVR generic sensor config needs only topics + T_IMU_LIDAR.
+    physical:
+      base_frame: base_link
+      lidar_offset:
+      - 0.0
+      - 0.0
+      - -0.06
+      lidar_rotation:
+      - 180
+      - 0
+      - 0
+      camera_offset:
+      - 0
+      - 0
+      - 0
+      camera_rotation:
+      - 0
+      - 0
+      - 0
+      urdf_status: static_tf
+    environment:
+      type: indoor
+      area_size: small (apartment, current test bench); target = large hangar
+      features: rich (apartment) / sparse (hangar-737 target)
+    mission:
+      max_speed: 1.0
+      duration_minutes: 5
+      loop_closure: false
+      drift_tolerance: low
+      target: hangar_737_inspection
+    docker: true
   validated: true
   integration_complete: false
