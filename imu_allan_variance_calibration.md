@@ -9,6 +9,10 @@ metadata:
 
 Allan-variance calibration of the rig's Ouster OS1-64 **built-in IMU** (2026-07-13).
 
+**TWO DIFFERENT IMUs on this rig — don't cross the Allan values:**
+- **Ouster OS1-64 built-in** (`/ouster/imu`, ICM-20948/BMI088) — noisy embedded part + eats LiDAR self-vibration. EllipseLIO/FAST-LIO/COIN-LIO/BIEVR all run on THIS. The 3h calibration below characterizes it. acc_noise 0.0183, gyr_noise 0.000391.
+- **ARK V6 FC** (`mavros/imu/data`, ICM-42688-class) — better IMU. LIO-SAM (`lio_sam_onb`) runs on THIS; its `imuAccNoise 0.00109 / imuGyrNoise 0.000105` (labeled "ARK V6 FC Jan 2025") is for the FC IMU and **CANNOT be reused for LiDAR-IMU runs** (~17x/3.7x too optimistic for the Ouster IMU — would worsen the over-trust). So the 3h Ouster Allan run is the ONLY valid characterization for the LiDAR IMU on this rig.
+
 **Which frameworks even use IMU noise params** (checked live configs):
 - **EllipseLIO** — YES, 4 explicit fields `acc_noise/gyr_noise/acc_bias/gyr_bias` (Allan-shaped). Only framework where a calibration changes a number the estimator reads.
 - **COIN-LIO** — NO. Uses FAST-LIO stock covariances `acc_cov/gyr_cov=0.1, b_*_cov=1e-4` (round defaults, IKFoM insensitive). Consistent with COIN-LIO being rock-stable on 3rd_floor *without* IMU tuning.
