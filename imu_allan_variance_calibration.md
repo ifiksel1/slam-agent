@@ -24,4 +24,13 @@ Allan-variance calibration of the rig's Ouster OS1-64 **built-in IMU** (2026-07-
 
 **Headline:** the hand-set config made EllipseLIO **over-trust the IMU** — accel by ~15x, gyro ~2x. An EKF told the accel is 15x quieter than reality leans too hard on it → plausible contributor to EllipseLIO's knife-edge 3rd_floor runaway (see [[clean_slate_between_repeated_runs]]).
 
-Calibrated variant: `ellipselio_integration/config/os1_64_ouster_allan.yaml` (baseline `os1_64_ouster.yaml` untouched). A/B vs baseline on 3rd_floor: <IN PROGRESS 2026-07-13>. Relates to [[bievr_lio_evaluation]], [[coinlio_ellipselio_photometric_fusion]].
+Calibrated variant: `ellipselio_integration/config/os1_64_ouster_allan.yaml` (baseline `os1_64_ouster.yaml` untouched; runtime copies in `~/ellipselio_ws/src/ellipselio/config/`, differ ONLY in the 3 IMU values). A/B harness: `ellipselio_integration/scripts/ab_imu_config.sh` (interleaved, fresh container/run); `run_bag.sh` now takes optional `[config_file] [out_tag]`.
+
+**A/B RESULT (2026-07-13, 20 runs on 3rd_floor, N=10/arm, interleaved, boosted clock, sensor standby):**
+- Baseline: runaway(>3m) **2/10 (20%)**, clean closure median **0.020m** (n=8).
+- Allan-cal: runaway **3/10 (30%)**, clean closure median **0.020m** (n=7).
+- **NULL RESULT** — 2 vs 3 of 10 is noise (95% CIs overlap hugely); clean closure identical. The Allan calibration does NOT fix EllipseLIO's runaways and does NOT hurt accuracy.
+- CONFIRMS [[clean_slate_between_repeated_runs]]: the 3rd_floor non-determinism is multi-threaded FP-reduction-order (component_container_mt + parallel tensor-voting), NOT a mis-specified IMU prior. Fixing the real 15x accel over-trust changed nothing because that wasn't the cause.
+- **KEEP the calibration anyway** (physically correct, accuracy-neutral, no downside). Pursue determinism via threading (SingleThreadedExecutor / deterministic reduction), not IMU tuning.
+
+Relates to [[bievr_lio_evaluation]], [[coinlio_ellipselio_photometric_fusion]].
