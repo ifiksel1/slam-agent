@@ -53,6 +53,8 @@ DIAGNOSTIC_SCRIPTS = {
     "docker_diagnostics": ("docker_diagnostics.py", "python3"),
     "preflight_check_docker": ("preflight_check_docker.sh", "bash"),
     "measure_vision_latency": ("measure_vision_latency.py", "python3"),
+    # ROS 1 Noetic variant (Hesai JT128 / NUC). The one above is rclpy/ROS 2 only.
+    "measure_vision_latency_noetic": ("measure_vision_latency_noetic.py", "python3"),
     "flight_recorder": ("flight_recorder.sh", "bash"),
     "flight_analysis": ("flight_analysis.py", "python3"),
     "transform_calibrator": ("transform_calibrator.py", "python3"),

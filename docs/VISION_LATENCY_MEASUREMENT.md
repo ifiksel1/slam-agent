@@ -1,7 +1,15 @@
 # Vision Pipeline Latency Measurement Tool
 
-**Script:** `/home/dev/slam-agent/scripts/measure_vision_latency.py`
-**Purpose:** Measure end-to-end latency in the SLAM-to-MAVROS vision pose pipeline and recommend optimal `VISO_DELAY_MS` ArduPilot parameter.
+**Purpose:** Measure latency in the SLAM-to-MAVROS vision pose pipeline and recommend an optimal `VISO_DELAY_MS` ArduPilot parameter.
+
+## ⚠️ Pick the script that matches your ROS version
+
+| Stack | Script | Notes |
+|---|---|---|
+| **ROS 1 Noetic** — Hesai JT128 / NUC (the *current* rig) | `scripts/measure_vision_latency_noetic.py` | Use this one. See [ROS 1 Noetic](#ros-1-noetic-hesai-jt128--fast-lio) below. |
+| ROS 2 Humble — Jetson Orin / Ouster (legacy) | `scripts/measure_vision_latency.py` | `rclpy` only; **cannot run on Noetic**. Rest of this document describes it. |
+
+The two use **different measurement methods and produce different numbers.** The ROS 2 script's method measures the wrong path on the Noetic rig — see [Why the methods differ](#why-the-methods-differ). Do not carry a `VISO_DELAY_MS` value between the two platforms.
 
 ---
 
@@ -165,6 +173,52 @@ VISO_DELAY_MS = ceil(p95_end_to_end_latency + 10ms_safety_margin)
 
 ---
 
+## ROS 1 Noetic (Hesai JT128 / FAST-LIO)
+
+**Script:** `scripts/measure_vision_latency_noetic.py`
+**Platform:** Intel NUC, Docker container `slam-hesai-fastlio`, Hesai JT128 (128 lines @ 20 Hz, internal IMU), FAST-LIO on ROS 1 Noetic, ArduPilot on mRo Pixracer Pro over USB CDC-ACM `/dev/ttyACM0:921600`, ExternalNav (`EK3_SRC1_{POSXY,VELXY,YAW}=6`, `VISO_TYPE=1`).
+
+Read-only: subscribers and nothing else. It never writes a param or commands the FC.
+
+```bash
+docker cp scripts/measure_vision_latency_noetic.py slam-hesai-fastlio:/tmp/
+docker exec slam-hesai-fastlio bash -lc \
+  'source /opt/ros/noetic/setup.bash; source /root/slam_ws/devel/setup.bash; \
+   python3 /tmp/measure_vision_latency_noetic.py --duration 30'
+```
+
+`--json` emits an MCP-compatible object.
+
+### Why the methods differ
+
+`VISO_DELAY_MS` is defined by ArduPilot as the delay between the vision sensor **measuring** the position and the autopilot **receiving** the message.
+
+Because the Hesai driver runs `use_timestamp_type: 1` (host receive clock) and `fastlio_mavros_bridge` runs `restamp_system_time: false`, `header.stamp` propagates **unchanged** along `/lidar_points → /Odometry → /mavros/vision_pose/pose`. So `now() - header.stamp` at the last ROS hop directly measures the delay up to MAVLink serialisation, and the per-hop increments decompose it.
+
+The ROS 2 script instead takes `p95` of `/Odometry → /mavros/local_position/pose`. That is wrong here on two counts:
+
+1. **It is a round trip.** `/mavros/local_position/pose` is the FC's *output* returning over telemetry, so it includes FC→host latency that is not part of the sensor delay — while missing the `scan → /lidar_points` segment, which is the **largest** single term on this rig (~55 ms).
+2. **`p95 + margin` is the wrong statistic.** `VISO_DELAY_MS` is a fixed constant the EKF uses to index its state-history buffer, so it wants the **central** value. Padding it high makes the EKF fuse each measurement against a too-old state. Over- and under-estimating are both harmful.
+
+### Measured budget (2026-08-09, idle bench, 2×30 s + 1×15 s runs)
+
+| Stage | Median age vs. `header.stamp` |
+|---|---|
+| `/lidar_points` — driver assembly | ~55 ms |
+| `/Odometry` — + FAST-LIO compute | ~72 ms (**+17 ms**) |
+| `/mavros/vision_pose/pose` — + bridge hop | ~73 ms (**+0.3 ms**) |
+
+Spread was tight (sd ≈ 4 ms). Plus ~1.5 ms USB CDC-ACM transit → **`VISO_DELAY_MS = 75`** (set 2026-08-09, was 60).
+
+### Limitations
+
+- **The result is a lower bound.** `header.stamp` is the host's *packet receive* time, not the true scan instant, so LiDAR-internal acquisition and ethernet transit fall outside the measurement.
+- **Deskew convention adds up to ±25 ms** of uncertainty at 20 Hz, depending on whether FAST-LIO deskews to sweep start or sweep end.
+- **Validate in motion, handheld and disarmed** — never as a flight test. Watch whether FC position innovation correlates with velocity; if it grows with speed, step the value and re-check.
+- **Re-measure after any FAST-LIO tuning change.** The ~17 ms compute term moves with `point_filter_num`, `max_iteration`, and the voxel filter sizes, and idle bench CPU is less contended than flight.
+
+---
+
 ## Troubleshooting
 
 ### Error: Timeout waiting for topics
@@ -307,12 +361,12 @@ Uses nearest-timestamp matching within a 200ms window:
 - [ ] Add histogram visualization of latency distribution
 - [ ] Support multiple measurement runs with statistical comparison
 - [ ] Auto-detect optimal measurement duration based on topic publish rate
-- [ ] Add support for ROS 1 Noetic (separate script variant)
+- [x] Add support for ROS 1 Noetic (separate script variant) — `measure_vision_latency_noetic.py`
 - [ ] Export latency data to CSV for external analysis
 - [ ] Real-time latency monitoring mode (continuous output)
 
 ---
 
-**Last Updated:** 2026-02-16
+**Last Updated:** 2026-08-09
 **Author:** SLAM Integration Team
-**Platform:** ROS 2 Humble, ARM64 Jetson Orin NX
+**Platforms:** ROS 2 Humble / ARM64 Jetson Orin NX (legacy) — ROS 1 Noetic / x86 NUC + Hesai JT128 (current)
