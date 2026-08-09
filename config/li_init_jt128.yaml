@@ -1,0 +1,62 @@
+# LI-Init (hku-mars/LiDAR_IMU_Init) config for the Hesai JT128 + internal IMU.
+#
+# Purpose: independently re-derive the LiDAR<->IMU extrinsic that currently sits in
+# config/hesai_jt128.yaml, AND the LiDAR/IMU time offset -- the two are correlated
+# during motion, which is why the existing 3.21 deg extrinsic is under suspicion:
+# it was produced by FAST-LIO's own online estimator under the OLD stamping regime
+# (use_timestamp_type:0) and frozen. See PROGRESS/solutions_log entry 4 and 7.
+#
+# Derived from upstream config/velodyne.yaml (NOT pandar.yaml) -- see lidar_type below.
+# Runs OFFLINE against a recorded bag. Never touches the flight controller.
+
+common:
+    lid_topic:  "/lidar_points"
+    imu_topic:  "/lidar_imu"
+
+preprocess:
+    # lidar_type 2 = Velodyne, NOT 5 (Hesai PandarXT), despite this being a Hesai.
+    # The decoder is chosen by POINT STRUCT, not by vendor. The JT128 driver emits
+    # x,y,z,intensity,ring(uint16),time(float32) -- a RELATIVE float32 `time`, which
+    # is the Velodyne convention. The Pandar decoder expects an ABSOLUTE double
+    # `timestamp`. Verified against the live topic; matches lidar_type:2 already
+    # working in config/hesai_jt128.yaml.
+    lidar_type: 2
+    scan_line: 128
+    blind: 0.4                   # matches the live config
+    feature_extract_en: false
+
+initialization:
+    # Live pipeline runs at 20 Hz (measured), not the upstream default of 10.
+    orig_odom_freq: 20
+    cut_frame_num: 2             # 20 Hz x 2 = 40 Hz effective, in line with upstream configs
+    # MEASURED on this unit, 8690 samples over 20 s stationary (sd 0.028 m/s^2).
+    # Gravity sits on +y, consistent with the body-frame convention.
+    mean_acc_norm: 9.7977
+    online_refine_time: 20.0     # upstream recommends 15-30 s
+    data_accum_length: 300       # dense sensor (115200 pts/frame); raise if it reports insufficient data
+    Rot_LI_cov:   [ 0.00005, 0.00005, 0.00005 ]
+    Trans_LI_cov: [ 0.00001, 0.00001, 0.00000001 ]
+
+mapping:
+    # Indoor/confined values. Measured returns on this rig: median 2.4 m, p95 6.9 m,
+    # max 21.7 m -- short range, so keep the voxels fine.
+    filter_size_surf: 0.1
+    filter_size_map:  0.15
+    # TUNING KNOB: upstream ships wildly different noise values per sensor
+    # (velodyne.yaml 0.5/0.5, pandar.yaml 20/2). Starting neutral. If the extrinsic
+    # fails to converge or wanders, try gyr_cov 20 / acc_cov 2.
+    gyr_cov: 0.5
+    acc_cov: 0.5
+    b_acc_cov: 0.0001
+    b_gyr_cov: 0.0001
+    det_range: 100.0             # matches live; actual max return is ~22 m
+
+publish:
+    path_en:  true
+    scan_publish_en:  true
+    dense_publish_en: true
+    scan_bodyframe_pub_en: true
+
+pcd_save:
+    pcd_save_en: false           # never write PCDs during calibration
+    interval: -1

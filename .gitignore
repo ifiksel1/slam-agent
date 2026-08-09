@@ -14,3 +14,6 @@ docker-compose.override.yml
 
 # Large flight logs / dataflash .bin (4.7GB) - never commit
 logs/
+
+# LI-Init calibration outputs (results + logs, regenerated per run)
+li_init_result/

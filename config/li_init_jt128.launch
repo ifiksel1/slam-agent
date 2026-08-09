@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- LI-Init for the Hesai JT128 + internal IMU, run OFFLINE against a recorded bag.
+     Mirrors upstream launch/velodyne.launch, but loads our li_init_jt128.yaml and
+     omits rviz (headless container). Launched by scripts/li_init/run_li_init.sh.
+
+     NOTE: no driver, no mavros, no bridge, no FC. This launch cannot reach the
+     flight controller. -->
+<launch>
+  <!-- replay drives the clock -->
+  <param name="/use_sim_time" value="true"/>
+
+  <rosparam command="load" file="/root/li_ws/config/li_init_jt128.yaml"/>
+
+  <!-- Upstream velodyne.launch values. cube_side_length stays at the upstream 1000
+       (calibration wants the full accumulated map; this is NOT the live pipeline,
+       where it is deliberately capped at 300 to bound ikd-tree growth). -->
+  <param name="point_filter_num"  type="int"    value="3"/>
+  <param name="max_iteration"     type="int"    value="5"/>
+  <param name="cube_side_length"  type="double" value="1000.0"/>
+
+  <node pkg="lidar_imu_init" type="li_init" name="laserMapping" output="screen"/>
+</launch>
