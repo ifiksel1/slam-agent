@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- LI-Init against the LIVE sensor (real-time excitation guidance).
+     Same as li_init_jt128.launch but WITHOUT use_sim_time: there is no bag
+     replay here, so the node must run on wall time.
+
+     Launched by scripts/li_init/run_li_init_live.sh, which requires the flight
+     pipeline (and therefore mavros) to be stopped first. No driver node here
+     either; the Hesai driver runs in the flight container. This launch starts
+     exactly one node and cannot reach the flight controller. -->
+<launch>
+  <rosparam command="load" file="/root/li_ws/config/li_init_jt128.yaml"/>
+
+  <param name="point_filter_num"  type="int"    value="3"/>
+  <param name="max_iteration"     type="int"    value="5"/>
+  <param name="cube_side_length"  type="double" value="1000.0"/>
+
+  <node pkg="lidar_imu_init" type="li_init" name="laserMapping" output="screen"/>
+</launch>
