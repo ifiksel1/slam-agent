@@ -355,13 +355,14 @@ solutions:
       version: noetic
       comm_method: mavros
     docker: true
-  symptom: Incumbent LiDAR->IMU extrinsic rotation in config/hesai_jt128.yaml (rpy
-    -1.16/-2.31/+1.92 deg, 3.21 deg total) could not be reproduced by LI-Init. Seven
+  symptom: The ORIGINAL committed LiDAR->IMU extrinsic rotation in config/hesai_jt128.yaml
+    (rpy -1.16/-2.31/+1.92 deg, 3.21 deg total) could not be reproduced by LI-Init. Seven
     independent live LI-Init calibration runs all returned a near-identity rotation;
-    no run came within 2.4 deg of the incumbent.
-  root_cause: 'Not yet confirmed by closed-loop test. Evidence points to an unmodelled
-    LiDAR/IMU time offset having been absorbed into the incumbent rotation when it
-    was originally fitted. Across 7 runs (2026-08-09 .. 2026-08-14) the refinement-stage
+    no run came within 2.4 deg of it. Runs 1-4 replaced it; runs 5-7 (2026-08-14) are
+    an independent re-check that CONFIRMS the replacement.
+  root_cause: 'Confirmed by repeatability, not yet by a closed-loop A/B. An unmodelled
+    LiDAR/IMU time offset appears to have been absorbed into the original 3.21 deg rotation
+    when it was first fitted. Across 7 runs (2026-08-09 .. 2026-08-14) the refinement-stage
     results were: rotation mean (roll 0.103, pitch -0.342, yaw 0.106) deg, sd (0.075,
     0.258, 0.118), total magnitude 0.37 deg -- small but statistically nonzero (roll/pitch
     ~3.5 SEM). Translation mean (0.002, -0.001, 0.006) m with sd (0.025, 0.014, 0.019)
@@ -375,22 +376,40 @@ solutions:
     varies) -- a saturated internal clamp, not an estimate. The init-stage bias output
     is therefore meaningless here, and lengthening the initial static hold (tried
     on run 6) does not change it. Only the refinement-stage biases are usable.'
-  fix: 'NOT YET APPLIED -- finding recorded pending validation. Deliberately did not
-    write a new extrinsic on the strength of calibration runs alone. Config left untouched.
+  fix: 'APPLIED (2026-08-10, from runs 1-4) and INDEPENDENTLY CONFIRMED (2026-08-14, runs 5-7).
+    Live values in config/hesai_jt128.yaml:
+    extrinsic_R = SO(3) chordal mean of runs 1-4, 0.446 deg, rpy [0.1372, -0.4121, 0.1027];
+    time_offset_lidar_to_imu = -0.015588 (4-run mean);
+    extrinsic_T = [-0.0076, 0.01363, 0.01271] -- GEOMETRIC (sensor optical-centre offset),
+    deliberately NOT an LI-Init output, because all LI-Init translations were rejected as
+    unusable against the JT128 mechanical envelope.
 
-    Recommended next step: closed-loop A/B on a separate flight-profile bag (NOT the
-    handheld excitation bags, whose aggressive small-area motion is unrepresentative),
-    replayed through scripts/replay/run_one.sh on isolated ROS master :11312, comparing
-    position closure and /fastlio_health (mean_residual, eig_min, matched_pts) between
-    incumbent and identity-rotation candidate. Note run_one.sh currently parameterizes
-    only the confined-space tuning knobs (blind, filter_size_*, point_filter_num,
-    max_iteration) -- extrinsics come from the base config/hesai_jt128.yaml loaded
-    by fastlio_replay.launch, so an extrinsic A/B requires adding extrinsic_R/extrinsic_T
-    overrides to that launch or swapping the yaml between runs.
+    Runs 5-7 re-derived both fitted terms independently: 7-run rotation mean rpy
+    (0.103, -0.342, 0.106) vs applied (0.137, -0.412, 0.103); 7-run lag -14.9 ms vs
+    applied -15.6 ms. Both inside their own run-to-run scatter, so the applied values
+    are reproducible and need no revision.
 
-    If the A/B confirms, the change to make is: set extrinsic_R to identity AND account
-    for the -14.9 ms time lag, rather than replacing the rotation alone -- the two
-    are coupled and changing only the rotation would move the error, not remove it.'
+    OBSERVED EFFECT of the applied calibration: it removed the spurious ALTITUDE change
+    during roll/pitch maneuvers. It did NOT remove a separate lateral (body-Y) drift
+    during pitch -- see the note below, that symptom is not reachable by these terms.
+
+    Still open (nice-to-have, not blocking): a closed-loop A/B on a flight-profile bag
+    through scripts/replay/run_one.sh on isolated master :11312, comparing position
+    closure and /fastlio_health (mean_residual, eig_min, matched_pts). Note run_one.sh
+    parameterizes only the confined-space tuning knobs (blind, filter_size_*,
+    point_filter_num, max_iteration) -- extrinsics come from the base
+    config/hesai_jt128.yaml loaded by fastlio_replay.launch:21, so an extrinsic A/B
+    requires adding extrinsic_R/extrinsic_T overrides to that launch or swapping the yaml.
+
+    KINEMATIC NOTE for anyone chasing a similar symptom: lateral (body-Y) drift during a
+    PURE PITCH cannot be caused by any of these terms. For pitch rate w = (0, wy, 0) and
+    lever arm r, the induced velocity w x r = (wy*rz, 0, -wy*rx) has an identically zero
+    Y component for ANY r, so no extrinsic_T error can produce it; and both a residual
+    extrinsic_R error and a time-lag error act within the pitch (X-Z) plane. Lateral drift
+    under pitch points elsewhere -- geometric degeneracy (pitching toward floor/ceiling
+    leaves the lateral direction unconstrained; watch eig_min), IMU cross-axis coupling
+    (pitch rate leaking into the roll gyro -> false roll -> lateral gravity projection),
+    or the maneuver simply not being pure pitch.'
   files_changed:
   - none (investigation only); evidence in li_init_result/Initialization_result_run1..run7*.txt;
     harness scripts/li_init/run_li_init_live.sh
