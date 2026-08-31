@@ -37,6 +37,35 @@ rate 1.0; ~15.5 Hz (77%) at rate 0.5. Cost is the ICP itself (`max_num_iteration
 converging slowly), NOT the debug-cloud publishing (682 vs 709 poses with it off). Replay
 offline sweeps at rate 0.5. Accuracy held despite dropping 23% of scans.
 
+**12-BAG HANGAR SWEEP (2026-08-31), rate 1.0 = REAL-TIME condition, `hangar.yaml`:**
+**12/12 bounded, ZERO divergences.** Final displacement 0.24-35.4 m, median 11.3 m.
+Head-to-head vs BIEVR-LIO return-to-origin (`~/bievr_ws/results/rto_report.json`):
+**GenZ-ICP wins 10/12 with NO IMU.** Both BIEVR km-divergences eliminated:
+863,700 m -> 8.84 m (737_700_TAIL) and 362,934 m -> 29.19 m (cmem3qaqb 00:38).
+Also 648.8->11.7, 298.2->2.07, 55.2->35.4, 43.2->4.72, 34.9->15.5, 18.6->1.52, 11.1->0.24.
+BIEVR wins only 2, both narrow and both on bags it did not diverge on:
+737_700_FRONT 5.87 vs 15.35, MAX_8_LIO_SAM_3 10.47 vs 11.31.
+
+**INTERPRETATION — both halves of the prediction held.** The point-to-point identity
+translational Jacobian block bounds the Hessian conditioning, so ill-posed BLOW-UPS are
+gone. But drift is still METRES (median 11.3 m) on flights that provably returned to ~0.2 m,
+vs 1.36 cm from the same binary on 3rd_floor. GenZ-ICP makes hangar failure BOUNDED AND
+HONEST, not ACCURATE. **Pure LiDAR odometry remains non-viable standalone in the hangar;
+the absolute-anchor architecture in [[hangar-737-inspection]] is unchanged and validated.**
+Diagnostic value achieved: the two previously-confounded failure modes are now separated —
+estimator fragility (real, fixable, GenZ fixes it) vs true unobservability (real, residual).
+
+**alpha is a WEAK degeneracy predictor — do not over-trust it.** At n=12, correlation with
+final drift: alpha_p05 r=-0.46 (right sign, moderate); alpha_median r=+0.10 (useless);
+max_step r=+0.47; path_len r=+0.38. An n=6 read suggested p05 was a clean predictor; it is
+NOT (TAIL_RIGHT_SCAN has healthy p05 0.815 but the worst drift, 35.4 m). If gating on alpha,
+use a LOW PERCENTILE not the median, and combine with max_step — neither alone suffices.
+
+**BIEVR's own GT tiering predicts GenZ difficulty.** The one `CLOSED` bag (icp_inlier_frac
+0.94) is GenZ's best result (0.30 m). On the 4 `open` bags `true_drift_m` is null — the ICP
+ground truth could not be established, so GenZ drift there is measured against an UNVERIFIED
+reference and should not be quoted as confirmed error.
+
 **LiDAR-ONLY, `deskew: false`** (upstream advises off for aggressive motion — their deskew is a
 constant-velocity model). Not a flight candidate. Harness: `slam-agent/genz_icp_integration/`,
 image `genz_icp:noetic` (native arm64, builds in 69s; no PCL/OpenCV/Ceres so none of the known
