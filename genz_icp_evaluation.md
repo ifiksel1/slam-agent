@@ -46,7 +46,25 @@ Also 648.8->11.7, 298.2->2.07, 55.2->35.4, 43.2->4.72, 34.9->15.5, 18.6->1.52, 1
 BIEVR wins only 2, both narrow and both on bags it did not diverge on:
 737_700_FRONT 5.87 vs 15.35, MAX_8_LIO_SAM_3 10.47 vs 11.31.
 
-**INTERPRETATION — both halves of the prediction held.** The point-to-point identity
+**⚠️ THE 1.0x SWEEP IS SCAN-STARVED — ITS DRIFT NUMBERS ARE NOT A VALID MEASURE OF THE
+ALGORITHM (discovered 2026-08-31, same day).** Re-ran the WORST bag, 737_700_FRONT, at rate
+0.5 with an otherwise IDENTICAL config: **15.35 m -> 0.21 m**. Scan capture 30% -> 71%
+(2939 -> 6949 poses of 9727). max_step 2.48 -> 0.23 m; alpha_p05 0.607 -> 0.947. For scale,
+the ICP ground-truth offset for this bag is 0.273 m (`rto_report.json`) — **so at 0.5x
+GenZ-ICP essentially HIT ground truth (0.21 m vs 0.273 m), versus BIEVR-LIO's 5.87 m.**
+The 1.0x "drift" was overwhelmingly an artifact of starving the estimator of scans, NOT
+hangar geometry. GenZ-ICP is not real-time at 20 Hz on the Orin NX, so replaying at 1.0x
+drops 40-70% of scans and the constant-velocity initial guess (no IMU!) must extrapolate
+across the gaps — precisely where a LiDAR-only method is weakest.
+**CONSEQUENCE: the median-11.3 m result and the "bounded but not accurate" reading below
+are RETRACTED pending a full 12-bag sweep at 0.5x. Do not quote them.** What SURVIVES
+unaffected: 12/12 bounded with ZERO divergences, and both km-scale blow-ups eliminated —
+conditioning robustness does not depend on capture rate.
+**Lesson: for a non-real-time estimator, replay rate is a first-class experimental variable.
+Always report scan-capture %, and never compare against another estimator's numbers that
+were obtained at full capture.**
+
+**INTERPRETATION (from the 1.0x sweep — SEE RETRACTION ABOVE, treat as provisional).** The point-to-point identity
 translational Jacobian block bounds the Hessian conditioning, so ill-posed BLOW-UPS are
 gone. But drift is still METRES (median 11.3 m) on flights that provably returned to ~0.2 m,
 vs 1.36 cm from the same binary on 3rd_floor. GenZ-ICP makes hangar failure BOUNDED AND
@@ -55,7 +73,9 @@ the absolute-anchor architecture in [[hangar-737-inspection]] is unchanged and v
 Diagnostic value achieved: the two previously-confounded failure modes are now separated —
 estimator fragility (real, fixable, GenZ fixes it) vs true unobservability (real, residual).
 
-**alpha is a WEAK degeneracy predictor — do not over-trust it.** At n=12, correlation with
+**alpha is a WEAK degeneracy predictor — do not over-trust it (and these correlations are
+themselves computed on the confounded 1.0x data, so they may be measuring scan starvation
+rather than scene structure — recompute after the 0.5x sweep).** At n=12, correlation with
 final drift: alpha_p05 r=-0.46 (right sign, moderate); alpha_median r=+0.10 (useless);
 max_step r=+0.47; path_len r=+0.38. An n=6 read suggested p05 was a clean predictor; it is
 NOT (TAIL_RIGHT_SCAN has healthy p05 0.815 but the worst drift, 35.4 m). If gating on alpha,
