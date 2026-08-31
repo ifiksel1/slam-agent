@@ -437,3 +437,54 @@ solutions:
   - ouster_os1_64
   - jetson
   - bag_replay
+- id: 12
+  date: '2026-08-31'
+  phase: 4
+  hardware:
+    platform: jetson_orin_nx
+    os: ubuntu_20.04_l4t
+    lidar: ouster_os1_64
+    slam: genz_icp
+    ros: noetic
+    deployment: docker_native_arm64
+  symptom: 'ROS 1 SLAM node in Docker logs "GenZ-ICP ROS 1 Odometry Node Initialized"
+    then floods "Error in XmlRpcClient::writeRequest: write error (Connection refused)".
+    No odometry is ever published, subscribers receive nothing, and the recorded trajectory
+    CSV is empty despite rosbag play running normally.'
+  root_cause: 'The container was started with --net=host while the HOST already had
+    a rosmaster running on port 11311 (from a previously started foxglove_bridge stack,
+    which sets ROS_IP=192.168.2.50). Sharing the host network namespace meant the
+    in-container `roscore` could not bind 11311 and silently exited, so every node
+    in the container registered with the FOREIGN pre-existing master instead. That
+    master advertises node URIs on an interface/hostname the container''s nodes cannot
+    route back to, so all XmlRpc peer connections are refused and no pub/sub link
+    is ever established. The failure is silent: the node initializes fine and rosbag
+    play reports normal progress. This is the ROS 1 analogue of the existing "clean
+    DDS slate between runs" rule -- for ROS 1 the shared resource is the master port,
+    not DDS discovery.'
+  fix: 'Do NOT use --net=host for a self-contained offline bag-replay container. Everything
+    needed (roscore, estimator node, trajectory sampler, rosbag play) runs inside
+    the single container, so give it an isolated network namespace and point ROS at
+    its own loopback: drop `--net=host --ipc=host` and add `-e ROS_MASTER_URI=http://127.0.0.1:11311
+    -e ROS_IP=127.0.0.1`. This both fixes the routing failure and guarantees the replay
+    cannot perturb the user''s running live stack. Diagnostic that identifies it in
+    seconds: `ss -tlnp | grep 11311` on the host -- any existing rosmaster there means
+    --net=host will collide. Use --net=host ONLY when the container must genuinely
+    talk to host-side ROS nodes (e.g. a live sensor driver), and in that case use
+    a dedicated master port instead.'
+  files_changed:
+  - genz_icp_integration/scripts/run_bag.sh
+  - genz_icp_integration/README.md
+  tags:
+  - ros1
+  - docker
+  - networking
+  - rosmaster
+  - net_host
+  - xmlrpc_connection_refused
+  - no_odometry
+  - empty_trajectory
+  - bag_replay
+  - genz_icp
+  - clean_slate
+  - port_collision
