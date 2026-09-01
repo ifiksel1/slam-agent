@@ -163,7 +163,10 @@
     <param name="lat_arm_ms"              type="double" value="150" />
     <param name="lat_drain_sec"           type="double" value="5.0" />
     <param name="lat_median_n"            type="int"    value="5" />
-    <param name="lat_k_warn"              type="int"    value="10" />
+    <!-- k_warn=15, not 10: worst run above 150 ms across 20 healthy flights is exactly 10 scans
+         (28761 samples), so 10 fires with zero margin and did on 07_13_2026_14_16_19.
+         k_crit=20 confirmed: worst healthy run above 250 ms is 6 scans, a 3.3x margin. -->
+    <param name="lat_k_warn"              type="int"    value="15" />
     <param name="lat_k_crit"              type="int"    value="20" />
     <param name="lat_k_release"           type="int"    value="40" />
     <param name="lat_k_arm_lock"          type="int"    value="10" />

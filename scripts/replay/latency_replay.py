@@ -36,7 +36,7 @@ from drift_monitor import LatencyTracker  # noqa: E402
 # is duplicated (the subtle part - median, starvation floor, skew rejection - is imported).
 # Keep these in step with the rosparam defaults in drift_monitor.py.
 D = dict(lat_warn_ms=150.0, lat_crit_ms=250.0, lat_arm_ms=150.0, lat_drain_sec=5.0,
-         lat_median_n=5, lat_k_warn=10, lat_k_crit=20, lat_k_release=40,
+         lat_median_n=5, lat_k_warn=15, lat_k_crit=20, lat_k_release=40,
          lat_k_arm_lock=10, lat_k_arm_release=60,
          lat_startup_grace_sec=5.0, lat_restart_blank_sec=20.0)
 
@@ -48,7 +48,7 @@ def pct(vals, p):
     return s[min(len(s) - 1, max(0, int(round(p / 100.0 * (len(s) - 1)))))]
 
 
-def replay(path, cfg, verbose=True):
+def replay(path, cfg, verbose=True, warm=False):
     """Feed one bag through the detector. Returns a stats dict."""
     bag = rosbag.Bag(path)
     topics = bag.get_type_and_topic_info().topics
@@ -62,11 +62,15 @@ def replay(path, cfg, verbose=True):
     n_arm = n_armok = 0
     latched = "OK"
     lat_lock = False
-    blank_until = -1e9
+    # Armed at the first sample, mirroring drift_monitor.__init__. Without this the harness
+    # models the pre-fix node and reports a restart on the cold-start bag that the real node
+    # would never perform - the "test the thing that flies" trap, hit for real.
+    blank_until = None
     failover_at = None
     escalated = False
     events = []
-    samples = []
+    samples = []      # raw age at receipt
+    eff = []          # effective age the detector thresholds on (median + starvation floor)
     t0 = None
 
     # Impact detection for the crash bag: biggest |a| - g spike on the FC IMU.
@@ -85,11 +89,18 @@ def replay(path, cfg, verbose=True):
         now = t.to_sec()
         if t0 is None:
             t0 = now
+            # warm=True models a node that booted long before the recording did - the normal
+            # case in flight, where the stack is up minutes before takeoff. Without it the
+            # harness applies a startup blank the real node would have finished long ago and
+            # makes the detector look slower than it is.
+            blank_until = None if warm else (t0 + cfg["lat_restart_blank_sec"])
         age_ms = (now - msg.header.stamp.to_sec()) * 1000.0
         trk.add_sample(now, age_ms)
         samples.append(age_ms)
 
         lat_ms, note = trk.evaluate(now)
+        if lat_ms is not None:
+            eff.append(lat_ms)
 
         # _evaluate_latency
         crit = warn = False
@@ -100,7 +111,7 @@ def replay(path, cfg, verbose=True):
         elif lat_ms >= cfg["lat_warn_ms"]:
             warn = True
 
-        blanked = now < blank_until
+        blanked = blank_until is not None and now < blank_until
         if crit and blanked:
             crit, warn = False, True
 
@@ -151,7 +162,7 @@ def replay(path, cfg, verbose=True):
               failovers=sum(1 for e in events if "switch to OF" in e[1]),
               restarts=sum(1 for e in events if "ESCALATE" in e[1]),
               locks=sum(1 for e in events if "LOCKED" in e[1]),
-              events=events, samples=samples, impact_t=impact_t, t0=t0)
+              events=events, samples=samples, eff=eff, impact_t=impact_t, t0=t0)
 
     if verbose:
         print("=" * 78)
@@ -178,6 +189,8 @@ def main():
     ap.add_argument("--calibrate", action="store_true", help="pooled percentiles + recommendation")
     ap.add_argument("--warn-ms", type=float, default=D["lat_warn_ms"])
     ap.add_argument("--crit-ms", type=float, default=D["lat_crit_ms"])
+    ap.add_argument("--warm", action="store_true",
+                    help="model a node already running before the recording started (normal in flight)")
     args = ap.parse_args()
 
     cfg = dict(D, lat_warn_ms=args.warn_ms, lat_crit_ms=args.crit_ms)
@@ -190,7 +203,7 @@ def main():
 
     for b in args.bags:
         try:
-            st = replay(b, cfg, verbose=not (args.summary or args.calibrate))
+            st = replay(b, cfg, verbose=not (args.summary or args.calibrate), warm=args.warm)
         except Exception as e:
             print("ERR %s: %s" % (os.path.basename(b), e))
             continue
@@ -199,14 +212,15 @@ def main():
                 print("%-34s  %s" % (st["name"], st["skipped"]))
             continue
         stats.append(st)
-        pooled.extend(st["samples"])
+        pooled.extend(st["eff"])
         if args.summary:
             print("%-34s %6.1f %5d %6.0f %6.0f %6.0f %6.0f %5d %5d %5d %5d" %
                   (st["name"], st["dur"], st["n"], st["p50"], st["p90"], st["p99"], st["mx"],
                    st["warns"], st["crits"], st["failovers"], st["restarts"]))
 
     if args.calibrate and pooled:
-        print("\n=== pooled across %d bags, %d samples ===" % (len(stats), len(pooled)))
+        print("\n=== pooled EFFECTIVE latency across %d bags, %d samples ===" % (len(stats), len(pooled)))
+        print("    (what the detector thresholds on: median + starvation floor, not the raw age)")
         for p in (50, 90, 99, 99.9):
             print("  p%-5s %7.0f ms" % (p, pct(pooled, p)))
         print("  max    %7.0f ms" % max(pooled))

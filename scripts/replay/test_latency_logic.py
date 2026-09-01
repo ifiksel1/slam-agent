@@ -39,7 +39,7 @@ from drift_monitor import LatencyTracker  # noqa: E402
 
 # Must match the rosparam defaults in drift_monitor.py.
 CRIT, WARN = 250.0, 150.0
-K_CRIT, K_WARN = 20, 10
+K_CRIT, K_WARN = 20, 15
 BLANK, DRAIN, WARMUP = 20.0, 5.0, 30
 
 FAILURES = []
