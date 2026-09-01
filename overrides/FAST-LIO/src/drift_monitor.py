@@ -111,12 +111,14 @@ class LatencyTracker:
         self._last_rx = None
         self._last_age_ms = None
         self._t0 = None
+        self._blank_until = None   # set on a rejected sample; a short blind spot, not forever
 
     def reset(self, now_sec, reason=""):
         self._samples.clear()
         self._last_rx = None
         self._last_age_ms = None
         self._t0 = now_sec
+        self._blank_until = None
 
     def add_sample(self, now_sec, age_ms):
         """Returns False if the sample was rejected as implausible (clock step, bad stamp)."""
@@ -124,13 +126,28 @@ class LatencyTracker:
             self._t0 = now_sec
         if age_ms < -self.max_skew_ms or age_ms > self.sane_max_ms:
             # Rejecting alone is not enough: no new sample means the starvation term climbs
-            # and would fire a false CRITICAL. Blank instead, so a clock step becomes a short
-            # blind spot rather than a spurious failover.
-            self.reset(now_sec)
+            # and would fire a false CRITICAL. Blank instead, so a one-off clock step becomes a
+            # short blind spot rather than a spurious failover.
+            #
+            # But do NOT restart the startup grace window here. If EVERY sample is implausible -
+            # e.g. the publisher stamps a monotonic clock while we read epoch, which is exactly
+            # what the pre-2026-08 bench bags do - resetting _t0 each time kept evaluate() in
+            # "init" forever and the detector went permanently, silently blind. Blanking for
+            # grace_sec and then escalating to "no_odom" (WARN + interlock, never CRITICAL) is
+            # the intended behaviour for a misconfigured source.
+            self._samples.clear()
+            self._last_rx = None
+            self._last_age_ms = None
+            if self._blank_until is None:
+                # Only the FIRST rejection starts the blind spot. Extending it on every rejection
+                # would keep a permanently-bad source in "init" forever - the same silent-blindness
+                # bug in a different disguise.
+                self._blank_until = now_sec + self.grace_sec
             return False
         self._samples.append(float(age_ms))
         self._last_rx = now_sec
         self._last_age_ms = float(age_ms)
+        self._blank_until = None
         return True
 
     def evaluate(self, now_sec):
@@ -138,7 +155,8 @@ class LatencyTracker:
         if self._t0 is None:
             self._t0 = now_sec
         if self._last_rx is None:
-            if (now_sec - self._t0) < self.grace_sec:
+            blanked = self._blank_until is not None and now_sec < self._blank_until
+            if blanked or (now_sec - self._t0) < self.grace_sec:
                 return (None, "init")
             return (None, "no_odom")
         ordered = sorted(self._samples)
