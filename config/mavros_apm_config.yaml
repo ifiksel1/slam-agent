@@ -66,4 +66,3 @@ plugin_blacklist:
   - wind_estimation
   - vibration
   - adsb
-  - debug_value
