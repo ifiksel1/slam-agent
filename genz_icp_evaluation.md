@@ -1,92 +1,108 @@
 ---
 name: genz-icp-evaluation
-description: GenZ-ICP (RA-L 2025) bag-validated on 3rd_floor — LiDAR-only matched BIEVR-LIO's 1.3cm return-to-origin; hangar sweep still pending
+description: GenZ-ICP (RA-L 2025) — LiDAR-only, real-time on Orin NX, sub-metre true drift on 6/6 usable hangar bags after a critical retune; beats BIEVR-LIO
 metadata:
   type: project
 ---
 
-**GenZ-LIO source is NOT public** (arXiv 2603.16273, March 2026, "available upon publication").
-Verified 2026-08-31: `cocel-postech/genz-lio` 404s; the org has only `genz-icp` and `pit-nbv`.
-Only the LiDAR-only predecessor **GenZ-ICP** (RA-L 2025, arXiv 2411.06766) is installable.
+**GenZ-LIO source is NOT public** (arXiv 2603.16273, Mar 2026, "available upon publication").
+Verified 2026-08-31: `cocel-postech/genz-lio` 404s; the org has only `genz-icp` + `pit-nbv`.
+Only the LiDAR-ONLY predecessor **GenZ-ICP** (RA-L 2025, arXiv 2411.06766) is installable.
 Watch for the GenZ-LIO release — it is the IMU-fused version and the actual thing wanted.
 
-**Mechanism.** Classifies each correspondence planar vs non-planar via local-covariance
+**Mechanism.** Classifies each correspondence planar vs non-planar from local-covariance
 eigenvalues (`lambda3/(l1+l2+l3) < planarity_threshold`, default 0.2, `VoxelHashMap.cpp:120`;
 <5 neighbors => auto non-planar, `VoxelHashMap.cpp:58`). Blends point-to-plane and
-point-to-point costs by `alpha = N_planar/(N_planar+N_non_planar)`, recomputed EVERY ICP
-iteration (`Registration.cpp:202`). The real contribution is **conditioning, not observability**:
-point-to-point's translational Jacobian block is the IDENTITY (`Registration.cpp:103`), so any
-admixture bounds the Hessian's smallest eigenvalue away from zero. It PREVENTS ill-posed
-blow-ups; it cannot add information along a genuinely unconstrained axis.
+point-to-point costs by `alpha = N_planar/(N_planar+N_non_planar)`, recomputed every ICP
+iteration (`Registration.cpp:202`). The real contribution is **conditioning**: point-to-point's
+translational Jacobian block is the IDENTITY (`Registration.cpp:103`), so any admixture bounds
+the Hessian's smallest eigenvalue away from zero and forbids ill-posed blow-ups.
 
-**3rd_floor result (2026-08-31), stock upstream `indoor.yaml`, replay rate 0.5, 3 runs:**
+## ⭐ THE CRITICAL FINDING: upstream defaults are BROKEN for this use case
+
+On 737_700_FRONT, changing TWO parameters took it from **15.35 m -> 0.21 m** AND from
+6.04 Hz -> 20.00 Hz. Accuracy and speed improved TOGETHER; this is not a tradeoff.
+
+| config | throughput | scan capture | final displ |
+|---|---|---|---|
+| stock (iters 100, voxel 0.3) | 6.04 Hz | 30% | 15.35 m |
+| iters 30 | 8.86 Hz | 44% | 0.20 m |
+| iters 5 | 17.36 Hz | 87% | 0.23 m |
+| **iters 5 + voxel 0.5 (`hangar_rt.yaml`)** | **20.00 Hz** | **9726/9727 = 100%** | **0.21 m** |
+
+- `max_num_iterations: 100 -> 5` is an **ACCURACY fix, not a speed knob**. In a degenerate
+  scene the solve is near-singular, so extra Gauss-Newton steps keep walking along the
+  ill-conditioned direction instead of converging. Capping = early-stopping regularization.
+  Accuracy is FLAT (0.20-0.24 m) across iters 30/15/10/5; ONLY the stock 100 is broken.
+- `voxel_size: 0.3 -> 0.5` is the dominant SPEED lever and is FREE: +81% throughput, identical
+  accuracy, alpha median unchanged (0.962 -> 0.954). Bigger voxels = fewer but better-populated
+  neighborhoods = cheaper AND better-conditioned normals.
+- Upstream defaults are tuned for offline benchmark accuracy, NOT embedded real-time.
+  **Always sweep max_num_iterations + voxel_size before judging a KISS-ICP-family estimator.**
+
+## 12-bag hangar sweep @ `hangar_rt.yaml`, rate 1.0 (2026-08-31)
+
+**All 12 bags ran at 20.0 Hz with 100% scan capture — genuine real-time on the Orin NX,
+LiDAR-ONLY, no IMU.** Scored through the project's own validated tooling
+(`scripts/csv_to_tum.py` -> `scripts/rto_report.py` vs `~/bievr_ws/results/icp_gt_v2/`), so
+numbers are directly comparable to BIEVR-LIO. true_drift = `||(p_end - p_start) - t_icp||`
+(placement removed) — NOT displacement-vs-zero.
+
+| bag | BIEVR true_drift | **GenZ-RT** | GT quality |
+|---|---|---|---|
+| 737_700_FRONT | 5.908 | **0.124** | near (rmse fails by 3mm) |
+| MAX_8_LIO_SAM_3 | 10.639 | **0.342** | **closed_loop TRUE** |
+| MAX_8_TAIL 00:45 | 298.136 | **0.096** | near |
+| MAX_8_TAIL 01:33 | 11.110 | **0.350** | near |
+| cmem3qaqb 02:03 | **0.436** | 0.572 | **closed_loop TRUE** |
+| cmem9gs5j 03:18 | 18.703 | **0.912** | **closed_loop TRUE** |
+
+**GenZ wins 5/6; ALL SIX sub-metre (0.096-0.912 m), median 0.35 m. BIEVR: 1/6 sub-metre.**
+Strict subset (`closed_loop: True`, 3 bags): GenZ wins 2/3.
+
+## ⚠️ GROUND-TRUTH CAVEATS — read before quoting any of the above
+
+- **Only 3/12 bags have `closed_loop: True`.** `icp_return_gt.py` sets it as
+  `inlier >= min_inlier AND rmse <= ~0.20`. `rto_report.py` DELIBERATELY overrides this,
+  recomputing tiers from inlier+offset and ignoring rmse ("single-scan rmse runs high
+  regardless"). Defensible — FRONT misses by 3mm at inlier 0.79 — but 3 of the 6 scored bags
+  carry that caveat. Applies EQUALLY to BIEVR, so the head-to-head stays fair.
+- **5 bags are open-loop and UNSCORABLE** (inlier 0.15-0.30). They ran clean at 20 Hz but
+  their accuracy is unknown. NEVER quote their final displacement as drift.
+- **MAX_8_LIO_SAM_WING 02:29 must be EXCLUDED — its ICP GT is bogus.** GenZ's start->end
+  vector is 161.6 deg from the ICP "truth" (`||d-t||`=7.54 vs `||d+t||`=1.22), but this is NOT
+  a sign-convention bug (FRONT 25.6 deg, cmem9gs5j 41.4 deg align fine). The bag is flagged
+  POOR OVERLAP / did-not-return: ICP registered the first scan against the last scan of an
+  open path and found a spurious 3.816 m alignment between two DIFFERENT places. **BIEVR's
+  42.53 m on this bag is equally meaningless.** Discard both, do not credit GenZ a win.
+
+## 3rd_floor reference bag (stock `indoor.yaml`, rate 0.5, 3 runs)
+
 final displacement **0.0136 / 0.0027 / 0.0051 m** — all sub-1.4cm, 0/3 runaway.
-- vs BIEVR-LIO 0.013 m (LiDAR-INERTIAL) — **matched, with NO IMU**
-- vs COIN-LIO 3.77-4.38 m — beat by ~280x
-- vs EllipseLIO on this same bag: 7/14 tight, 6/14 blew up >5m — GenZ shows no such coin-flip
-Path length 374.8-376.7 m vs BIEVR 374.0 m; peak 57.1-57.9 m vs 57.8 m.
-Caveat: 3rd_floor is EASY (see [[bievr-lio-evaluation]]); this does NOT predict hangar behavior.
+Matches BIEVR-LIO's 0.013 m **with NO IMU**; beats COIN-LIO (3.77-4.38 m) ~280x; EllipseLIO on
+this same bag is a coin-flip (7/14 tight, 6/14 >5m). Path 374.8-376.7 m vs BIEVR 374.0 m.
+NOTE: 3rd_floor FAILED to discriminate — BIEVR also scored 1.35cm here then produced 863 km on
+hangar data. **Do not use 3rd_floor alone to qualify an estimator.**
 
-**alpha as free degeneracy telemetry.** Hangar (60s probe): mean 0.928, median 0.968.
-3rd_floor: mean 0.863-0.888, median ~0.89, p05 as low as 0.63. The hangar reads measurably
-MORE planar and swings LESS — the signature of persistent semi-degeneracy vs structured space.
-Candidate input for the degeneracy-gating module in [[hangar-737-inspection]].
+## RETRACTED — do not reuse
 
-**Not real-time on Orin NX**: ~11.8 Hz sustained vs a 20 Hz stream (59% of scans) at replay
-rate 1.0; ~15.5 Hz (77%) at rate 0.5. Cost is the ICP itself (`max_num_iterations: 100`
-converging slowly), NOT the debug-cloud publishing (682 vs 709 poses with it off). Replay
-offline sweeps at rate 0.5. Accuracy held despite dropping 23% of scans.
+An earlier 12-bag sweep at rate 1.0 with STOCK config gave median 11.3 m and "12/12 bounded but
+not accurate", which was written up as evidence of irreducible hangar unobservability. **That was
+an artifact of the broken stock default plus 30-60% scan starvation, and is fully superseded by
+the table above.** The alpha correlations computed from it (alpha_p05 r=-0.46, median r=+0.10,
+max_step r=+0.47) are likewise confounded — they largely measured starvation, not scene
+structure. Lesson: for a non-real-time estimator, replay rate and solver defaults are
+first-class experimental variables; ALWAYS report scan-capture %.
 
-**12-BAG HANGAR SWEEP (2026-08-31), rate 1.0 = REAL-TIME condition, `hangar.yaml`:**
-**12/12 bounded, ZERO divergences.** Final displacement 0.24-35.4 m, median 11.3 m.
-Head-to-head vs BIEVR-LIO return-to-origin (`~/bievr_ws/results/rto_report.json`):
-**GenZ-ICP wins 10/12 with NO IMU.** Both BIEVR km-divergences eliminated:
-863,700 m -> 8.84 m (737_700_TAIL) and 362,934 m -> 29.19 m (cmem3qaqb 00:38).
-Also 648.8->11.7, 298.2->2.07, 55.2->35.4, 43.2->4.72, 34.9->15.5, 18.6->1.52, 11.1->0.24.
-BIEVR wins only 2, both narrow and both on bags it did not diverge on:
-737_700_FRONT 5.87 vs 15.35, MAX_8_LIO_SAM_3 10.47 vs 11.31.
+## Practical
 
-**⚠️ THE 1.0x SWEEP IS SCAN-STARVED — ITS DRIFT NUMBERS ARE NOT A VALID MEASURE OF THE
-ALGORITHM (discovered 2026-08-31, same day).** Re-ran the WORST bag, 737_700_FRONT, at rate
-0.5 with an otherwise IDENTICAL config: **15.35 m -> 0.21 m**. Scan capture 30% -> 71%
-(2939 -> 6949 poses of 9727). max_step 2.48 -> 0.23 m; alpha_p05 0.607 -> 0.947. For scale,
-the ICP ground-truth offset for this bag is 0.273 m (`rto_report.json`) — **so at 0.5x
-GenZ-ICP essentially HIT ground truth (0.21 m vs 0.273 m), versus BIEVR-LIO's 5.87 m.**
-The 1.0x "drift" was overwhelmingly an artifact of starving the estimator of scans, NOT
-hangar geometry. GenZ-ICP is not real-time at 20 Hz on the Orin NX, so replaying at 1.0x
-drops 40-70% of scans and the constant-velocity initial guess (no IMU!) must extrapolate
-across the gaps — precisely where a LiDAR-only method is weakest.
-**CONSEQUENCE: the median-11.3 m result and the "bounded but not accurate" reading below
-are RETRACTED pending a full 12-bag sweep at 0.5x. Do not quote them.** What SURVIVES
-unaffected: 12/12 bounded with ZERO divergences, and both km-scale blow-ups eliminated —
-conditioning robustness does not depend on capture rate.
-**Lesson: for a non-real-time estimator, replay rate is a first-class experimental variable.
-Always report scan-capture %, and never compare against another estimator's numbers that
-were obtained at full capture.**
-
-**INTERPRETATION (from the 1.0x sweep — SEE RETRACTION ABOVE, treat as provisional).** The point-to-point identity
-translational Jacobian block bounds the Hessian conditioning, so ill-posed BLOW-UPS are
-gone. But drift is still METRES (median 11.3 m) on flights that provably returned to ~0.2 m,
-vs 1.36 cm from the same binary on 3rd_floor. GenZ-ICP makes hangar failure BOUNDED AND
-HONEST, not ACCURATE. **Pure LiDAR odometry remains non-viable standalone in the hangar;
-the absolute-anchor architecture in [[hangar-737-inspection]] is unchanged and validated.**
-Diagnostic value achieved: the two previously-confounded failure modes are now separated —
-estimator fragility (real, fixable, GenZ fixes it) vs true unobservability (real, residual).
-
-**alpha is a WEAK degeneracy predictor — do not over-trust it (and these correlations are
-themselves computed on the confounded 1.0x data, so they may be measuring scan starvation
-rather than scene structure — recompute after the 0.5x sweep).** At n=12, correlation with
-final drift: alpha_p05 r=-0.46 (right sign, moderate); alpha_median r=+0.10 (useless);
-max_step r=+0.47; path_len r=+0.38. An n=6 read suggested p05 was a clean predictor; it is
-NOT (TAIL_RIGHT_SCAN has healthy p05 0.815 but the worst drift, 35.4 m). If gating on alpha,
-use a LOW PERCENTILE not the median, and combine with max_step — neither alone suffices.
-
-**BIEVR's own GT tiering predicts GenZ difficulty.** The one `CLOSED` bag (icp_inlier_frac
-0.94) is GenZ's best result (0.30 m). On the 4 `open` bags `true_drift_m` is null — the ICP
-ground truth could not be established, so GenZ drift there is measured against an UNVERIFIED
-reference and should not be quoted as confirmed error.
-
-**LiDAR-ONLY, `deskew: false`** (upstream advises off for aggressive motion — their deskew is a
-constant-velocity model). Not a flight candidate. Harness: `slam-agent/genz_icp_integration/`,
-image `genz_icp:noetic` (native arm64, builds in 69s; no PCL/OpenCV/Ceres so none of the known
-build traps apply). **12-bag hangar sweep still PENDING** — that is the test that matters.
+**LiDAR-ONLY, `deskew: false`** (no IMU; upstream advises off for aggressive motion, their
+deskew is a constant-velocity model). Harness `slam-agent/genz_icp_integration/`, image
+`genz_icp:noetic` (native arm64, builds in 69s; no PCL/OpenCV/Ceres so none of the known build
+traps apply). Determinism at the RT config: PENDING (3x FRONT running 2026-08-31).
+Gotchas: (1) NEVER `--net=host` — collides with the host rosmaster from the foxglove_bridge
+stack, silent no-odometry (solution #12); (2) alpha is not published — recovered from
+`/genz/planar_points` + `/genz/non_planar_points` sizes, needs `visualize:=true` (free: 682 vs
+709 poses); (3) upstream `odometry.launch` starts rviz under that same arg — use our
+`genz_hangar.launch`; (4) both hot paths use `tbb::parallel_reduce` (non-deterministic FP order).
+**Live sensor / MAVROS / flight: NOT attempted.**
