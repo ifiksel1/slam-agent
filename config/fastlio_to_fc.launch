@@ -14,10 +14,13 @@
   <!-- FAST-LIO params (same as mapping_hesai_jt128.launch) -->
   <rosparam command="load" file="$(find fast_lio)/config/hesai_jt128.yaml" />
   <param name="feature_extract_enable" type="bool" value="0"/>
-  <param name="point_filter_num" type="int" value="3"/>
-  <param name="max_iteration" type="int" value="3" />
-  <param name="filter_size_surf" type="double" value="0.5" />
-  <param name="filter_size_map" type="double" value="0.5" />
+  <param name="point_filter_num" type="int" value="3"/>   <!-- 2->3 (2026-07-02): =2 still 17Hz/ekf 83ms peak in DENSE facility (13.4k ds_pts); =3 cuts input points -->
+  <param name="max_iteration" type="int" value="3" />     <!-- 4->3 (2026-07-02): cut IEKF iterations to reduce per-scan cost in dense facility -->
+  <param name="filter_size_surf" type="double" value="0.35" />  <!-- 0.25->0.35 (2026-07-02): coarser voxel -> fewer ds_pts in dense facility -->
+  <param name="filter_size_map" type="double" value="0.35" />   <!-- 0.25->0.35 (2026-07-02): coarser map voxel -> less EKF cost -->
+  <!-- NOTE: confined tuning kept cube_side_length=300 + det_range=100 unchanged (Tier 2 excluded).
+       Real-time cost validated offline (uncontended): ekf_update_ms max 33 ms < 50 ms (20 Hz budget). -->
+
   <param name="cube_side_length" type="double" value="300" />   <!-- bounded local map (was 1000=never trims); trims map outside 300m to cap ikd-tree growth -->
   <param name="runtime_pos_log_enable" type="bool" value="0" />
   <!-- Disable PCD saving: the periodic in-thread save of an ever-growing cloud to USB
@@ -28,8 +31,12 @@
   <!-- 1. Hesai JT128 driver (publishes /lidar_points + /lidar_imu directly in FAST-LIO format) -->
   <node pkg="hesai_ros_driver" name="hesai_ros_driver_node" type="hesai_ros_driver_node" output="screen" />
 
-  <!-- 2. FAST-LIO mapping (publishes /Odometry) -->
-  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen" />
+  <!-- 2. FAST-LIO mapping (publishes /Odometry).
+       respawn=true: roslaunch auto-restarts ONLY this node if it exits (drift_monitor's
+       CRITICAL auto-restart kills it; roslaunch brings it back with the same params).
+       Siblings (mavros/hesai/bridge) are untouched. -->
+  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"
+        respawn="true" respawn_delay="2" />
 
   <!-- 3. MAVROS to the flight controller -->
   <node pkg="mavros" type="mavros_node" name="mavros" required="false" clear_params="true" output="screen">
@@ -46,10 +53,19 @@
          ENU_x(fwd)=odom_z ; ENU_y(left)=odom_x ; ENU_z(up)=odom_y  ->  matrix [0,0,1, 1,0,0, 0,1,0]
        NOTE: an earlier identity position_matrix (from a MISLABELED bench) sent scrambled axes to the FC
        and caused the in-flight drift; corrected below. Orientation uses the quaternion similarity form. -->
-  <node pkg="fast_lio" type="fastlio_mavros_bridge.py" name="fastlio_mavros_bridge" output="screen" launch-prefix="python3">
+  <node pkg="fast_lio" type="fastlio_mavros_bridge.py" name="fastlio_mavros_bridge" output="screen" launch-prefix="python3"
+        respawn="true" respawn_delay="2">
+    <!-- respawn=true: drift_monitor restarts BOTH laserMapping + this bridge together so the
+         SLAM->FC chain reboots fully (clears the bridge yaw-datum too). roslaunch respawns it. -->
     <param name="remap_axes" type="bool" value="true" />
     <rosparam param="position_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
     <rosparam param="orientation_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <!-- Forward FAST-LIO's own (host-clock) stamp instead of restamping with now().
+         Valid because the Hesai driver now uses use_timestamp_type:1 (receive/host time),
+         so /lidar_points -> /lidar_imu -> /Odometry already carry host time captured at
+         packet parse - a closer approximation of scan time than now() (which fires
+         ~14ms after FAST-LIO). Re-tune VISO_DELAY_MS after this change. -->
+    <param name="restamp_system_time" type="bool" value="false" />
   </node>
 
   <!-- 4b. EKF origin for GPS-denied ExternalNav. mavros sends SET_GPS_GLOBAL_ORIGIN when it
@@ -78,5 +94,113 @@
   <node pkg="fast_lio" type="viz_frames.py" name="viz_frames" output="screen" launch-prefix="python3">
     <param name="parent_frame" value="map" />
     <param name="zero_position" value="false" />
+  </node>
+
+  <!-- 8. Drift early-warning monitor (see docs/DRIFT_MONITOR_PLAN.md, PROGRESS P13).
+       Publishes /slam/drift_risk + /slam/arm_interlock and GCS banners on WARN/CRITICAL.
+       EKF source-FAILOVER + laserMapping-restart is triggered by EITHER drift CRITICAL OR pilot
+       CH9 (~1500, 3-pos middle, edge-triggered). FC actions ENABLED per design sign-off:
+         enable_source_failover=true -> CRITICAL/CH9 lane-change EKF source SLAM(SRC1)->OF(SRC2),
+             then back SRC2->SRC1 on recovery (via MAV_CMD_DO_AUX_FUNCTION 218, func 90). REPLACES LAND.
+         enable_auto_restart=true    -> CRITICAL/CH9 restart /laserMapping (roslaunch respawns)
+       The source switch does NOT arm and does NOT change flight mode. arm_interlock is advisory
+       only (no FC param writes). Thresholds calibrated on the tuned config
+       (scripts/replay/calibrate_thresholds.py). VALIDATE DISARMED before flight. -->
+  <node pkg="fast_lio" type="drift_monitor.py" name="drift_monitor" output="screen" launch-prefix="python3"
+        respawn="true" respawn_delay="2">
+    <!-- restart_mode: "of" = EKF source failover to Optical Flow (default; no flight-mode change),
+         "land" = command FC into LAND. Toggle persistently with ~/Documents/switch_restart_mode.sh. -->
+    <param name="restart_mode"        type="str"  value="of" />
+    <!-- RC stream keepalive: re-request RC_CHANNELS from the FC on every mavros connect so
+         /mavros/rc/in stays populated and the CH9 trigger survives reboots/mavros restarts
+         (ArduPilot won't stream RC to the companion link on its own; SR0_RC_CHAN alone is not enough). -->
+    <param name="request_rc_stream"   type="bool" value="true" />
+    <param name="rc_stream_rate"      type="int"  value="10" />
+    <param name="enable_drift_land"   type="bool" value="true" />
+    <param name="enable_ch9_land"     type="bool" value="true" />
+    <param name="enable_auto_restart" type="bool" value="true" />
+    <param name="enable_critical_fc"  type="bool" value="false" />  <!-- legacy flag; restart_mode now selects the response -->
+    <!-- EKF source failover (replaces LAND). ekf_src_auxfn=90 (ArduPilot "EKF Source Set");
+         pos 1=MIDDLE->OF(SRC2), 0=LOW->SLAM(SRC1). -->
+    <param name="enable_source_failover" type="bool" value="true" />
+    <param name="ekf_src_auxfn"    type="int"    value="90" />
+    <param name="src2_switch_pos"  type="int"    value="1" />
+    <param name="src1_switch_pos"  type="int"    value="0" />
+    <param name="restart_nodes"    type="str"    value="/laserMapping /fastlio_mavros_bridge" />
+    <param name="ch9_channel"      type="int"    value="9" />
+    <param name="ch9_low"          type="int"    value="1400" />
+    <param name="ch9_high"         type="int"    value="1600" />
+    <param name="eig_warn_rel"     type="double" value="0.2" />
+    <param name="eig_warn_abs"     type="double" value="40000" />
+    <param name="eig_crit_abs"     type="double" value="5000" />
+    <param name="matched_warn_rel" type="double" value="0.2" />
+    <param name="matched_warn_abs" type="double" value="300" />
+    <param name="matched_crit_abs" type="double" value="150" />
+    <param name="k_warn" type="int" value="5" />
+    <param name="k_crit" type="int" value="5" />
+    <param name="k_release" type="int" value="10" />
+
+    <!-- LATENCY detector (added 2026-09-01 after the 25 Aug hard landing). FAST-LIO publish
+         latency ramped 82 -> 669 ms under a real-time overrun (matched 4709 -> 7271 pushed
+         per-scan cost past the 50 ms budget at 20 Hz). ArduPilot is set VISO_DELAY_MS=75 and
+         hard-caps vision-delay compensation at 250 ms, so the EKF fused stale poses -> 3.7 g
+         impact and an uncommanded re-liftoff. The pre-existing detector tests only LOWER bounds
+         on eig_min/matched and nothing touched time, so it published OK throughout. A sweep of
+         22 flights found 21 flat at 67-78 ms: a LOAD THRESHOLD, not a regression.
+
+         Measured from /fastlio_health data[7] when laserMapping publishes it, else from
+         /Odometry (header.stamp = lidar_end_time on the host clock, so now-stamp is a true
+         age-of-measurement). 250 ms is not a tuning choice - it is ArduPilot's compensation cap.
+
+         Response is staged: >=warn -> banner only; >=crit for lat_k_crit scans -> lane-change to
+         OF (SRC2) ONLY; still >=crit after lat_drain_sec on OF -> escalate to the node restart.
+         FIRST DEPLOYMENT: set enable_latency_critical=false for a few flights and just watch. -->
+    <param name="enable_latency_check"    type="bool"   value="true" />
+    <param name="enable_latency_critical" type="bool"   value="true" />
+    <param name="odom_topic"              type="str"    value="/Odometry" />
+    <param name="lat_warn_ms"             type="double" value="150" />
+    <param name="lat_crit_ms"             type="double" value="250" />
+    <param name="lat_arm_ms"              type="double" value="150" />
+    <param name="lat_drain_sec"           type="double" value="5.0" />
+    <param name="lat_median_n"            type="int"    value="5" />
+    <param name="lat_k_warn"              type="int"    value="10" />
+    <param name="lat_k_crit"              type="int"    value="20" />
+    <param name="lat_k_release"           type="int"    value="40" />
+    <param name="lat_k_arm_lock"          type="int"    value="10" />
+    <param name="lat_k_arm_release"       type="int"    value="60" />
+    <param name="lat_startup_grace_sec"   type="double" value="5.0" />
+    <!-- Blanks latency CRITICAL for this long after startup AND after every health gap. A fresh
+         laserMapping's cold start IS a multi-second backlog (13.6 s observed), so without this
+         the detector restarts the node during its own cold start, forever. Regression-tested in
+         scripts/replay/test_latency_logic.py. -->
+    <param name="lat_restart_blank_sec"   type="double" value="20.0" />
+    <param name="lat_gates_recovery"      type="bool"   value="true" />
+  </node>
+
+  <!-- 9. CH9 RC-triggered logger (see docs): CH9 HIGH(>=1700) -> start session on the thumbdrive
+       (/mnt/usb/MM_DD_YYYY_HH_mm_ss/ with <ts>.bag of /lidar_points+/lidar_imu and <ts>.las of
+       /Laser_map overwritten every 30s); CH9 LOW(<=1300) or a LAND/restart -> stop. CH9 middle is the
+       LAND trigger (drift_monitor, hold-dwell) so transit LOW<->HIGH won't fire LAND. Read-only/recording. -->
+  <node pkg="fast_lio" type="ch9_logger.py" name="ch9_logger" output="screen" launch-prefix="python3">
+    <param name="ch9_channel" type="int"    value="9" />
+    <param name="high_thresh" type="int"    value="1700" />
+    <param name="low_thresh"  type="int"    value="1300" />
+    <param name="out_root"    type="str"    value="/mnt/usb" />
+    <param name="las_topic"   type="str"    value="/Laser_map" />
+    <param name="bag_topics"  type="str"    value="/lidar_points /lidar_imu" />
+    <param name="las_period"  type="double" value="30.0" />
+  </node>
+
+  <!-- 10. Flight recorder: records the full Tier1+2 diagnostic topic set ONLY while the drone
+       is ARMED (reads /mavros/state.armed; start on arm, stop on disarm). lz4, split every 2 min,
+       to /mnt/usb/MM_DD_YYYY_HH_mm_ss_flight/. Captures raw lidar+imu (offline replay), FAST-LIO
+       odom/health, vision pose+speed we SEND, and what the FC REPORTS back (local_position,
+       altitude, estimator_status, statustext, rc in/out, imu/vibe, setpoints) -> diagnoses the
+       vision->FC->EKF->controller chain (e.g. the Loiter climb). READ-ONLY: never arms/commands
+       the FC; trigger 'always' is for bench tests only. -->
+  <node pkg="fast_lio" type="flight_recorder.py" name="flight_recorder" output="screen" launch-prefix="python3">
+    <param name="trigger"        type="str"    value="arm" />
+    <param name="out_root"       type="str"    value="/mnt/usb" />
+    <param name="split_minutes"  type="double" value="2.0" />
   </node>
 </launch>
