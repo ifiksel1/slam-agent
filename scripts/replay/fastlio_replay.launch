@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!-- Offline FAST-LIO replay: laserMapping ONLY (no hesai driver / mavros / bridge / FC).
+     Loads the live hesai_jt128.yaml, then overrides the confined-space tuning knobs via args.
+     Defaults = CURRENT live config, so a no-arg run reproduces the baseline.
+     Run on an ISOLATED ROS master (see run_one.sh) so it never collides with the live pipeline. -->
+<launch>
+  <!-- tunables (defaults = current live values) -->
+  <arg name="blind"            default="1.0"/>
+  <arg name="det_range"        default="100.0"/>
+  <arg name="filter_size_surf" default="0.5"/>
+  <arg name="filter_size_map"  default="0.5"/>
+  <arg name="point_filter_num" default="3"/>
+  <arg name="cube_side_length" default="300"/>
+  <arg name="max_iteration"    default="3"/>
+  <arg name="feature_extract_enable" default="0"/>
+
+  <!-- replay uses bag time -->
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- base config (extrinsics, covariances, topics, etc.) -->
+  <rosparam command="load" file="$(find fast_lio)/config/hesai_jt128.yaml"/>
+
+  <!-- GLOBAL-scope overrides (FAST-LIO reads these names from the global namespace) -->
+  <param name="feature_extract_enable" type="bool"   value="$(arg feature_extract_enable)"/>
+  <param name="point_filter_num"       type="int"    value="$(arg point_filter_num)"/>
+  <param name="max_iteration"          type="int"    value="$(arg max_iteration)"/>
+  <param name="filter_size_surf"       type="double" value="$(arg filter_size_surf)"/>
+  <param name="filter_size_map"        type="double" value="$(arg filter_size_map)"/>
+  <param name="cube_side_length"       type="double" value="$(arg cube_side_length)"/>
+
+  <!-- NESTED overrides (loaded after the yaml so these win) -->
+  <param name="preprocess/blind"  type="double" value="$(arg blind)"/>
+  <param name="mapping/det_range" type="double" value="$(arg det_range)"/>
+
+  <!-- never write PCDs during replay -->
+  <param name="pcd_save/pcd_save_en" type="bool" value="0"/>
+
+  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"/>
+</launch>
