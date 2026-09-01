@@ -125,14 +125,38 @@ def main():
     expect("a 1 s dropout reads >= 1000 ms", lat >= 1000.0, True)
     expect("and is marked stale", note, "stale")
 
-    print("\n=== clock-step rejection ===")
+    print("\n=== clock-step rejection: a ONE-OFF step is a short blind spot ===")
     trk = LatencyTracker(5, 5.0)
     for i in range(20):
         trk.add_sample(i * 0.05, 71)
     accepted = trk.add_sample(1.05, 45000)
-    after = trk.evaluate(1.10)
-    expect("40 s sample rejected", accepted, False)
-    expect("tracker blanked rather than poisoned", after, (None, "init"))
+    expect("45 s sample rejected", accepted, False)
+    expect("blanked, not poisoned", trk.evaluate(1.10), (None, "init"))
+    trk.add_sample(1.15, 72)
+    lat, note = trk.evaluate(1.15)   # evaluate at the sample instant: starvation term is zero
+    expect("recovers on the next good sample", (round(lat), note), (72, ""))
+    # Off the sample instant the starvation floor legitimately adds the elapsed time, because the
+    # freshest pose really is that much older. At 20 Hz the reported value therefore breathes
+    # between age and age+50 ms - by design, not noise.
+    expect("starvation floor adds elapsed time", round(trk.evaluate(1.20)[0]), 122)
+
+    print("\n=== wrong clock domain: EVERY sample implausible must escalate, not go silent ===")
+    # Regression test. The pre-2026-08 bench bags stamp /Odometry with a monotonic uptime clock
+    # while the bag records epoch, so every computed age is ~1.78e12 ms. The first version reset
+    # the grace window on each rejection, so evaluate() returned "init" forever and the detector
+    # was permanently, silently blind on 16 real bags.
+    trk = LatencyTracker(5, 5.0)
+    t = 0.0
+    for _ in range(40):                       # 2 s of garbage, still inside the grace window
+        trk.add_sample(t, 1.78e12)
+        t += 0.05
+    expect("inside grace: still init", trk.evaluate(t)[1], "init")
+    for _ in range(120):                      # past grace_sec
+        trk.add_sample(t, 1.78e12)
+        t += 0.05
+    lat, note = trk.evaluate(t)
+    expect("past grace: escalates to no_odom", note, "no_odom")
+    expect("and reports no number rather than nonsense", lat, None)
 
     print()
     if FAILURES:
