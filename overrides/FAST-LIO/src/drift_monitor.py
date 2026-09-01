@@ -216,6 +216,13 @@ class DriftMonitor:
         self.lat_sane_max_ms = float(g("~lat_sane_max_ms", 30000.0))
         self.lat_max_skew_ms = float(g("~lat_max_skew_ms", 50.0))
         self.lat_gates_recovery = bool(g("~lat_gates_recovery", True))
+        # Health watchdog. health_cb is driven by the very topic laserMapping publishes, so if
+        # laserMapping dies the samples AND the evaluator stop together and this node goes
+        # completely silent. Measured in bench test T1 (2026-09-01): 3.37 s with no output at
+        # all and the interlock never locking. Nothing driven by a topic can notice that topic's
+        # absence, so this needs a timer that fires on its own.
+        self.enable_health_watchdog = bool(g("~enable_health_watchdog", True))
+        self.health_timeout = float(g("~health_timeout_sec", 1.0))   # 20 missed scans at 20 Hz
 
         # A replay must never command the FC. rosbag play --clock sets /use_sim_time.
         if rospy.get_param("/use_sim_time", False) and self.enable_latency_critical:
@@ -295,6 +302,8 @@ class DriftMonitor:
         self._lat_no_restart = False       # an OF-only failover is in effect (no health gap will occur)
         self._lat_escalated = False        # the drain timer already escalated to a full restart
         self._warned_no_odom = False
+        self._health_lost = False           # watchdog: /fastlio_health currently silent?
+        self._health_wd_fired = False       # one-shot failover per outage
 
         # interlock is a two-source OR with one arbiter, so the restart-recovery state machine
         # below keeps working untouched while latency can also hold it.
@@ -317,6 +326,9 @@ class DriftMonitor:
             rospy.Subscriber("/mavros/rc/in", RCIn, self.rc_cb, queue_size=10)
         if _HAVE_MAVROS:
             rospy.Subscriber("/mavros/state", State, self.state_cb, queue_size=10)
+
+        if self.enable_health_watchdog:
+            rospy.Timer(rospy.Duration(0.25), self._watchdog_cb)
 
         rospy.loginfo("drift_monitor up. drift_land=%s ch9_land=%s | gates: auto_restart=%s critical_fc(LAND)=%s | "
                       "CH9 ch%d band[%d,%d] | K warn=%d crit=%d",
@@ -388,6 +400,55 @@ class DriftMonitor:
             rospy.loginfo("drift_monitor: latency interlock released")
         if self._lat_lock and not self._armed:
             self._send_statustext(_SEV_WARNING, "SLAM latency high - do not arm")
+
+    # ---- watchdog: notice the ABSENCE of /fastlio_health ----
+    def _watchdog_cb(self, _evt):
+        """Fires on a timer, independently of any topic.
+
+        Bench T1 showed the failure this closes: killing laserMapping stopped /fastlio_health,
+        health_cb never ran again, and the node published nothing for 3.37 s while the interlock
+        stayed RELEASED. ArduPilot still protects the aircraft (extNavDataIsFresh goes false
+        after 500 ms and its own EKF failsafe runs), but this node contributed nothing - no
+        banner, no arming block, and crucially no failover to optical flow, which is exactly the
+        right response to SLAM disappearing.
+        """
+        if not self._last_health_t:
+            return                      # never seen health yet; startup, not a loss
+        now = time.time()
+        silent = now - self._last_health_t
+
+        if silent < self.health_timeout:
+            if self._health_lost:
+                self._health_lost = False
+                self._health_wd_fired = False
+                rospy.loginfo("drift_monitor: /fastlio_health resumed after %.1fs", silent)
+            return
+
+        if not self._health_lost:
+            self._health_lost = True
+            rospy.logwarn("drift_monitor: /fastlio_health SILENT %.1fs -- SLAM node down", silent)
+
+        if not self._lat_lock:
+            self._lat_lock = True
+            self._refresh_interlock()
+        # keep publishing so the topic does not simply stop - a silent topic is indistinguishable
+        # from a healthy one to anything watching it.
+        self.risk_pub.publish(String(
+            data="CRITICAL | health_lost:%.1fs | eig=0(avg 0) matched=0(avg 0) | lat=no_health" % silent))
+        self._send_statustext(_SEV_CRITICAL, "SLAM node down %.0fs" % silent)
+
+        # One-shot lane-change to OF. Deliberately does NOT restart anything: roslaunch
+        # respawn="true" already owns bringing laserMapping back, and a rosnode kill against a
+        # dead node achieves nothing.
+        if (not self._health_wd_fired and self.enable_latency_critical
+                and now >= self._lat_blank_until):
+            self._health_wd_fired = True
+            rospy.logwarn("drift_monitor: health lost -> OF (SRC2); respawn owns the restart")
+            self._restart_lock = True
+            self._refresh_interlock()
+            if self.restart_mode == "of" and self.enable_source_failover and not self.failover_active:
+                self.failover_active = True
+                self._spawn(self._failover_worker)
 
     # ---- detection ----
     def health_cb(self, msg):
@@ -624,6 +685,11 @@ class DriftMonitor:
         self._refresh_interlock()
         self.n_ok = 0; self._saw_gap_since_lock = False   # require fresh post-restart recovery before release
         self._lat_no_restart = False                      # a real restart WILL produce a health gap
+        # We are about to kill laserMapping ourselves. Arm the blank now, not when health
+        # resumes, so neither the watchdog nor the latency detector treats our own outage and
+        # the cold start that follows it as a fresh fault.
+        self._lat_blank_until = time.time() + self.lat_restart_blank_sec
+        self._health_wd_fired = True                      # suppress the watchdog for this outage
         # MSG 1/4: restart triggered (source-dependent text)
         self._send_statustext(_SEV_CRITICAL,
                               "Restart triggered manually" if manual else "Drift detected, restart triggered",

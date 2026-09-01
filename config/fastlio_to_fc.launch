@@ -178,6 +178,13 @@
          scripts/replay/test_latency_logic.py. -->
     <param name="lat_restart_blank_sec"   type="double" value="20.0" />
     <param name="lat_gates_recovery"      type="bool"   value="true" />
+    <!-- Health watchdog. health_cb is driven by /fastlio_health, which laserMapping publishes,
+         so an unplanned laserMapping death stops the samples AND the evaluator together and the
+         node goes silent. Bench T1 (2026-09-01) measured 3.37 s of no output with the interlock
+         never locking. This timer fires independently, locks arming, keeps publishing, and
+         lane-changes to OF once. It never restarts anything - roslaunch respawn owns that. -->
+    <param name="enable_health_watchdog"  type="bool"   value="true" />
+    <param name="health_timeout_sec"      type="double" value="1.0" />
   </node>
 
   <!-- 9. CH9 RC-triggered logger (see docs): CH9 HIGH(>=1700) -> start session on the thumbdrive
