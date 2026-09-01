@@ -27,9 +27,22 @@ import sys
 import rosbag
 
 # Import the real tracker so the tested logic is the flown logic.
-_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    "..", "..", "docker_src", "FAST_LIO_SLAM", "FAST_LIO_SLAM", "FAST-LIO", "src")
-sys.path.insert(0, os.path.abspath(_SRC))
+def _drift_monitor_dir():
+    """Prefer the live source, fall back to the tracked override copy.
+
+    docker_src/ is gitignored, so a fresh clone has none of it and importing from there fails.
+    overrides/ is the tracked copy of the same file, which is exactly why it exists.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for rel in (("..", "..", "docker_src", "FAST_LIO_SLAM", "FAST_LIO_SLAM", "FAST-LIO", "src"),
+                ("..", "..", "overrides", "FAST-LIO", "src")):
+        cand = os.path.abspath(os.path.join(here, *rel))
+        if os.path.isfile(os.path.join(cand, "drift_monitor.py")):
+            return cand
+    raise SystemExit("drift_monitor.py not found in docker_src/ or overrides/")
+
+
+sys.path.insert(0, _drift_monitor_dir())
 from drift_monitor import LatencyTracker  # noqa: E402
 
 # Mirrors _evaluate_latency() and the latch/counter block in health_cb(). Only the arithmetic

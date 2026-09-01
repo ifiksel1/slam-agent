@@ -22,9 +22,22 @@ import random
 import sys
 import types
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "..", "docker_src", "FAST_LIO_SLAM",
-                                "FAST_LIO_SLAM", "FAST-LIO", "src"))
+def _drift_monitor_dir():
+    """Prefer the live source, fall back to the tracked override copy.
+
+    docker_src/ is gitignored, so a fresh clone has none of it and importing from there fails.
+    overrides/ is the tracked copy of the same file, which is exactly why it exists.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for rel in (("..", "..", "docker_src", "FAST_LIO_SLAM", "FAST_LIO_SLAM", "FAST-LIO", "src"),
+                ("..", "..", "overrides", "FAST-LIO", "src")):
+        cand = os.path.abspath(os.path.join(here, *rel))
+        if os.path.isfile(os.path.join(cand, "drift_monitor.py")):
+            return cand
+    raise SystemExit("drift_monitor.py not found in docker_src/ or overrides/")
+
+
+sys.path.insert(0, _drift_monitor_dir())
 
 # LatencyTracker never touches rospy, so stub the imports drift_monitor does at module scope.
 sys.modules["rospy"] = types.ModuleType("rospy")
