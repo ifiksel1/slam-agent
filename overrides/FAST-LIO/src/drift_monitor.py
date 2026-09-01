@@ -302,6 +302,8 @@ class DriftMonitor:
         self._lat_no_restart = False       # an OF-only failover is in effect (no health gap will occur)
         self._lat_escalated = False        # the drain timer already escalated to a full restart
         self._warned_no_odom = False
+        self._node_start = time.time()      # for "health never arrived" detection
+        self._warned_no_health_ever = False
         self._health_lost = False           # watchdog: /fastlio_health currently silent?
         self._health_wd_fired = False       # one-shot failover per outage
 
@@ -412,9 +414,30 @@ class DriftMonitor:
         banner, no arming block, and crucially no failover to optical flow, which is exactly the
         right response to SLAM disappearing.
         """
-        if not self._last_health_t:
-            return                      # never seen health yet; startup, not a loss
         now = time.time()
+        if not self._last_health_t:
+            # Never seen a single health message. Normal for the first few seconds, a hard fault
+            # after that. Bench T4b (2026-09-01): with a typo'd ~health_topic the node published
+            # NOTHING and left the interlock RELEASED indefinitely - arming permitted, no warning.
+            # The original guard here was "never seen health yet; startup, not a loss", which
+            # never expired, so a misconfiguration was indistinguishable from booting. Same class
+            # of bug as the LatencyTracker grace window that reset on every rejected sample: a
+            # startup guard has to time out.
+            if (now - self._node_start) < self.lat_startup_grace_sec:
+                return
+            if not self._warned_no_health_ever:
+                self._warned_no_health_ever = True
+                rospy.logerr("drift_monitor: NO %s message has EVER arrived after %.0fs -- check ~health_topic",
+                             self.health_topic, self.lat_startup_grace_sec)
+            if not self._lat_lock:
+                self._lat_lock = True
+                self._refresh_interlock()
+            self.risk_pub.publish(String(
+                data="WARN | no_health_ever | eig=0(avg 0) matched=0(avg 0) | lat=no_health"))
+            self._send_statustext(_SEV_WARNING, "SLAM health topic missing")
+            # Deliberately never CRITICAL and never a source switch: a configuration typo must
+            # not be able to command an in-flight EKF change. Same rule as lat=no_odom.
+            return
         silent = now - self._last_health_t
 
         if silent < self.health_timeout:
