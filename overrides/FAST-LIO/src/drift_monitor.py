@@ -196,9 +196,19 @@ class DriftMonitor:
         self.lat_arm_ms = float(g("~lat_arm_ms", 150.0))     # arming uses the conservative bar
         self.lat_drain_sec = float(g("~lat_drain_sec", 5.0)) # OF-only grace before escalating to restart
         self.lat_median_n = int(g("~lat_median_n", 5))
-        self.lat_k_warn = int(g("~lat_k_warn", 10))          # 0.5 s @20Hz
+        # 15 (0.75 s) not 10: across 28761 effective-latency samples from 20 healthy flights the
+        # worst run above lat_warn_ms is exactly 10 scans, so k=10 fires with ZERO margin - and did,
+        # on 07_13_2026_14_16_19. A WARN that cries wolf is the specific failure this whole feature
+        # is meant to fix (see the eight self-inflicted "EKF variance" banners), so credibility
+        # matters more than the 0.25 s it costs.
+        self.lat_k_warn = int(g("~lat_k_warn", 15))          # 0.75 s @20Hz
+        # 20 (1.0 s) confirmed by the same data: worst healthy run above lat_crit_ms is 6 scans,
+        # so this is a 3.3x margin. Dropping to 10 would buy 0.5 s on the crash profile but leave
+        # only 1.7x against an in-flight EKF source switch. Kept.
         self.lat_k_crit = int(g("~lat_k_crit", 20))          # 1.0 s @20Hz
         self.lat_k_release = int(g("~lat_k_release", 40))    # 2.0 s @20Hz, slower than latching
+        # deliberately still 10 while lat_k_warn moved to 15: for a BANNER the safe direction is
+        # fewer false alarms, but for ARMING it is to block readily. A spurious lock costs 3 s.
         self.lat_k_arm_lock = int(g("~lat_k_arm_lock", 10))      # lock fast
         self.lat_k_arm_release = int(g("~lat_k_arm_release", 60))  # unlock slow (3 s)
         self.lat_startup_grace_sec = float(g("~lat_startup_grace_sec", 5.0))
