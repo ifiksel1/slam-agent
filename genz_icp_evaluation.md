@@ -99,7 +99,12 @@ first-class experimental variables; ALWAYS report scan-capture %.
 **LiDAR-ONLY, `deskew: false`** (no IMU; upstream advises off for aggressive motion, their
 deskew is a constant-velocity model). Harness `slam-agent/genz_icp_integration/`, image
 `genz_icp:noetic` (native arm64, builds in 69s; no PCL/OpenCV/Ceres so none of the known build
-traps apply). Determinism at the RT config: PENDING (3x FRONT running 2026-08-31).
+traps apply). **Determinism at the RT config: STABLE (4x FRONT, 2026-08-31).** true_drift
+0.1240 / 0.1269 / 0.1240 / 0.1183 m -- **spread 8.6 mm**; end-vector max pairwise 10.9 mm; all
+4 at 20.00 Hz. NOT byte-identical (differing md5s -- `tbb::parallel_reduce` FP order, as
+expected), and one run captured 8667/9727 scans instead of 9727 yet still landed 0.1183 m.
+So: bounded and repeatable at the cm level, NOT bit-reproducible like BIEVR, but with none of
+EllipseLIO's coin-flip runaways. Good enough to trust single-run numbers to ~1cm on this bag.
 Gotchas: (1) NEVER `--net=host` — collides with the host rosmaster from the foxglove_bridge
 stack, silent no-odometry (solution #12); (2) alpha is not published — recovered from
 `/genz/planar_points` + `/genz/non_planar_points` sizes, needs `visualize:=true` (free: 682 vs
