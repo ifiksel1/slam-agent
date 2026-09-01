@@ -1,18 +1,49 @@
-# ArduPilot FC parameters for FAST-LIO external-nav (GPS-denied, vision position-only).
-# Captured 2026-06-12. Load via Mission Planner / MAVProxy / `mavparam set` to reproduce on a reflashed FC.
-# These live in FC EEPROM (persist across FC reboot) but are NOT otherwise in the repo.
+# ArduPilot FC parameters for FAST-LIO external-nav (GPS-denied vision nav).
+# Captured 2026-06-12; RE-CAPTURED 2026-08-14 from the live FC via dataflash log 181
+# (logs/flight_2026-08-14_181.bin PARM records), which is authoritative over any hand
+# edit here. These live in FC EEPROM (persist across FC reboot) but are NOT otherwise
+# in the repo. Load via Mission Planner / MAVProxy / `mavparam set` to reproduce on a
+# reflashed FC.
 #
-# EKF source set 1: position + yaw from ExternalNav (vision); velocity NOT from external nav.
-# CRITICAL: VELXY/VELZ MUST be 0 (None). Setting them to 6 (ExternalNav) with no velocity
-# source published caused IMU velocity dead-reckoning -> position runaway under motion.
+# EKF source set 1: position, velocity, and yaw ALL from ExternalNav (vision).
+#
+# HISTORY -- read before "fixing" VELXY/VELZ back to 0. This file previously carried a
+# "CRITICAL: VELXY/VELZ MUST be 0" warning. That was correct ONLY while the bridge
+# published position alone: with VELXY=6 and no velocity source arriving, the EKF
+# dead-reckoned velocity from the IMU and position ran away under motion. Since the
+# ExternalNav-velocity work the bridge publishes VISION_SPEED_ESTIMATE on
+# /mavros/vision_speed/speed_vector (fastlio_mavros_bridge.py, publish_velocity=True,
+# default on), so 6 is now the intended value and is confirmed live: flight 181 logged
+# 4190 VISV (vision velocity) messages alongside 4204 VISP, and EKF innovation test
+# ratios peaked at 0.31 against the 1.0 rejection threshold. Setting these back to 0
+# would discard a working velocity source. If you ever disable publish_velocity, set
+# them to 0 in the same change.
 EK3_SRC1_POSXY,6
-EK3_SRC1_VELXY,0
+EK3_SRC1_VELXY,6
 EK3_SRC1_POSZ,6
-EK3_SRC1_VELZ,0
+EK3_SRC1_VELZ,6
 EK3_SRC1_YAW,6
+# Fallback source set 2: optical flow velocity + compass yaw, no absolute position.
+# drift_monitor commands the switch to this set on SLAM failure via
+# MAV_CMD_DO_AUX_FUNCTION 218. Recorded here so a reflashed FC still has a failover target.
+EK3_SRC2_POSXY,0
+EK3_SRC2_VELXY,5
+EK3_SRC2_YAW,1
+EK3_SRC_OPTIONS,0
 # Visual odometry / external-nav fusion
 VISO_TYPE,1
-VISO_DELAY_MS,50
+# 75, not the 50 this file recorded until 2026-08-14: recalibrated 60 -> 75 in dab8b4d
+# after the Hesai driver moved to use_timestamp_type:1 (host clock). Re-measure with
+# scripts/measure_vision_latency_noetic.py if the timestamp path changes again.
+VISO_DELAY_MS,75
 VISO_POS_M_NSE,0.2
 VISO_YAW_M_NSE,0.2
+VISO_VEL_M_NSE,0.1
+# Sensor position offset in body frame (m). X only; Y/Z explicitly zero.
 VISO_POS_X,0.22
+VISO_POS_Y,0
+VISO_POS_Z,0
+VISO_ORIENT,0
+# EKF3 only
+EK3_ENABLE,1
+AHRS_EKF_TYPE,3

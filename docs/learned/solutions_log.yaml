@@ -161,3 +161,383 @@ solutions:
   - vision_pose
   - ptp
   - docker_persistence
+- id: 5
+  date: '2026-06-22'
+  phase: 6
+  hardware:
+    raw: 'platform: NUC (host networking, Docker)
+
+      flight_controller: mRo Pixracer Pro, ArduPilot, USB CDC-ACM /dev/ttyACM0:921600
+
+      lidar: Hesai JT128 (FAST-LIO, ROS1 Noetic, container slam-hesai-fastlio)
+
+      rangefinder: DroneCAN rangefinder on CAN2 (downward, RNGFND1_TYPE=24, RNGFND1_ORIENT=25)
+
+      modes: drone (SLAM/vision SRC1) + optical-flow (SRC2: POSZ=RangeFinder, VELXY=OpticalFlow,
+      YAW=Compass)'
+  symptom: 'CAN (DroneCAN) rangefinder reports no data; /mavros/rangefinder/rangefinder
+    empty; PreArm "AHRS: EK3 sources require RangeFinder" blocks arming even in vision
+    mode (ArduPilot validates ALL EK3 source sets, and the optical-flow set SRC2_POSZ=2
+    needs a rangefinder).'
+  root_cause: 'CAN driver/protocol index mismatch: physical CAN2 was mapped to virtual
+    driver 1 (CAN_P2_DRIVER=1) but driver 1 had no protocol (CAN_D1_PROTOCOL=0=None),
+    while DroneCAN was set on driver 2 (CAN_D2_PROTOCOL=1) which no physical port
+    routed to. Net: no DroneCAN stack ran on the wire, so the rangefinder node never
+    enumerated. CAN config changes also require an FC reboot to take effect; a reboot
+    alone does NOT help while the protocol mapping is wrong.'
+  fix: 'Align the port''s mapped driver with a DroneCAN protocol: set CAN_D1_PROTOCOL=1
+    (DroneCAN) so CAN2->driver1->DroneCAN (both CAN_D1/D2_PROTOCOL=1), keep CAN_P2_DRIVER=1,
+    confirm CAN_P2_BITRATE=1000000, then REBOOT the FC. After reboot the DroneCAN
+    node enumerated, /mavros/rangefinder/rangefinder reported live range (0.12 m),
+    and the EK3-RangeFinder prearm cleared.'
+  files_changed:
+  - 'FC params (EEPROM): CAN_D1_PROTOCOL=1'
+  - CAN_P2_DRIVER=1
+  - CAN_P2_BITRATE=1000000
+  tags:
+  - dronecan
+  - can
+  - rangefinder
+  - rngfnd
+  - prearm
+  - ek3_sources
+  - optical_flow
+  - ardupilot
+  - CAN_D1_PROTOCOL
+  - CAN_P2_DRIVER
+  - reboot_required
+- id: 6
+  date: '2026-07-08'
+  phase: 6
+  hardware:
+    raw: 'platform: NUC (host networking, Docker)
+
+      flight_controller: mRo Pixracer Pro, ArduPilot, USB CDC-ACM /dev/ttyACM0:921600
+
+      lidar: Hesai JT128 (FAST-LIO, ROS1 Noetic, container slam-hesai-fastlio)
+
+      rangefinder: downward rangefinder (RNGFND1_ORIENT=25 down, MAX_CM=5000)
+
+      ekf: vision/ExternalNav for all sources (EK3_SRC1_POSZ=6, EK3_RNG_USE_HGT=-1)
+
+      mode: Loiter (GPS-denied, vision-only)'
+  symptom: In Loiter, uncommanded altitude drop/climb (~1-1.5 m) when hovering at
+    the entrance of a ~5 ft manhole shaft; drone could not hold at / descend into
+    the opening. The SAME manhole flew in fine in Stabilize (natural experiment isolating
+    the fault to a Loiter-only control path). SLAM/vision was accurate and smooth
+    throughout.
+  root_cause: 'ArduPilot SURFACE TRACKING was driving the altitude TARGET off the
+    downward rangefinder -- a consumer of the rangefinder SEPARATE from the EKF height
+    source. Params at fault: SURFTRAK_MODE=1 (+ WPNAV_RFND_USE=1). Over the open shaft
+    the rangefinder glitched (status flickered NoData/OutOfRange/Good, 0-5 m while
+    hovering at 4.4 m); surface tracking kept dis/re-engaging and latched garbage
+    terrain targets. Proof: CTUN.DSAlt (surface-tracking target) drove CTUN.DAlt (altitude
+    target) -- DAlt converged to DSAlt at both drops; ST engaged 79% of the first
+    drop. EK3_SRC1_POSZ=6 / EK3_RNG_USE_HGT=-1 correctly kept the EKF on vision, so
+    this was NOT an EKF-height problem, NOT SLAM, NOT PID, NOT airframe.'
+  fix: 'Set SURFTRAK_MODE=0 (stop the rangefinder from moving the altitude target);
+    keep EK3_SRC1_POSZ=6 (vision). Re-flown 2026-07-08: manhole entrance altitude
+    now holds in Loiter, no excursions -- confirmed working. SURFTRAK_MODE=0 alone
+    was sufficient; WPNAV_RFND_USE=0 recommended as belt-and-suspenders for nav modes.'
+  files_changed:
+  - 'FC params (EEPROM): SURFTRAK_MODE=0'
+  - (recommended) WPNAV_RFND_USE=0
+  tags:
+  - surface_tracking
+  - surftrak_mode
+  - rangefinder
+  - rngfnd
+  - altitude
+  - loiter
+  - manhole
+  - terrain_follow
+  - wpnav_rfnd_use
+  - ardupilot
+  - gps_denied
+  - vision
+- id: 7
+  date: '2026-08-09'
+  phase: 6
+  hardware:
+    platform: nuc_x86
+    lidar: hesai_jt128
+    slam: fast_lio
+    autopilot: ardupilot
+    fcu: mro_pixracer_pro
+    raw: 'platform: Intel NUC (host networking, Docker), container slam-hesai-fastlio
+
+      lidar: Hesai JT128, 128 lines @ 20 Hz, INTERNAL IMU on /lidar_imu, driver use_timestamp_type:1
+      (host receive clock)
+
+      slam: FAST-LIO (RevoluteRobotics FAST_LIO_SLAM fork), ROS 1 Noetic
+
+      bridge: fastlio_mavros_bridge.py, restamp_system_time:false
+
+      flight_controller: mRo Pixracer Pro, ArduPilot, USB CDC-ACM /dev/ttyACM0:921600
+
+      ekf: ExternalNav for all sources (EK3_SRC1_POSXY/VELXY/YAW=6, VISO_TYPE=1)
+
+      mode observed: Loiter, DISARMED (bench, read-only)'
+  symptom: 'VISO_DELAY_MS was 60 ms on the Hesai/NUC rig, inherited from a different
+    platform, and had never been re-measured after the switch to use_timestamp_type:1
+    + restamp_system_time:false. The launch file (config/fastlio_to_fc.launch) carried
+    an explicit "Re-tune VISO_DELAY_MS after this change" note that was still outstanding.
+    No tool existed to measure it: scripts/measure_vision_latency.py is rclpy/ROS
+    2 Humble only and cannot run on this Noetic stack (its own doc listed ROS 1 support
+    as a future enhancement).'
+  root_cause: 'Two independent problems. (1) STALE VALUE: VISO_DELAY_MS=60 came from
+    solutions_log entry 1 -- a Jetson Orin NX / Ouster OS1-64 / ROS 2 rig whose pipeline
+    was genuinely faster. The value was ported across platforms, which is invalid:
+    the latency budget is hardware- and tuning-specific. (2) WRONG METHOD: the documented
+    procedure (p95 of /Odometry -> /mavros/local_position/pose, +10 ms margin) measures
+    the wrong path. That is a ROUND TRIP -- local_position is the FC OUTPUT returning
+    over telemetry, so it adds FC->host latency that is not part of the sensor delay,
+    while MISSING the scan -> /lidar_points segment, which is the largest single term
+    here (~55 ms). p95+margin is also the wrong statistic: VISO_DELAY_MS is a fixed
+    constant the EKF uses to index its state-history buffer, so it wants the CENTRAL
+    value; padding it high makes the EKF fuse each measurement against a too-old state.'
+  fix: 'Wrote scripts/measure_vision_latency_noetic.py (ROS 1, read-only). Because
+    use_timestamp_type:1 + restamp_system_time:false carry header.stamp UNCHANGED
+    along /lidar_points -> /Odometry -> /mavros/vision_pose/pose, (now - header.stamp)
+    at the last ROS hop directly measures the delay up to MAVLink serialisation, and
+    per-hop increments decompose it. Measured (idle bench, 2x30 s + 1x15 s, sd ~4
+    ms): driver assembly ~55 ms; + FAST-LIO compute ~17 ms; + bridge hop ~0.3 ms;
+    = ~73 ms median at vision_pose, + ~1.5 ms USB CDC-ACM transit. Set VISO_DELAY_MS=75
+    (was 60) via /mavros/param/set with the FC connected and DISARMED; verified by
+    independent read-back. CAVEAT: 75 is a LOWER BOUND -- header.stamp is host packet-receive
+    time, not the true scan instant, so LiDAR-internal acquisition and ethernet transit
+    are excluded, and the sweep-start-vs-end deskew convention adds up to +/-25 ms
+    at 20 Hz. NOT yet validated in motion: validate HANDHELD + DISARMED by checking
+    whether FC position innovation correlates with velocity; if it grows with speed,
+    step and re-check. Re-measure after any FAST-LIO tuning change (point_filter_num,
+    max_iteration, filter_size_*) -- and note idle bench CPU is less contended than
+    flight.'
+  measurement: Use run_diagnostic('measure_vision_latency_noetic', '--duration 30
+    --json') inside the slam-hesai-fastlio container. Do NOT use 'measure_vision_latency'
+    (ROS 2 only, and its round-trip method is wrong for this rig).
+  files_changed:
+  - scripts/measure_vision_latency_noetic.py
+  - docs/VISION_LATENCY_MEASUREMENT.md
+  - mcp/slam_mcp_server.py
+  - 'FC params (EEPROM): VISO_DELAY_MS 60 -> 75'
+  tags:
+  - viso_delay
+  - viso_delay_ms
+  - latency
+  - vision_pose
+  - ekf
+  - external_nav
+  - hesai_jt128
+  - fast_lio
+  - noetic
+  - ros1
+  - use_timestamp_type
+  - restamp_system_time
+  - ardupilot
+  - gps_denied
+- id: 8
+  date: '2026-08-14'
+  phase: 6
+  hardware:
+    platform: jetson_orin
+    lidar:
+      model: hesai_jt128
+      has_imu: true
+      imu_topic: /lidar_imu
+      points_topic: /lidar_points
+    slam:
+      algorithm: fast_lio2
+      config: config/hesai_jt128.yaml
+    flight_controller:
+      autopilot: ardupilot
+      bridge: mavros
+    ros:
+      version: noetic
+      comm_method: mavros
+    docker: true
+  symptom: The ORIGINAL committed LiDAR->IMU extrinsic rotation in config/hesai_jt128.yaml
+    (rpy -1.16/-2.31/+1.92 deg, 3.21 deg total) could not be reproduced by LI-Init.
+    Seven independent live LI-Init calibration runs all returned a near-identity rotation;
+    no run came within 2.4 deg of it. Runs 1-4 replaced it; runs 5-7 (2026-08-14)
+    are an independent re-check that CONFIRMS the replacement.
+  root_cause: 'Confirmed by repeatability, not yet by a closed-loop A/B. An unmodelled
+    LiDAR/IMU time offset appears to have been absorbed into the original 3.21 deg
+    rotation when it was first fitted. Across 7 runs (2026-08-09 .. 2026-08-14) the
+    refinement-stage results were: rotation mean (roll 0.103, pitch -0.342, yaw 0.106)
+    deg, sd (0.075, 0.258, 0.118), total magnitude 0.37 deg -- small but statistically
+    nonzero (roll/pitch ~3.5 SEM). Translation mean (0.002, -0.001, 0.006) m with
+    sd (0.025, 0.014, 0.019) m, i.e. under 1 SEM on every axis: LI-Init is NOT observing
+    the lever arm at this excitation level and its translation output must not be
+    trusted. Time lag IMU->LiDAR was the one strongly determined term: -14.9 +/- 3.5
+    ms (SEM 1.3 ms, ~11 sigma), negative in all 7 runs.
+
+    Secondary observation: the INITIALIZATION-stage accelerometer bias is pinned at
+    exactly +/-0.0100 m/s^2 on every axis of all 7 runs (|0.0099|-|0.0101|, only sign
+    varies) -- a saturated internal clamp, not an estimate. The init-stage bias output
+    is therefore meaningless here, and lengthening the initial static hold (tried
+    on run 6) does not change it. Only the refinement-stage biases are usable.'
+  fix: 'APPLIED (2026-08-10, from runs 1-4) and INDEPENDENTLY CONFIRMED (2026-08-14,
+    runs 5-7). Live values in config/hesai_jt128.yaml: extrinsic_R = SO(3) chordal
+    mean of runs 1-4, 0.446 deg, rpy [0.1372, -0.4121, 0.1027]; time_offset_lidar_to_imu
+    = -0.015588 (4-run mean); extrinsic_T = [-0.0076, 0.01363, 0.01271] -- GEOMETRIC
+    (sensor optical-centre offset), deliberately NOT an LI-Init output, because all
+    LI-Init translations were rejected as unusable against the JT128 mechanical envelope.
+
+    Runs 5-7 re-derived both fitted terms independently: 7-run rotation mean rpy (0.103,
+    -0.342, 0.106) vs applied (0.137, -0.412, 0.103); 7-run lag -14.9 ms vs applied
+    -15.6 ms. Both inside their own run-to-run scatter, so the applied values are
+    reproducible and need no revision.
+
+    OBSERVED EFFECT of the applied calibration: it removed the spurious ALTITUDE change
+    during roll/pitch maneuvers. It did NOT remove a separate lateral (body-Y) drift
+    during pitch -- see the note below, that symptom is not reachable by these terms.
+
+    Still open (nice-to-have, not blocking): a closed-loop A/B on a flight-profile
+    bag through scripts/replay/run_one.sh on isolated master :11312, comparing position
+    closure and /fastlio_health (mean_residual, eig_min, matched_pts). Note run_one.sh
+    parameterizes only the confined-space tuning knobs (blind, filter_size_*, point_filter_num,
+    max_iteration) -- extrinsics come from the base config/hesai_jt128.yaml loaded
+    by fastlio_replay.launch:21, so an extrinsic A/B requires adding extrinsic_R/extrinsic_T
+    overrides to that launch or swapping the yaml.
+
+    KINEMATIC NOTE for anyone chasing a similar symptom: lateral (body-Y) drift during
+    a PURE PITCH cannot be caused by any of these terms. For pitch rate w = (0, wy,
+    0) and lever arm r, the induced velocity w x r = (wy*rz, 0, -wy*rx) has an identically
+    zero Y component for ANY r, so no extrinsic_T error can produce it; and both a
+    residual extrinsic_R error and a time-lag error act within the pitch (X-Z) plane.
+    Lateral drift under pitch points elsewhere -- geometric degeneracy (pitching toward
+    floor/ceiling leaves the lateral direction unconstrained; watch eig_min), IMU
+    cross-axis coupling (pitch rate leaking into the roll gyro -> false roll -> lateral
+    gravity projection), or the maneuver simply not being pure pitch.'
+  files_changed:
+  - none (investigation only); evidence in li_init_result/Initialization_result_run1..run7*.txt;
+    harness scripts/li_init/run_li_init_live.sh
+  tags:
+  - li_init
+  - extrinsics
+  - sensor_calibration
+  - lidar_imu
+  - time_offset
+  - hesai_jt128
+  - fast_lio2
+  - calibration_repeatability
+  - imu_bias_clamp
+- id: 9
+  date: '2026-08-14'
+  phase: 7
+  hardware:
+    platform: intel_nuc
+    lidar:
+      model: hesai_jt128
+      has_imu: true
+      imu_topic: /lidar_imu
+    slam:
+      algorithm: fast_lio2
+      config: config/hesai_jt128.yaml
+    flight_controller:
+      model: mro_pixracer_pro
+      autopilot: ardupilot
+      connection: /dev/ttyACM0:921600
+    ros:
+      version: noetic
+      comm_method: mavros
+    ekf: EK3_SRC1_{POSXY,VELXY,POSZ,VELZ,YAW}=6 (ExternalNav), VISO_TYPE=1
+    docker: true
+  symptom: Reported as "lateral (body-Y) drift of 10-15 cm when pitching forward to
+    translate". Measured on ArduPilot dataflash logs as 85 mm mean perpendicular deviation
+    over 2-6 m of forward travel (|cross|/along = 2.5-2.7%), intermittent.
+  root_cause: 'NOT pitch-specific, and NOT an estimation problem. The decisive measurement
+    was a dedicated ROLL-maneuver flight (log 183): roll translation produced 80 mm
+    of LONGITUDINAL error, statistically indistinguishable from the 85 mm of LATERAL
+    error that pitch translation produced (ratios 4.29% +/- 1.28% vs 2.49% +/- 0.43%,
+    differing by only 1.3 sigma). The vehicle therefore has ~8 cm of OFF-AXIS position
+    error whenever it translates, perpendicular to whatever direction it is travelling.
+    It is perceived as "lateral drift under pitch" only because forward flight is
+    the common case.
+
+
+    Ruled out, each by measurement rather than reasoning:
+
+    - LiDAR/IMU extrinsic + time offset: excluded kinematically (for pure pitch w=(0,wy,0)
+    and any lever arm r, w x r has an identically zero component along the pitch axis),
+    and the applied calibration was independently confirmed by LI-Init runs 5-7. See
+    solution #8.
+
+    - SLAM front end: a handheld pitch bag replayed offline showed NO lateral drift
+    in /Odometry -- H1 map degeneracy (Spearman(|lat vel|, -hdh_eig_pos min) = +0.04,
+    eig ratio during/outside pitch 0.94), H2 IMU pitch->roll cross-axis coupling (slope
+    -0.0047, R^2 0.002, measured rotation only 0.21 deg off the body pitch axis),
+    and H3 impure motion (+0.34) all failed their thresholds. Drift during pauses
+    was -0.2 mm mean.
+
+    - VISO_DELAY_MS: measured 76 ms against 75 ms set (scripts/measure_vision_latency_noetic.py:
+    lidar 54.0, odom 74.3, vision 74.6 ms median; fast_lio_compute 21.1 ms mean).
+    Latency is correctly configured. An earlier inference of "~45 ms residual delay
+    error" from the fact that error scales with speed was WRONG and is retracted.
+
+    - EKF fusion health: innovation test ratios peaked at 0.31-0.46 against the 1.0
+    rejection threshold; vision and EKF position agreed (divergence sd 6.7 cm N /
+    12.4 cm E). Vision was never being rejected.
+
+    - Commanded motion: the position controller''s TARGET moved cross-track by only
+    ~2 mm while the vehicle deviated 32-86 mm, so this is genuine deviation, not stick
+    input.
+
+    - Lateral vibration: VIBE_Y is elevated and axis-specific (p50 15.2, p95 24.6,
+    max 36.6 m/s^2 vs VIBE_X 6.5), which looked compelling because Y is the drift
+    axis -- but it correlates equally with along-track error (+0.352) as cross-track
+    (+0.349), and is itself partly a proxy for speed (+0.375). Not the cause; still
+    worth fixing on its own merits.
+
+
+    What the error DOES scale with: speed (Spearman +0.50, the strongest single correlate).'
+  fix: "NO FIX APPLIED -- both attempted EKF-weighting changes were null and have\
+    \ been REVERTED to VISO_POS_M_NSE=0.2 / VISO_VEL_M_NSE=0.1 (verified by read-back\
+    \ 2026-08-14).\n\nSweep results, one parameter at a time, all measured identically\
+    \ with scripts/replay/analyze_flight_crosstrack.py:\n  baseline (logs 180+181,\
+    \ POS 0.2 / VEL 0.1): 2.69% , 85 mm , n=5 , sem 1.03%\n  log 182  (POS 0.1 / VEL\
+    \ 0.1)              : 6.78% , 132 mm, n=4 , sem 2.06%\n  logs 184+185 (POS 0.1\
+    \ / VEL 0.05)         : 2.49% , 85 mm , n=9 , sem 0.43%\n  -> final vs baseline:\
+    \ 0.2 sigma. Mean absolute error identical at 85 mm. Log 182's\n     apparent\
+    \ regression sits on n=4 and is bracketed by two ~2.5% results, so it reads\n\
+    \     as profile/noise rather than the parameter making things worse.\nVISO_VEL_M_NSE=0.05\
+    \ additionally pushed an SV innovation to 0.80 in log 185, past the\n0.7 revert\
+    \ threshold -- it bought nothing and cost rejection margin.\n\nREMAINING LEVERS,\
+    \ in order: (1) position-controller gains PSC_POSXY_P=1 / PSC_VELXY_P=2,\nboth\
+    \ stock -- a symmetric off-axis error under translation is what a bandwidth-limited\n\
+    position controller produces, and this is now the most likely lever; (2) the VIBE_Y\n\
+    mechanical asymmetry, which caps how far the gains can be pushed. Set expectations:\
+    \ ~8 cm\nof perpendicular error while translating at 2-3 m/s may be near the floor\
+    \ for this\nairframe and tune, so gains may compress it rather than eliminate\
+    \ it.\n\nSTILL OPEN: every one of the 18 clean runs across all five logs sits\
+    \ at heading 85-91 deg,\nso a body-frame cause cannot be separated from a world-frame\
+    \ one. Less interesting now that\nthe error proved axis-symmetric, but a few reciprocal-heading\
+    \ runs would close it. Note the\npitch-axis runs did show a sign bias (11 of 13\
+    \ positive) that the roll runs did not (5 pos /\n8 neg) -- unexplained, and the\
+    \ reciprocal-heading test is what would probe it.\n\nMETHOD NOTE for future sweeps:\
+    \ a run counts as clean only when |roll|<3.5 and |DesRoll|<3.0\ndeg with >0.5\
+    \ m travel; on the baseline logs that kept only 5 of 13 segments, the excluded\n\
+    ones carrying 5-8 deg of commanded roll and up to 1.7 m of cross-track that is\
+    \ stick input,\nnot drift. Plan ~12 runs per flight to land 8 clean. With a 5-run\
+    \ baseline at sd 2.6%, only\nimprovements greater than ~50% are resolvable --\
+    \ state that limit BEFORE flying, or an\nambiguous null gets read as a win."
+  files_changed:
+  - config/fc_ekf_params.parm (re-captured from live FC); scripts/replay/analyze_flight_crosstrack.py
+    (new); scripts/replay/analyze_pitch_drift.py (new); scripts/replay/record_pitch_bag.sh
+    (new); FC params reverted to POS_M_NSE=0.2 / VEL_M_NSE=0.1
+  tags:
+  - lateral_drift
+  - cross_track
+  - off_axis_error
+  - position_controller
+  - viso_pos_m_nse
+  - viso_vel_m_nse
+  - viso_delay_ms
+  - ardupilot
+  - ekf3
+  - external_nav
+  - hesai_jt128
+  - fast_lio2
+  - vibration
+  - parameter_sweep
+  - null_result
