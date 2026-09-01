@@ -68,13 +68,18 @@ except Exception:
     _HAVE_ODOM = False
 
 try:
-    from mavros_msgs.msg import StatusText, RCIn, State
+    from mavros_msgs.msg import StatusText, RCIn, State, DebugValue
     from mavros_msgs.srv import SetMode, CommandLong, StreamRate
     _HAVE_MAVROS = True
 except Exception:
     _HAVE_MAVROS = False
 
 OK, WARN, CRITICAL = "OK", "WARN", "CRITICAL"
+# Reported to the FC when latency is enabled but no number can be produced (no /Odometry, no
+# health, rejected samples). Large enough to trip any sane gate: unmeasurable is treated as bad,
+# matching _lat_arm_bad(), which also calls lat_ms=None bad. Note this is NOT how the FC-side gate
+# handles our SILENCE -- that fails open by design, because a stuck gate strands the aircraft.
+_LAT_UNKNOWN_MS = 9999.0
 _SEV_WARNING, _SEV_CRITICAL = 4, 2  # MAV_SEVERITY
 
 
@@ -211,6 +216,12 @@ class DriftMonitor:
         # fewer false alarms, but for ARMING it is to block readily. A spurious lock costs 3 s.
         self.lat_k_arm_lock = int(g("~lat_k_arm_lock", 10))      # lock fast
         self.lat_k_arm_release = int(g("~lat_k_arm_release", 60))  # unlock slow (3 s)
+        # NAMED_VALUE_FLOAT feed to the FC, consumed by slam_latency_gate.lua as an arming gate.
+        # 4 Hz: the gate only has to be current at the moment someone arms, and this shares the
+        # telemetry link with everything else. Name is capped at 10 chars by the MAVLink field.
+        self.enable_lat_nvf = bool(g("~enable_lat_nvf", True))
+        self.lat_nvf_name = str(g("~lat_nvf_name", "SLAMLAT"))[:10]
+        self.lat_nvf_hz = float(g("~lat_nvf_hz", 4.0))
         self.lat_startup_grace_sec = float(g("~lat_startup_grace_sec", 5.0))
         self.lat_restart_blank_sec = float(g("~lat_restart_blank_sec", 20.0))
         self.lat_sane_max_ms = float(g("~lat_sane_max_ms", 30000.0))
@@ -315,6 +326,21 @@ class DriftMonitor:
         self.risk_pub = rospy.Publisher("/slam/drift_risk", String, queue_size=10, latch=True)
         self.interlock_pub = rospy.Publisher("/slam/arm_interlock", String, queue_size=10, latch=True)
         self.st_pub = rospy.Publisher("/mavros/statustext/send", StatusText, queue_size=10) if _HAVE_MAVROS else None
+
+        # Latency feed to the flight controller. Starts at 0 (permissive) rather than
+        # _LAT_UNKNOWN_MS so that merely launching this node cannot block arming before it has
+        # had a chance to measure anything; the startup grace in _lat_report_value owns that
+        # window, and the FC gate fails open on silence anyway.
+        self._lat_report_ms = 0.0
+        self.nvf_pub = None
+        if self.enable_latency_check and self.enable_lat_nvf and _HAVE_MAVROS:
+            self.nvf_pub = rospy.Publisher("/mavros/debug_value/send", DebugValue, queue_size=2)
+            rospy.Timer(rospy.Duration(1.0 / max(self.lat_nvf_hz, 0.5)), self._publish_lat_nvf)
+            rospy.loginfo("drift_monitor: publishing %s to the FC at %.1f Hz",
+                          self.lat_nvf_name, self.lat_nvf_hz)
+        elif self.enable_latency_check and self.enable_lat_nvf:
+            rospy.logwarn("drift_monitor: mavros_msgs unavailable -- no latency feed to the FC")
+
         self._publish_interlock("RELEASED")
 
         rospy.Subscriber(self.health_topic, Float32MultiArray, self.health_cb, queue_size=50)
@@ -386,6 +412,37 @@ class DriftMonitor:
             return (False, True, "lat=%.0fms" % lat_ms)
         return (False, False, "")
 
+    def _lat_report_value(self, lat_ms, note):
+        """The number sent to the FC as NAMED_VALUE_FLOAT.
+
+        Mirrors _lat_arm_bad() so this node and the FC-side gate cannot disagree about the same
+        instant: "init" is deliberately permissive (the tracker has no sample yet and the startup
+        grace owns that window), and an unmeasurable state is reported as bad rather than omitted,
+        because omitting it looks identical to this node being dead - which the gate treats as
+        fail-open.
+        """
+        if note == "init":
+            return 0.0
+        if lat_ms is None:
+            return _LAT_UNKNOWN_MS
+        return lat_ms
+
+    def _publish_lat_nvf(self, _evt):
+        if self.nvf_pub is None:
+            return
+        value = self._lat_report_ms
+        # Never report a passing number while our own interlock is locked. The couplings are
+        # deliberately one-way: we may not under-report relative to our own verdict, but the FC
+        # is free to block on a raw value before our (10-scan) hysteresis has latched.
+        if self._lat_lock:
+            value = max(value, self.lat_arm_ms)
+        msg = DebugValue()
+        msg.header.stamp = rospy.Time.now()
+        msg.type = DebugValue.TYPE_NAMED_VALUE_FLOAT
+        msg.name = self.lat_nvf_name
+        msg.value_float = float(value)
+        self.nvf_pub.publish(msg)
+
     def _lat_arm_bad(self, lat_ms, note):
         if not self.enable_latency_check or note == "init":
             return False
@@ -432,6 +489,7 @@ class DriftMonitor:
             if not self._lat_lock:
                 self._lat_lock = True
                 self._refresh_interlock()
+            self._lat_report_ms = _LAT_UNKNOWN_MS
             self.risk_pub.publish(String(
                 data="WARN | no_health_ever | eig=0(avg 0) matched=0(avg 0) | lat=no_health"))
             self._send_statustext(_SEV_WARNING, "SLAM health topic missing")
@@ -456,6 +514,7 @@ class DriftMonitor:
             self._refresh_interlock()
         # keep publishing so the topic does not simply stop - a silent topic is indistinguishable
         # from a healthy one to anything watching it.
+        self._lat_report_ms = _LAT_UNKNOWN_MS
         self.risk_pub.publish(String(
             data="CRITICAL | health_lost:%.1fs | eig=0(avg 0) matched=0(avg 0) | lat=no_health" % silent))
         self._send_statustext(_SEV_CRITICAL, "SLAM node down %.0fs" % silent)
@@ -518,6 +577,7 @@ class DriftMonitor:
         self.n_lat_crit = self.n_lat_crit + 1 if lat_crit else 0
         self.n_lat_warn = self.n_lat_warn + 1 if (lat_crit or lat_warn) else 0
         self.n_lat_ok = 0 if (lat_crit or lat_warn) else self.n_lat_ok + 1
+        self._lat_report_ms = self._lat_report_value(lat_ms, lat_note)
         arm_bad = self._lat_arm_bad(lat_ms, lat_note)
         self.n_lat_arm = self.n_lat_arm + 1 if arm_bad else 0
         self.n_lat_armok = 0 if arm_bad else self.n_lat_armok + 1

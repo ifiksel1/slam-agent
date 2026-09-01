@@ -172,6 +172,17 @@
     <param name="lat_k_arm_lock"          type="int"    value="10" />
     <param name="lat_k_arm_release"       type="int"    value="60" />
     <param name="lat_startup_grace_sec"   type="double" value="5.0" />
+
+    <!-- Latency feed to the flight controller, consumed by fc_scripts/slam_latency_gate.lua as
+         a prearm block. Sent as NAMED_VALUE_FLOAT "SLAMLAT" via the mavros debug_value plugin,
+         which must NOT be blacklisted (see config/mavros_apm_config.yaml).
+         The gate on the FC fails OPEN if this stops: a stuck gate strands the aircraft. That is
+         why the companion reports an explicit 9999 sentinel when it cannot measure, rather than
+         going quiet - "I do not know" and "I am dead" must not look the same to the FC.
+         Requires ARMING_CHECK bit 17 (AUX_AUTH) on the FC or the gate is silently inert. -->
+    <param name="enable_lat_nvf"          type="bool"   value="true" />
+    <param name="lat_nvf_name"            type="str"    value="SLAMLAT" />
+    <param name="lat_nvf_hz"              type="double" value="4.0" />
     <!-- Blanks latency CRITICAL for this long after startup AND after every health gap. A fresh
          laserMapping's cold start IS a multi-second backlog (13.6 s observed), so without this
          the detector restarts the node during its own cold start, forever. Regression-tested in

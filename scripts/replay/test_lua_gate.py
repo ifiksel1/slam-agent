@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""
+test_lua_gate.py - drive fc_scripts/slam_latency_gate.lua in a real Lua interpreter.
+
+Stubs the ArduPilot bindings (param/arming/mavlink/gcs/millis) and feeds byte-accurate
+mavlink_message_t frames, so the decode offsets and the fail-open behaviour are exercised for
+real rather than reviewed by eye.
+
+The frames are padded past the payload with 0xAA. That is the point of the test: MAVLink 2 trims
+trailing zero bytes, so a 7-character name arrives with payload_len 15, not 18. Code that reads a
+fixed char[10] picks up the padding and the name never matches. Zero-padding would hide it.
+
+Run: pip install lupa && python3 scripts/replay/test_lua_gate.py
+"""
+import os
+import struct
+import sys
+
+try:
+    import lupa
+except ImportError:
+    sys.exit("needs lupa: pip install lupa")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+GATE = os.path.join(HERE, "..", "..", "fc_scripts", "slam_latency_gate.lua")
+
+NAMED_VALUE_FLOAT_ID = 251
+FAILURES = []
+
+
+def frame(name, value, time_ms=1234, msgid=NAMED_VALUE_FLOAT_ID):
+    """Build the mavlink_message_t C struct the scripting binding hands to Lua.
+
+    MAVPACKED, so no padding: checksum(2) magic len incompat compat seq sysid compid (7)
+    msgid(3) -> payload at offset 12, i.e. Lua index 13. Offsets confirmed against
+    libraries/AP_Scripting/modules/MAVLink/mavlink_msgs.lua:decode_header.
+    """
+    payload = struct.pack("<If", time_ms, value) + name.encode().ljust(10, b"\0")
+    payload = payload.rstrip(b"\0")                     # MAVLink 2 trailing-zero trim
+    hdr = struct.pack("<HBBBBBBB", 0, 0xFD, len(payload), 0, 0, 7, 1, 1)
+    hdr += int(msgid).to_bytes(3, "little")
+    return (hdr + payload).ljust(300, b"\xAA")          # garbage past the payload, deliberately
+
+
+HARNESS = r"""
+-- ---- stubbed ArduPilot bindings ----
+local now_ms = 0
+local queue = {}
+local sent = {}
+local auth = {state = "none", msg = ""}
+
+function millis() return {tofloat = function() return now_ms end} end
+
+param = {
+  add_table = function(self, k, p, n) return true end,
+  add_param = function(self, k, i, n, d) _defaults[n] = d; return true end,
+}
+_defaults = {}
+_overrides = {}
+function Parameter(full)
+  local short = string.gsub(full, "^SLG_", "")
+  return {get = function(self)
+    if _overrides[short] ~= nil then return _overrides[short] end
+    return _defaults[short]
+  end}
+end
+
+arming = {
+  -- NOT "_no_slot and nil or 1": in Lua that idiom can never yield nil, because
+  -- (true and nil) is nil and (nil or 1) is 1. It silently handed out a slot.
+  get_aux_auth_id = function(self) if _no_slot then return nil end return 1 end,
+  set_aux_auth_failed = function(self, id, m) auth.state = "failed"; auth.msg = m end,
+  set_aux_auth_passed = function(self, id) auth.state = "passed"; auth.msg = "" end,
+}
+
+mavlink = {
+  init = function(self, d, n) end,
+  register_rx_msgid = function(self, id) _registered = id end,
+  receive_chan = function(self)
+    if #queue == 0 then return nil end
+    return table.remove(queue, 1), 0, 0
+  end,
+}
+
+gcs = {send_text = function(self, sev, txt) sent[#sent+1] = txt end}
+
+-- ---- test control surface ----
+function H_setup(no_slot)
+  _no_slot = no_slot
+  now_ms, queue, sent = 0, {}, {}
+  auth.state, auth.msg = "none", ""
+  update = nil
+  local f = loadfile(_GATE_PATH)
+  local fn, interval = f()
+  update = fn
+  return interval
+end
+function H_push(bytes) queue[#queue+1] = bytes end
+function H_advance(ms) now_ms = now_ms + ms end
+function H_tick() if update then update() end end
+function H_auth() return auth.state, auth.msg end
+function H_texts() local t = table.concat(sent, " | "); sent = {}; return t end
+function H_registered() return _registered end
+function H_set(name, v) _overrides[name] = v end
+"""
+
+
+def check(label, got, want):
+    ok = got == want
+    print("    %-56s %s" % (label, "PASS" if ok else "FAIL (got %r, want %r)" % (got, want)))
+    if not ok:
+        FAILURES.append(label)
+
+
+def main():
+    L = lupa.LuaRuntime(unpack_returned_tuples=True)
+    L.globals()["_GATE_PATH"] = os.path.abspath(GATE)
+    L.execute(HARNESS)
+    g = L.globals()
+
+    def feed(n, name="SLAMLAT", value=70.0, tick_ms=200):
+        for _ in range(n):
+            g.H_push(frame(name, value))
+            g.H_advance(tick_ms)
+            g.H_tick()
+
+    print("=== boot: blocked before any SLAMLAT arrives ===")
+    interval = g.H_setup(False)
+    check("registers msgid 251", g.H_registered(), 251)
+    check("loop interval 200 ms", interval, 200)
+    check("starts blocked", g.H_auth()[0], "failed")
+    check("reason names the wait", g.H_auth()[1], "SLAM latency: waiting")
+
+    print("\n=== healthy 70 ms: releases, but only after RELEASE_N ===")
+    g.H_setup(False)
+    feed(14)
+    check("still blocked at 14 ticks (<15)", g.H_auth()[0], "failed")
+    feed(1)
+    check("released at 15 ticks (3.0 s)", g.H_auth()[0], "passed")
+
+    print("\n=== cold start 13600 ms: blocks fast ===")
+    g.H_setup(False)
+    feed(1, value=13600.0)
+    check("one bad sample is not enough", g.H_auth()[0], "failed")  # still the boot block
+    g.H_texts()
+    feed(1, value=13600.0)
+    st, msg = g.H_auth()
+    check("blocked at BLOCK_N=2 (0.4 s)", st, "failed")
+    check("reason carries the number", msg, "SLAM latency 13600ms")
+
+    print("\n=== the 25 Aug value, 669 ms ===")
+    g.H_setup(False)
+    feed(20)                                    # get to released first
+    check("released while healthy", g.H_auth()[0], "passed")
+    feed(2, value=669.0)
+    check("669 ms blocks", g.H_auth()[0], "failed")
+    check("and only after draining does it clear", g.H_auth()[0], "failed")
+    feed(15, value=70.0)
+    check("clears after 3 s of good values", g.H_auth()[0], "passed")
+
+    print("\n=== 9999 unknown sentinel from the companion ===")
+    g.H_setup(False)
+    feed(20)
+    feed(2, value=9999.0)
+    check("sentinel blocks", g.H_auth()[0], "failed")
+
+    print("\n=== FAIL OPEN on silence (the safety-critical case) ===")
+    g.H_setup(False)
+    feed(20, value=9999.0)                      # firmly blocked
+    check("blocked before silence", g.H_auth()[0], "failed")
+    g.H_texts()
+    for _ in range(20):                         # 4 s of no messages, SLG_TOUT is 3 s
+        g.H_advance(200)
+        g.H_tick()
+    check("gate OPENS when the companion goes silent", g.H_auth()[0], "passed")
+    check("and says so", "no SLAMLAT" in g.H_texts(), True)
+
+    print("\n=== boundary and robustness ===")
+    g.H_setup(False)
+    feed(20)
+    feed(5, value=150.0)
+    check("exactly 150 ms blocks (>= not >)", g.H_auth()[0], "failed")
+    g.H_setup(False)
+    feed(20)
+    feed(5, value=149.0)
+    check("149 ms does not block", g.H_auth()[0], "passed")
+
+    g.H_setup(False)
+    feed(20)
+    for _ in range(20):                         # a different NAMED_VALUE_FLOAT on the same link
+        g.H_push(frame("BATTVOLT", 9999.0))
+        g.H_advance(200)
+        g.H_tick()
+    check("ignores other named values entirely", g.H_auth()[0], "passed")
+    check("...and treats them as silence, not as data", "no SLAMLAT" in g.H_texts(), True)
+
+    g.H_setup(False)
+    feed(20)
+    for _ in range(5):                          # a different msgid that happens to be queued
+        g.H_push(frame("SLAMLAT", 9999.0, msgid=30))
+        g.H_advance(200)
+        g.H_tick()
+    check("ignores non-251 msgids", g.H_auth()[0], "passed")
+
+    print("\n=== SLG_ENABLE = 0 releases rather than latching ===")
+    g.H_setup(False)
+    feed(20, value=9999.0)
+    check("blocked while enabled", g.H_auth()[0], "failed")
+    g.H_set("ENABLE", 0)
+    g.H_tick()
+    check("disabling clears the block", g.H_auth()[0], "passed")
+    g.H_set("ENABLE", 1)
+
+    print("\n=== no free aux-auth slot: degrades quietly, does not crash ===")
+    g.H_setup(True)
+    check("says the gate is inactive", "INACTIVE" in g.H_texts(), True)
+
+    print()
+    if FAILURES:
+        print("%d FAILURE(S): %s" % (len(FAILURES), ", ".join(FAILURES)))
+        return 1
+    print("all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
