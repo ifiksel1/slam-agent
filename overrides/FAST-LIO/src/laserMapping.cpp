@@ -1037,12 +1037,27 @@ int main(int argc, char** argv)
 
             /*** FAST-LIO health diagnostics: decoupled scalar topic for failure analysis.
                  data = [matched_pts, mean_residual, ekf_update_ms, input_pts_downsampled,
-                         HtDH_eig_min, HtDH_eig_mid, HtDH_eig_max]
+                         HtDH_eig_min, HtDH_eig_mid, HtDH_eig_max, publish_latency_ms]
                  eig_* = translation-observability eigenvalues (ascending). eig_min small =>
-                 degenerate axis (geometry under-constrains translation along one direction). ***/
+                 degenerate axis (geometry under-constrains translation along one direction).
+
+                 [7] publish_latency_ms, added 2026-09-01. Age of THIS measurement at the moment
+                 it is published: now - lidar_end_time, where lidar_end_time is the sweep-end
+                 time on the host clock and is also what stamps /Odometry (see publish_odometry).
+                 It is therefore a true age-of-measurement, not an inter-arrival interval.
+
+                 Why it exists: on 25 Aug 2026 this value ramped 82 -> 669 ms under a real-time
+                 overrun (matched 4709 -> 7271 pushed per-scan cost past the 50 ms budget at
+                 20 Hz). ArduPilot is set VISO_DELAY_MS=75 and caps vision-delay compensation at
+                 250 ms, so the EKF fused stale poses -> 3.7 g hard landing. drift_monitor had no
+                 timing term at all and published OK throughout. Measured HERE rather than in the
+                 Python node because /fastlio_health carries no header, and because a value taken
+                 at publish time cannot be inflated by a blocked subscriber.
+
+                 APPEND-ONLY: consumers index positionally. Never reorder or insert. ***/
             {
                 std_msgs::Float32MultiArray health;
-                health.data.resize(7);
+                health.data.resize(8);
                 health.data[0] = (float)effct_feat_num;
                 health.data[1] = (float)res_mean_last;
                 health.data[2] = (float)((t_update_end - t_update_start) * 1000.0);
@@ -1050,6 +1065,7 @@ int main(int argc, char** argv)
                 health.data[4] = (float)hdh_eig_pos(0);  // min  (most-degenerate axis)
                 health.data[5] = (float)hdh_eig_pos(1);  // mid
                 health.data[6] = (float)hdh_eig_pos(2);  // max
+                health.data[7] = (float)((ros::Time::now().toSec() - lidar_end_time) * 1000.0);
                 pubHealth.publish(health);
             }
 
