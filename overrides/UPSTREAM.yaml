@@ -1,0 +1,53 @@
+# Pinned upstream sources for docker_src/.
+#
+# scripts/fetch_docker_sources.sh clones these and checks out the recorded commit,
+# then scripts/apply_overrides.sh copies overrides/ over the top. Together those two
+# steps reproduce docker_src/ exactly, which matters because docker_src/ is
+# .gitignored and therefore exists on no other machine.
+#
+# To move to a newer upstream: update the sha here, re-run fetch, re-run
+# `apply_overrides.sh apply`, then rebuild and re-test. Expect conflicts in
+# laserMapping.cpp — our version is a whole-file override, not a patch.
+
+recorded: 2026-09-01
+recorded_by: pinned from the working tree that flew logs 44-51
+
+repos:
+  - name: FAST_LIO_SLAM
+    url: https://github.com/RevoluteRobotics/FAST_LIO_SLAM.git
+    sha: 0e5ffbd6e0b11b5882301c7fdde596488445ffe3
+    date: 2026-01-07
+    private: true          # the Dockerfile COPYs rather than clones because of this
+    note: bundles fast_lio + aloam_velodyne + hesai_ros_driver; the only repo we modify
+
+  - name: livox_ros_driver
+    url: https://github.com/Livox-SDK/livox_ros_driver.git
+    sha: 3d240d5666129e1a3052e78ee8487a04b08fdda3
+    date: 2023-02-28
+    private: false
+    note: unmodified upstream
+
+  - name: vision_to_mavros
+    url: https://github.com/thien94/vision_to_mavros.git
+    sha: 139f199fcc82199e357279b11b94e651b07c284e
+    date: 2022-10-28
+    private: false
+    note: unmodified upstream
+
+# Everything we own, relative to docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/.
+# Sizes are our delta against the pinned FAST_LIO_SLAM sha.
+overrides:
+  modified:
+    - CMakeLists.txt                #   +3 lines
+    - config/hesai_jt128.yaml       #   +8 / -8
+    - src/laserMapping.cpp          # +145 / -83   health topic, eigenvalues, /Laser_map, /cloud_effected
+    - src/fastlio_mavros_bridge.py  # +170 / -?    vision_pose bridge, yaw datum, restamp option
+  added:
+    - src/drift_monitor.py          # 366 lines    drift detection + EKF source failover
+    - src/ch9_logger.py             # 197 lines
+    - src/flight_recorder.py        # 161 lines
+    - src/viz_frames.py             #  47 lines
+
+# Not tracked, deliberately: src/laserMapping.cpp.orig and src/fastlio_mavros_bridge.py.orig
+# are pre-modification copies of upstream. Recover them with:
+#   git -C docker_src/FAST_LIO_SLAM show 0e5ffbd:FAST_LIO_SLAM/FAST-LIO/src/laserMapping.cpp
