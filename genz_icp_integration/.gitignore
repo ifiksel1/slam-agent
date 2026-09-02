@@ -1,0 +1,3 @@
+# Run outputs: trajectory CSVs, per-run logs, and mavros_ref.csv dumps.
+# ~300MB and regenerable from the bags via scripts/run_bag.sh -- keep out of git.
+results/

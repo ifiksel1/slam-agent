@@ -1,0 +1,35 @@
+# GenZ-ICP REAL-TIME config for the 737 hangar bags (Ouster OS1-64 @ 20 Hz, Jetson Orin NX).
+#
+# Derived empirically 2026-08-31 on 737_700_FRONT. Sustains 20.00 Hz with 9726/9727 scans
+# captured (100%) and 0.21 m return-to-origin against a 0.273 m ICP ground truth.
+# For reference on the SAME bag: upstream defaults gave 6.04 Hz / 30% capture / 15.35 m,
+# and BIEVR-LIO (LiDAR-INERTIAL) gave 5.87 m.
+#
+# Two deltas from upstream, both moving AWAY from defaults that were tuned for offline
+# benchmark accuracy rather than embedded real-time:
+#
+#   max_num_iterations: 100 -> 5
+#     The dominant ACCURACY fix, not just a speed knob. In a degenerate scene the solve is
+#     near-singular, so extra Gauss-Newton steps keep walking along the ill-conditioned
+#     direction instead of converging. Capping acts as early-stopping regularization.
+#     Accuracy is FLAT (0.20-0.24 m) across iters = 30/15/10/5; only the stock 100 is broken.
+#
+#   voxel_size: 0.3 -> 0.5
+#     The dominant SPEED lever, and free: +81% throughput at identical accuracy. Larger
+#     voxels mean fewer but better-populated neighborhoods, so normals are cheaper AND
+#     better-conditioned. alpha median moved 0.962 -> 0.954, i.e. the planar/non-planar
+#     split is unchanged.
+#
+# Everything else is stock. deskew stays false (no IMU; upstream advises off for aggressive
+# motion). Verify these deltas before trusting them on a different sensor rate or platform.
+deskew: false
+max_range: 100.0
+min_range: 0.3
+voxel_size: 0.5
+desired_num_voxelized_points: 3000
+planarity_threshold: 0.2
+max_points_per_voxel: 1
+initial_threshold: 2.0
+min_motion_th: 0.1
+max_num_iterations: 5
+convergence_criterion: 0.0001

@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!-- Mirrors upstream odometry.launch MINUS the rviz node and MINUS the rosbag player.
+     Upstream gates the debug clouds (/genz/planar_points, /genz/non_planar_points) on the
+     same "visualize" arg that launches rviz. We need those clouds to recover alpha, but
+     rviz is not installed in ros-base and we are headless, so we set visualize=true on the
+     NODE only. The bag is played by run_bag.sh so it can be sequenced and timed. -->
+<launch>
+  <arg name="topic"       default="/ouster/points"/>
+  <arg name="config_file" default="hangar.yaml"/>
+  <arg name="odom_frame"  default="odom"/>
+  <arg name="base_frame"  default=""/>
+  <arg name="publish_odom_tf" default="true"/>
+  <arg name="map_cleanup_radius" default="300.0"/>
+  <!-- debug clouds gate alpha telemetry AND cost extra publishing; parameterized so the
+       sweep can trade alpha capture against real-time factor -->
+  <arg name="visualize" default="true"/>
+
+  <node pkg="genz_icp" type="odometry_node" name="odometry_node" output="screen">
+    <remap from="pointcloud_topic" to="$(arg topic)"/>
+    <param name="odom_frame"  value="$(arg odom_frame)"/>
+    <param name="base_frame"  value="$(arg base_frame)"/>
+    <param name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
+    <param name="visualize"   value="$(arg visualize)"/>
+    <param name="map_cleanup_radius" value="$(arg map_cleanup_radius)"/>
+    <rosparam command="load" file="/root/genz_cfg/$(arg config_file)"/>
+  </node>
+</launch>

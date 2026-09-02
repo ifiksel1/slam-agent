@@ -1,0 +1,15 @@
+# GenZ-ICP parameters for the 737 hangar bags (Ouster OS1-64, 20 Hz).
+# Base = upstream indoor.yaml. Deltas are commented; everything else is stock so
+# that run 1 measures the PAPER'S OWN behavior before any tuning of ours.
+deskew: false                      # stock. Upstream tuning guide: keep OFF for aggressive motion
+                                   # (their deskew is a constant-velocity model; no IMU here).
+max_range: 100.0                   # stock indoor value; hangar walls are within OS1-64 range.
+min_range: 0.3
+voxel_size: 0.3
+desired_num_voxelized_points: 2000 # DELTA (indoor=2000): large open volume, keep more structure.
+planarity_threshold: 0.2           # stock. lambda3/(l1+l2+l3) < 0.2 => planar. NOT tuned for run 1.
+max_points_per_voxel: 1
+initial_threshold: 2.0
+min_motion_th: 0.1
+max_num_iterations: 15
+convergence_criterion: 0.0001
