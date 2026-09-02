@@ -1,6 +1,6 @@
 ---
 name: bievr_lio_evaluation
-description: "BIEVR-LIO (ethz-asl, RSS 2026) built native-arm64 on Orin NX; deterministic + 1.35cm on 3rd_floor BUT FAILS on the real 737 hangar bags (metre-to-km drift / 2 numerical divergences on clean data) — NOT viable standalone in a hangar. 3rd_floor was easy for it."
+description: "BIEVR-LIO (ethz-asl, RSS 2026) built native-arm64 on Orin NX; deterministic + 1.35cm on 3rd_floor. Its 737-hangar FAILURE was a STOCK-CONFIG artifact — Phase-7 tuning (map/pixel_size_m 0.05->0.40) gives 10.6m -> 0.33m and makes it real-time"
 metadata: 
   node_type: memory
   type: project

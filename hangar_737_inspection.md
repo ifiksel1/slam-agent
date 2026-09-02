@@ -1,6 +1,6 @@
 ---
 name: hangar-737-inspection
-description: "Target mission — autonomous cm-pose drone inspection of a 737 in a fixed hangar; decided localization architecture (LIO + absolute anchor + degeneracy gating, NOT appearance loop closure)"
+description: "Target mission — autonomous cm-pose drone inspection of a 737 in a fixed hangar. Localization architecture RE-OPENED 2026-08-31: both GenZ-ICP and tuned BIEVR reach sub-metre on the real bags, so the anchor is a decimetre->cm refinement layer, not a rescue"
 metadata: 
   node_type: memory
   type: project

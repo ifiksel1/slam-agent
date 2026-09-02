@@ -1,6 +1,6 @@
 ---
 name: genz-icp-evaluation
-description: GenZ-ICP (RA-L 2025) — LiDAR-only, real-time on Orin NX, sub-metre true drift on 6/6 usable hangar bags after a critical retune; beats BIEVR-LIO
+description: GenZ-ICP (RA-L 2025) — LiDAR-only, 20Hz real-time on Orin NX, sub-metre true drift on all 6 usable hangar bags after a critical retune; head-to-head vs BIEVR RETRACTED (tuned BIEVR matches it)
 metadata:
   type: project
 ---
