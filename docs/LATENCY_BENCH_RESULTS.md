@@ -77,10 +77,37 @@ returned, releasing only after 3 s of good samples.
 - That no real flight produces a false CRITICAL. That is what the staged rollout is for:
   `enable_latency_critical=false` for 3–5 sorties, then flip it back.
 - That 150 ms is right for flight rather than merely right for the bench. The calibration behind it
-  came from 22 recorded bags, and those bags may contain a fake 45 Hz `/Odometry` stream (removed
-  upstream in FAST_LIO_SLAM `345806d`) stamped `ros::Time::now()` instead of `lidar_end_time`.
-  Such samples read as ~0 ms old and would bias the distribution. **Unverified — check before
-  trusting the p99.9 = 174 ms figure.**
+  came from 22 recorded bags, replayed offline.
+
+## Calibration integrity — the fake 45 Hz stream, checked and ruled out
+
+FAST_LIO_SLAM `345806d` removed a timer that published to the **same** `/Odometry` topic at 45 Hz
+stamped `ros::Time::now()` rather than `lidar_end_time`. Samples like that read as ~0 ms old, so
+had they been present in the recorded bags they would have dragged the latency distribution down
+and made every threshold derived from it too optimistic.
+
+Checked across all 22 flight bags, using two independent tells — publish rate, and the
+distribution of `bag_receive_time - header.stamp`:
+
+| | Result |
+|---|---|
+| Pooled samples | 29,895 |
+| **Fraction below 20 ms** | **0.00%** |
+| Rate, 20 of 22 bags | 19.9–20.3 Hz — one message per scan |
+| Median age, healthy bags | 67.7–77.2 ms, matching the 67–78 ms fleet baseline |
+
+Had the timer been running, roughly 69% of samples (45 of every 65) would sit near zero. None do.
+
+Both outliers are already-understood flights, not artefacts:
+
+- `08_25_2026_20_44_47` — 43.4 Hz, p50 **6044 ms**. The cold-start bag. During a cold start
+  FAST-LIO burns through a queued backlog faster than 20 Hz while every pose it emits is seconds
+  stale. High rate and high age together are the signature of a backlog, and the exact opposite of
+  the fake stream, which would show high rate with *zero* age.
+- `08_25_2026_20_38_04` — p50 **286 ms**. The crash flight.
+
+**Conclusion: the calibration is sound.** `lat_warn_ms = 150`, `lat_k_warn = 15` and the
+p99.9 = 174 ms figure stand as measured.
 
 ## Reproducing
 
