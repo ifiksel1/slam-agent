@@ -94,10 +94,48 @@ max_step r=+0.47) are likewise confounded — they largely measured starvation, 
 structure. Lesson: for a non-real-time estimator, replay rate and solver defaults are
 first-class experimental variables; ALWAYS report scan-capture %.
 
+## Deskew A/B = NULL, and what it says about adding an IMU (2026-08-31)
+
+Our bags DO carry a per-point `t` field (`x y z intensity t reflectivity ring ambient range`)
+and the ROS1 node parses `t`/`timestamp`/`time`, so upstream deskew is usable -- it is a
+ONE-LINE config change, no IMU needed. A/B at `hangar_rt.yaml` (single variable, deskew
+false vs true), rate 1.0, on the 3 `closed_loop:True` bags + FRONT. true_drift, m:
+
+| bag | deskew OFF | deskew ON | delta |
+|---|---|---|---|
+| MAX_8_LIO_SAM_3 | 0.3419 | 0.3355 | -0.0064 |
+| cmem3qaqb 02:03 | 0.5716 | 0.5679 | -0.0037 |
+| cmem9gs5j 03:18 | 0.9123 | 0.9139 | +0.0016 |
+| 737_700_FRONT | 0.1239 | 0.1166 | -0.0073 |
+
+3 improve, 1 worsens, **all deltas <= 7mm vs an 8.6mm run-to-run spread -> indistinguishable
+from zero.** Throughput unchanged at 20.0 Hz on every bag (deskew is free). **In-scan
+distortion is NOT a limiting factor for this flight envelope** -- at 20 Hz a scan spans 50ms
+and these flights don't move enough within it to matter at the decimetre scale where the real
+error lives.
+
+**CONSEQUENCE — do NOT graft an IMU into GenZ-ICP (Tier 2); use ArduPilot EKF3 (Tier 1).**
+The two IMU touchpoints are cleanly isolated in `GenZICP.cpp` and neither is in
+`Registration.cpp`: `GetPredictionModel()` (constant velocity `poses_[N-2].inverse()*poses_[N-1]`)
+and `DeSkewScan(frame, timestamps, start_pose, finish_pose)`. So a graft WOULD be far safer
+than the EllipseLIO photometric one — that failed because it injected a residual into the
+IKFoM (the estimator CORE); this would only change INPUTS (initial guess + cloud shape), and
+degrades gracefully. **But it is not worth doing:** half the value of an IMU is gyro deskew,
+just measured at ~0; the other half is the motion prior, and constant-velocity is already
+sufficient (max_step 0.046 m at the RT config, so successive scans are close). The OS1-64's
+internal IMU has a factory extrinsic and we have Allan-variance params, so the cost is days
+not weeks — the payoff is what's missing.
+**Two caveats:** (1) the bags may not contain the aggressive motion that would break the
+constant-velocity assumption — this tests the envelope we RECORDED, not one we might fly;
+(2) upstream deskew derives scan velocity from the previous two poses, so it is weakest during
+ACCELERATION, exactly where an IMU would differ. A null under gentle motion does not rule out
+a gain under hard motion. If aggressive flight later breaks the prior, prefer the GenZ-LIO
+release over a hand-rolled graft.
+
 ## Practical
 
 **LiDAR-ONLY, `deskew: false`** (no IMU; upstream advises off for aggressive motion, their
-deskew is a constant-velocity model). Harness `slam-agent/genz_icp_integration/`, image
+deskew is a constant-velocity model). Harness `slam-agent/genz_icp_integration/` — committed on branch **`feat/genz-icp-integration`** (428d7a6, forked from main, results/ gitignored; still untracked on other branches). Image
 `genz_icp:noetic` (native arm64, builds in 69s; no PCL/OpenCV/Ceres so none of the known build
 traps apply). **Determinism at the RT config: STABLE (4x FRONT, 2026-08-31).** true_drift
 0.1240 / 0.1269 / 0.1240 / 0.1183 m -- **spread 8.6 mm**; end-vector max pairwise 10.9 mm; all
