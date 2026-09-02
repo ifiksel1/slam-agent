@@ -54,17 +54,18 @@ from drift_monitor import LatencyTracker  # noqa: E402
 CRIT, WARN = 250.0, 150.0
 K_CRIT, K_WARN = 20, 15
 BLANK, DRAIN, WARMUP = 20.0, 5.0, 30
+LAND_ARMED = True          # the terminal stage is gated on being armed
 
 FAILURES = []
 
 
-def sim(name, ages, hz=20.0, blank_at_start=True, warmup=WARMUP):
-    """Mirror of health_cb's latency arithmetic. -> (warn_s, crit_s, escalate_s), None if never."""
+def sim(name, ages, hz=20.0, blank_at_start=True, warmup=WARMUP, land=False, armed=LAND_ARMED):
+    """Mirror of health_cb's latency arithmetic. -> (warn_s, crit_s, escalate_s[, land_s])."""
     trk = LatencyTracker(5, 5.0)
     t, dt = 0.0, 1.0 / hz
     n_crit = n_warn = 0
     blank_until = BLANK if blank_at_start else -1e9
-    latched, fw, fc, esc, failover_at = "OK", None, None, None, None
+    latched, fw, fc, esc, failover_at, lnd = "OK", None, None, None, None, None
 
     for i, age in enumerate(ages):
         trk.add_sample(t, age)
@@ -82,13 +83,19 @@ def sim(name, ages, hz=20.0, blank_at_start=True, warmup=WARMUP):
         if (failover_at is not None and esc is None and (t - failover_at) >= DRAIN
                 and lat is not None and lat >= CRIT):
             esc = t
+            blank_until = t + BLANK        # the restart re-arms the blank
+        # terminal stage: blank expired, still over the ceiling, and armed
+        if (land and lnd is None and esc is not None and t >= blank_until
+                and lat is not None and lat >= CRIT and armed):
+            lnd = t
         t += dt
 
     def fmt(v):
         return ("%.1fs" % v) if v is not None else "never"
 
-    print("  %-44s warn@%-8s crit@%-8s escalate@%s" % (name, fmt(fw), fmt(fc), fmt(esc)))
-    return fw, fc, esc
+    tail = ("  land@%s" % fmt(lnd)) if land else ""
+    print("  %-44s warn@%-8s crit@%-8s escalate@%s%s" % (name, fmt(fw), fmt(fc), fmt(esc), tail))
+    return fw, fc, esc, lnd
 
 
 def expect(label, got, want):
@@ -107,7 +114,7 @@ def main():
     healthy = [71 + random.gauss(0, 4.5) for _ in range(2400)]
 
     print("=== crash profile, node already warm (the realistic case) ===")
-    fw, fc, esc = sim("crash", crash, blank_at_start=False)
+    fw, fc, esc, _ = sim("crash", crash, blank_at_start=False)
     print("      ramp crosses 250 ms at ~7.7s; +K_CRIT(20 scans)=1.0s -> expect CRITICAL ~8.7s")
     expect("WARN fires", fw is not None, True)
     expect("CRITICAL fires", fc is not None, True)
@@ -115,16 +122,43 @@ def main():
     expect("escalates ~DRAIN after CRITICAL", esc is not None and abs(esc - fc - DRAIN) < 0.3, True)
 
     print("\n=== cold start - the regression test for the startup-blank bug ===")
-    fw, fc, esc = sim("cold start, blank armed", cold, blank_at_start=True)
+    fw, fc, esc, _ = sim("cold start, blank armed", cold, blank_at_start=True)
     expect("never reaches CRITICAL", fc, None)
     expect("never escalates to a restart", esc, None)
     expect("still WARNs (so the interlock locks)", fw is not None, True)
     print("   for contrast, the bug this caught:")
-    _, _bug_fc, bug_esc = sim("cold start, blank NOT armed <-- old behaviour", cold, blank_at_start=False)
+    _, _bug_fc, bug_esc, _ = sim("cold start, blank NOT armed <-- old behaviour", cold, blank_at_start=False)
     expect("unfixed code would have restarted", bug_esc is not None, True)
 
+    print("\n=== terminal LAND stage (enable_latency_land) ===")
+    # SLAM never comes back: the restart fires, its blank expires, latency is still over the
+    # ceiling. Should land. ~25 s after CRITICAL by construction (DRAIN 5 + BLANK 20).
+    _, fc_l, esc_l, lnd = sim("never recovers -> lands", crash + [600] * 1200,
+                              blank_at_start=False, land=True)
+    expect("LAND fires", lnd is not None, True)
+    expect("only after DRAIN+BLANK past CRITICAL",
+           lnd is not None and abs(lnd - fc_l - DRAIN - BLANK) < 0.3, True)
+
+    # The restart WORKS. Timeline: escalation at ~13.7 s kills laserMapping; roslaunch respawns
+    # it after respawn_delay=2 s; its cold-start backlog then drains over ~9.1 s, finishing well
+    # inside the 20 s blank. Must NOT land.
+    # (An earlier version of this profile started the drain 17 s after the restart and did land -
+    # which is the real sensitivity here: the blank is sized on ONE observed 9.1 s drain. A slower
+    # cold start than that would put a normal recovery past the blank and trip the terminal stage.)
+    recover = (crash[:300]                                  # ramp + CRITICAL + escalation
+               + [600] * 40                                 # 2 s respawn delay
+               + [13600 - (13600 - 78) * i / 182.0 for i in range(182)]   # cold start drains
+               + [78] * 900)
+    _, _, _, lnd2 = sim("restart recovers -> no land", recover, blank_at_start=False, land=True)
+    expect("no LAND when the restart recovers SLAM", lnd2, None)
+
+    # Disarmed on the bench: never command a descent.
+    _, _, _, lnd3 = sim("disarmed -> never lands", crash + [600] * 1200,
+                        blank_at_start=False, land=True, armed=False)
+    expect("no LAND while disarmed", lnd3, None)
+
     print("\n=== healthy flight, 71 +/- 4.5 ms for 120 s ===")
-    fw, fc, esc = sim("healthy", healthy)
+    fw, fc, esc, _ = sim("healthy", healthy)
     expect("completely silent", (fw, fc, esc), (None, None, None))
 
     print("\n=== vision dropout: the starvation floor ===")

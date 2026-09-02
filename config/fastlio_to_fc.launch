@@ -172,6 +172,18 @@
     <param name="lat_crit_ms"             type="double" value="250" />
     <param name="lat_arm_ms"              type="double" value="150" />
     <param name="lat_drain_sec"           type="double" value="5.0" />
+    <!-- Terminal stage. If the restart did not bring SLAM back, put the aircraft down rather than
+         fly on the fallback until the battery failsafe lands it somewhere arbitrary. Gated on the
+         restart blank having EXPIRED (a fresh laserMapping cold start is itself a backlog, so any
+         fixed delay short enough to be useful would fire during a normal recovery), on latency
+         still being over the ceiling, and on being ARMED.
+         Safe at that point specifically: ~25 s stable on SRC2, so EKF height is EK3_SRC2_POSZ=2
+         (the rangefinder) and that sensor is known alive because we are flying on its optical
+         flow - LAND's descent demand and its control loop then share one signal.
+         CAVEAT: the MTF-01 provides BOTH the flow and the rangefinder. If it dies, SRC2 loses
+         velocity and height together and LAND would descend on the barometer. Nothing detects
+         that yet. Default OFF - this commands a real descent. -->
+    <param name="enable_latency_land"     type="bool"   value="false" />
     <param name="lat_median_n"            type="int"    value="5" />
     <!-- k_warn=15, not 10: worst run above 150 ms across 20 healthy flights is exactly 10 scans
          (28761 samples), so 10 fires with zero margin and did on 07_13_2026_14_16_19.

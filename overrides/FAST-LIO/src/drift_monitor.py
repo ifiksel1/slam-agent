@@ -32,6 +32,13 @@ LATENCY RESPONSE IS TWO-STAGE, and CRITICAL is itself staged:
   >= lat_warn_ms (150)  for lat_k_warn scans  -> WARN: banner + interlock, NO action.
   >= lat_crit_ms (250)  for lat_k_crit scans  -> CRITICAL: lane-change to OF (SRC2) ONLY.
   still >= lat_crit_ms after lat_drain_sec (5) on OF -> escalate to the full node restart.
+  still >= lat_crit_ms once the restart blank expires -> command LAND (~enable_latency_land,
+  default OFF). Safe at that point and only at that point: we have been stable on SRC2 for ~25 s,
+  so EKF height is the rangefinder (EK3_SRC2_POSZ=2), and that sensor is known alive because the
+  aircraft is flying on its optical flow. LAND's demand and its control loop then share one
+  signal. NOTE the MTF-01 supplies BOTH the flow and the rangefinder, so it is a single device:
+  if it dies, SRC2 loses velocity and height together and LAND would descend on the barometer.
+  Nothing currently detects that - see the flow-health gap in the plan.
 250 ms is not a tuning choice: it is ArduPilot's hard cap on vision-delay compensation, above
 which the EKF is provably fusing uncompensated stale poses whatever VISO_DELAY_MS says.
 FAST-LIO runs ~2.5x realtime at normal load, so a transient backlog often drains on its own;
@@ -200,6 +207,9 @@ class DriftMonitor:
         self.lat_crit_ms = float(g("~lat_crit_ms", 250.0))   # ArduPilot's compensation ceiling
         self.lat_arm_ms = float(g("~lat_arm_ms", 150.0))     # arming uses the conservative bar
         self.lat_drain_sec = float(g("~lat_drain_sec", 5.0)) # OF-only grace before escalating to restart
+        # Terminal stage: if a restart did not bring SLAM back, put the aircraft down rather than
+        # leave it on a fallback indefinitely. Default OFF - it commands a real descent.
+        self.enable_latency_land = bool(g("~enable_latency_land", False))
         self.lat_median_n = int(g("~lat_median_n", 5))
         # 15 (0.75 s) not 10: across 28761 effective-latency samples from 20 healthy flights the
         # worst run above lat_warn_ms is exactly 10 scans, so k=10 fires with ZERO margin - and did,
@@ -312,6 +322,7 @@ class DriftMonitor:
         self._lat_failover_at = None       # when the OF-only latency failover fired
         self._lat_no_restart = False       # an OF-only failover is in effect (no health gap will occur)
         self._lat_escalated = False        # the drain timer already escalated to a full restart
+        self._lat_land_fired = False       # terminal LAND already commanded (once only)
         self._warned_no_odom = False
         self._node_start = time.time()      # for "health never arrived" detection
         self._warned_no_health_ever = False
@@ -372,6 +383,8 @@ class DriftMonitor:
                       self.lat_warn_ms, self.lat_crit_ms, self.lat_arm_ms,
                       self.lat_k_warn, self.lat_k_crit, self.lat_k_release,
                       self.lat_drain_sec, self.lat_restart_blank_sec, self.odom_topic)
+        if self.enable_latency_land:
+            rospy.logwarn("drift_monitor: latency LAND stage ENABLED (terminal descent if a restart does not recover SLAM)")
 
     # ---- latency intake ----
     def odom_cb(self, msg):
@@ -629,6 +642,28 @@ class DriftMonitor:
                           lat_ms, self.lat_drain_sec)
             self._execute_restart("lat:no-drain")
 
+        # TERMINAL STAGE: the restart did not fix it. Rather than fly on the fallback until the
+        # battery failsafe lands the vehicle somewhere arbitrary, put it down deliberately.
+        #
+        # Gated on the restart blank having EXPIRED, not on a fixed timer. A fresh laserMapping's
+        # cold start is itself a multi-second backlog, so any fixed delay short enough to be useful
+        # would fire during a normal recovery. When the blank expires and latency is STILL over the
+        # ceiling, the restart genuinely failed.
+        #
+        # Why LAND is safe HERE specifically: we only reach this having been stable on SRC2 for
+        # ~25 s, so the EKF's height is EK3_SRC2_POSZ=2, the rangefinder - and we know that sensor
+        # is alive because the aircraft is flying on its optical flow. LAND's descent demand
+        # (get_alt_above_ground_m) and its control loop (the EKF's altitude) are then the SAME
+        # signal, which is exactly what they were not on 25 Aug.
+        if (self.enable_latency_land and not self._lat_land_fired and self._lat_escalated
+                and now >= self._lat_blank_until
+                and lat_ms is not None and lat_ms >= self.lat_crit_ms
+                and self._armed):
+            self._lat_land_fired = True
+            rospy.logwarn("drift_monitor: latency still %.0f ms after restart+blank -> commanding LAND", lat_ms)
+            self._send_statustext(_SEV_CRITICAL, "SLAM unrecovered - LANDING", force=True)
+            self._spawn(self._command_land)
+
         # advisory interlock auto-release ONLY after the restart's health-gap is observed AND
         # the fresh SLAM is healthy for k_release scans (prevents releasing instantly off stale n_ok).
         # An OF-only latency failover produces no health gap, hence the _lat_no_restart case.
@@ -649,6 +684,7 @@ class DriftMonitor:
             self._lat_no_restart = False
             self._lat_escalated = False
             self._lat_failover_at = None
+            self._lat_land_fired = False
             self._refresh_interlock()
             self._send_statustext(6, recovery_msg, force=True)   # MSG 4/4
 
