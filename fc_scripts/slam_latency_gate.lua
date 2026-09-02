@@ -94,10 +94,17 @@ if SLG_ENABLE:get() == 0 then
    return
 end
 
--- aux_auth_count_max is 3 and is a compile-time constant, not a parameter. On this airframe
--- three other scripts already hold all three, so this request is what grounded the aircraft on
--- 2026-09-02. There is no way to ask whether a slot is free without taking one, so a fourth
--- aux-auth script is not possible: a slot has to be freed, or the limit raised in firmware.
+-- aux_auth_count_max is 3 and is a compile-time constant, not a parameter. There is no way to
+-- ask whether a slot is free without taking one, and asking when full sets aux_auth_error,
+-- which fails prearm for the WHOLE vehicle.
+--
+-- LANDMINE, Copter 4.6.3: slots are never reclaimed. reset_all_aux_auths() - which master calls
+-- immediately before lua->run() - does not exist in 4.6.3, so every MAV_CMD_SCRIPTING restart
+-- leaks one slot per claiming script, permanently, until a real reboot. On 2026-09-02 that
+-- alone exhausted the pool and grounded the aircraft with "Too many auxiliary authorisers",
+-- which looked exactly like other scripts having taken every slot. They had not: tank_mode
+-- claims exactly one, correctly, from init(). NEVER use a scripting restart to test an
+-- aux-auth script on 4.6.3 - reboot instead. Verified working from a clean boot the same day.
 local auth_id = arming:get_aux_auth_id()
 if not auth_id then
    gcs:send_text(0, "SLG: no aux auth slot free -- SET SLG_ENABLE=0 AND REBOOT")
