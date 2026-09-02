@@ -51,8 +51,14 @@ local auth = {state = "none", msg = ""}
 
 function millis() return {tofloat = function() return now_ms end} end
 
+-- add_table fails when another script already claimed the key with a different prefix, and
+-- that claim persists in EEPROM. _taken lets a test reproduce exactly that.
 param = {
-  add_table = function(self, k, p, n) return true end,
+  add_table = function(self, k, p, n)
+    if _taken and _taken[k] then return false end
+    _used_key = k
+    return true
+  end,
   add_param = function(self, k, i, n, d) _defaults[n] = d; return true end,
 }
 _defaults = {}
@@ -85,8 +91,10 @@ mavlink = {
 gcs = {send_text = function(self, sev, txt) sent[#sent+1] = txt end}
 
 -- ---- test control surface ----
-function H_setup(no_slot)
+function H_setup(no_slot, taken)
   _no_slot = no_slot
+  _taken = taken
+  _used_key = nil
   now_ms, queue, sent = 0, {}, {}
   auth.state, auth.msg = "none", ""
   update = nil
@@ -101,6 +109,7 @@ function H_tick() if update then update() end end
 function H_auth() return auth.state, auth.msg end
 function H_texts() local t = table.concat(sent, " | "); sent = {}; return t end
 function H_registered() return _registered end
+function H_used_key() return _used_key end
 function H_set(name, v) _overrides[name] = v end
 """
 
@@ -125,21 +134,21 @@ def main():
             g.H_tick()
 
     print("=== boot: blocked before any SLAMLAT arrives ===")
-    interval = g.H_setup(False)
+    interval = g.H_setup(False, None)
     check("registers msgid 251", g.H_registered(), 251)
     check("loop interval 200 ms", interval, 200)
     check("starts blocked", g.H_auth()[0], "failed")
     check("reason names the wait", g.H_auth()[1], "SLAM latency: waiting")
 
     print("\n=== healthy 70 ms: releases, but only after RELEASE_N ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(14)
     check("still blocked at 14 ticks (<15)", g.H_auth()[0], "failed")
     feed(1)
     check("released at 15 ticks (3.0 s)", g.H_auth()[0], "passed")
 
     print("\n=== cold start 13600 ms: blocks fast ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(1, value=13600.0)
     check("one bad sample is not enough", g.H_auth()[0], "failed")  # still the boot block
     g.H_texts()
@@ -149,7 +158,7 @@ def main():
     check("reason carries the number", msg, "SLAM latency 13600ms")
 
     print("\n=== the 25 Aug value, 669 ms ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)                                    # get to released first
     check("released while healthy", g.H_auth()[0], "passed")
     feed(2, value=669.0)
@@ -159,13 +168,13 @@ def main():
     check("clears after 3 s of good values", g.H_auth()[0], "passed")
 
     print("\n=== 9999 unknown sentinel from the companion ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)
     feed(2, value=9999.0)
     check("sentinel blocks", g.H_auth()[0], "failed")
 
     print("\n=== FAIL OPEN on silence (the safety-critical case) ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20, value=9999.0)                      # firmly blocked
     check("blocked before silence", g.H_auth()[0], "failed")
     g.H_texts()
@@ -176,16 +185,16 @@ def main():
     check("and says so", "no SLAMLAT" in g.H_texts(), True)
 
     print("\n=== boundary and robustness ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)
     feed(5, value=150.0)
     check("exactly 150 ms blocks (>= not >)", g.H_auth()[0], "failed")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)
     feed(5, value=149.0)
     check("149 ms does not block", g.H_auth()[0], "passed")
 
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)
     for _ in range(20):                         # a different NAMED_VALUE_FLOAT on the same link
         g.H_push(frame("BATTVOLT", 9999.0))
@@ -194,7 +203,7 @@ def main():
     check("ignores other named values entirely", g.H_auth()[0], "passed")
     check("...and treats them as silence, not as data", "no SLAMLAT" in g.H_texts(), True)
 
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20)
     for _ in range(5):                          # a different msgid that happens to be queued
         g.H_push(frame("SLAMLAT", 9999.0, msgid=30))
@@ -203,7 +212,7 @@ def main():
     check("ignores non-251 msgids", g.H_auth()[0], "passed")
 
     print("\n=== SLG_ENABLE = 0 releases rather than latching ===")
-    g.H_setup(False)
+    g.H_setup(False, None)
     feed(20, value=9999.0)
     check("blocked while enabled", g.H_auth()[0], "failed")
     g.H_set("ENABLE", 0)
@@ -211,8 +220,23 @@ def main():
     check("disabling clears the block", g.H_auth()[0], "passed")
     g.H_set("ENABLE", 1)
 
+    print("\n=== param table key collision - the bug that shipped ===")
+    # 82 was taken on the real airframe by one of four other scripts, and the original assert
+    # killed the script at load: no params, no messages, arming silently ungated. The FC said
+    # "Lua: slam_latency_gate.lua:41: SLG: could not add param table" and nothing else.
+    g.H_setup(False, L.table_from({82: True}))
+    check("falls back off a taken key", g.H_used_key(), 137)
+    check("and still arms its gate", g.H_auth()[0], "failed")
+    check("announcing which key it took", "key 137" in g.H_texts(), True)
+
+    g.H_setup(False, L.table_from({82: True, 137: True, 163: True}))
+    check("walks past several taken keys", g.H_used_key(), 189)
+
+    g.H_setup(False, L.table_from({82: True, 137: True, 163: True, 189: True, 211: True}))
+    check("no free key: says INACTIVE rather than dying", "INACTIVE" in g.H_texts(), True)
+
     print("\n=== no free aux-auth slot: degrades quietly, does not crash ===")
-    g.H_setup(True)
+    g.H_setup(True, None)
     check("says the gate is inactive", "INACTIVE" in g.H_texts(), True)
 
     print()

@@ -25,7 +25,14 @@ REQUIRES
   SCR_ENABLE 1, and a free aux-auth slot (AP_Arming allows 3; tank_mode claims one).
 --]]
 
-local PARAM_TABLE_KEY = 82
+-- Table keys are claimed by whichever script gets there first, and the claim PERSISTS in
+-- EEPROM (AP_Param::add_table compares a CRC of the prefix against the stored one), so a
+-- hardcoded key is a landmine: 82 was already taken here by one of the four other scripts on
+-- this airframe, and the script died at load with "could not add param table".
+-- Searching a fixed candidate list is stable across boots rather than merely lucky: once SLG_
+-- is stored under key K, the CRC check makes every later add_table(K) succeed for us and fail
+-- for anyone else, so we land on the same K every time.
+local PARAM_TABLE_CANDIDATES = {82, 137, 163, 189, 211}
 local PARAM_TABLE_PREFIX = "SLG_"
 local RUN_INTERVAL_MS = 200          -- 5 Hz, comfortably faster than the 4 Hz feed
 
@@ -38,10 +45,27 @@ local RELEASE_N = 15                 -- 3.0 s
 local NAMED_VALUE_FLOAT_ID = 251
 local VALUE_NAME = "SLAMLAT"
 
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 3), "SLG: could not add param table")
+local PARAM_TABLE_KEY
+for _, key in ipairs(PARAM_TABLE_CANDIDATES) do
+   if param:add_table(key, PARAM_TABLE_PREFIX, 3) then
+      PARAM_TABLE_KEY = key
+      break
+   end
+end
+if not PARAM_TABLE_KEY then
+   -- Deliberately not an assert. A script that dies here is indistinguishable from one that was
+   -- never installed, which is how this failure hid the first time: no params, no messages after
+   -- boot, and arming silently unaffected. Say so instead, and leave the aircraft flyable.
+   gcs:send_text(0, "SLG: no free param table key - latency gate INACTIVE")
+   return
+end
+
+local add_param_failed = false
 local function add_param(name, idx, default)
-   assert(param:add_param(PARAM_TABLE_KEY, idx, name, default),
-          string.format("SLG: could not add %s%s", PARAM_TABLE_PREFIX, name))
+   if not param:add_param(PARAM_TABLE_KEY, idx, name, default) then
+      add_param_failed = true
+      return nil
+   end
    return Parameter(PARAM_TABLE_PREFIX .. name)
 end
 
@@ -54,6 +78,11 @@ end
 local SLG_ENABLE = add_param("ENABLE", 1, 1)
 local SLG_MS     = add_param("MS", 2, 150)
 local SLG_TOUT   = add_param("TOUT", 3, 3)
+
+if add_param_failed then
+   gcs:send_text(0, "SLG: could not add params - latency gate INACTIVE")
+   return
+end
 
 local auth_id = arming:get_aux_auth_id()
 if not auth_id then
@@ -142,7 +171,10 @@ function update()
    return update, RUN_INTERVAL_MS
 end
 
-gcs:send_text(6, string.format("SLG: latency gate loaded (auth %d, %.0fms)", auth_id, SLG_MS:get()))
+-- The key is worth announcing: it is chosen at runtime, and it is the first thing to check if
+-- the SLG_ parameters ever appear to reset themselves.
+gcs:send_text(6, string.format("SLG: gate loaded (key %d, auth %d, %.0fms)",
+                               PARAM_TABLE_KEY, auth_id, SLG_MS:get()))
 -- Start blocked-until-proven-good: on boot we have no SLAMLAT yet, and the first update() will
 -- fail it open within SLG_TOUT if the companion is genuinely not there. That ordering matters --
 -- the dangerous case is arming during a cold start, which is exactly the first few seconds.
