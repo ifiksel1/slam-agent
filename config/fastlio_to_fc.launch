@@ -156,7 +156,17 @@
          OF (SRC2) ONLY; still >=crit after lat_drain_sec on OF -> escalate to the node restart.
          FIRST DEPLOYMENT: set enable_latency_critical=false for a few flights and just watch. -->
     <param name="enable_latency_check"    type="bool"   value="true" />
-    <param name="enable_latency_critical" type="bool"   value="true" />
+    <!-- STAGED ROLLOUT, set false 2026-09-02. The whole chain is PROVEN on the bench (T3, see
+         docs/LATENCY_BENCH_RESULTS.md): CRITICAL -> OF failover with the FC confirming "Using EKF
+         Source Set 2", drain escalation at exactly 5.0 s, recovery to SRC1. What is NOT yet proven
+         is that no real flight produces a false CRITICAL, and the cost of being wrong is an
+         uncommanded in-flight source switch - the same class of event as the crash this exists to
+         prevent. So the automatic switch is withheld while the evidence is gathered.
+         STILL ACTIVE while false: latency measurement, WARN banners, the arming interlock, and the
+         SLAMLAT feed driving the FC prearm gate. Only the in-flight source switch is suppressed.
+         FLIP BACK TO TRUE after 3-5 sorties whose bags show zero spurious WARNs and a latency
+         distribution matching the 67-78 ms fleet baseline. -->
+    <param name="enable_latency_critical" type="bool"   value="false" />
     <param name="odom_topic"              type="str"    value="/Odometry" />
     <param name="lat_warn_ms"             type="double" value="150" />
     <param name="lat_crit_ms"             type="double" value="250" />
