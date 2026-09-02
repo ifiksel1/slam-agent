@@ -2,18 +2,31 @@
 """
 fc_statustext.py - print STATUSTEXT from the flight controller.
 
-Use this instead of `rostopic echo /mavros/statustext/recv`. On this stack that topic is
-advertised by /mavros but never publishes: on 2026-09-01 the FC sent STATUSTEXT (msgid 253 is
-plainly visible on /mavlink/from) while the plugin's topic stayed empty through a scripting
-restart, two mode changes and a prearm-check run. Reading the raw stream sidesteps the plugin.
+Reads STATUSTEXT off the raw /mavlink/from stream rather than /mavros/statustext/recv.
 
-This is not a nicety. It is the only reason the Lua arming gate's failure was diagnosable: the FC
-had been reporting
+CORRECTION (2026-09-02): an earlier version of this docstring claimed the mavros statustext
+plugin "never publishes". That was wrong. A same-window comparison of both subscriptions saw
+7 raw msgid-253 messages and the same 7 on /mavros/statustext/recv, identical. The windows that
+looked empty simply contained no FC messages - ArduPilot is silent when it has nothing to say,
+and a MAVLink-commanded mode change emits nothing at all. `rostopic echo
+/mavros/statustext/recv` is perfectly good for normal use.
+
+What this script is still for: decoding the raw stream when you need to be certain you are
+seeing everything the FC sent, without a plugin between you and the wire - and for filtering by
+content, which the plain topic echo cannot do. It is also the form the diagnosis below was made
+in. The FC had been reporting
 
     Lua: /APM/scripts/slam_latency_gate.lua:41: SLG: could not add param table
 
-at every boot, and nothing on the companion could see it. A script that dies at load looks
-exactly like a script that was never installed.
+at every boot, and it went unseen for a different reason worth knowing: an FC reboot
+re-enumerates the USB device, mavros does not reconnect on its own, and by the time the container
+is restarted the boot banners are long gone. So FC boot messages are missed by default no matter
+which topic you watch. A script that dies at load then looks exactly like one that was never
+installed - no params, no messages, arming silently ungated.
+
+To catch boot-time output, start this (or the topic echo) BEFORE power-cycling the FC, or use
+MAV_CMD_SCRIPTING to reload scripts on a live link - but see the 4.6.3 aux-auth landmine in
+fc_scripts/slam_latency_gate.lua before doing that with any script that claims a prearm slot.
 
 Usage:
     python3 scripts/fc_statustext.py [seconds]        # default 30, 0 = forever
