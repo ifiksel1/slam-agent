@@ -8,7 +8,9 @@
 #
 # Usage: run_bag.sh <bag_dir_name>   (a folder under ~/superodom_ws/field/)
 set -uo pipefail
-BAGNAME="${1:?usage: run_bag.sh <bag_dir_name>}"
+BAGNAME="${1:?usage: run_bag.sh <bag_dir_name> [config_file] [out_tag]}"
+CFG_FILE="${2:-os1_64_ouster.yaml}"   # A/B: swap the SLAM config (default = baseline)
+TAG="${3:-}"                          # A/B: isolate outputs per arm/run (e.g. _allan_run3)
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CTR=ellipselio
 RMW=rmw_cyclonedds_cpp
@@ -16,8 +18,8 @@ WS="${ELLIPSELIO_WS:-$HOME/ellipselio_ws}"
 IMAGE="${ELLIPSELIO_IMAGE:-ellipselio:humble}"
 FIELD_HOST="${FIELD_HOST:-${SUPERODOM_WS:-$HOME/superodom_ws}/field}"
 BAG=/root/field/$BAGNAME
-OUTDIR=/root/ros2_ws/results/field/$BAGNAME
-HOSTOUT="$WS/results/field/$BAGNAME"
+OUTDIR=/root/ros2_ws/results/field/${BAGNAME}${TAG}
+HOSTOUT="$WS/results/field/${BAGNAME}${TAG}"
 SRC='source /opt/ros/humble/setup.bash && source /root/ros2_ws/install/setup.bash'
 CFG=/root/ros2_ws/src/ellipselio/config
 
@@ -48,7 +50,7 @@ echo "  bag: $BAGNAME   $DUR"
 echo "=== launching EllipseLIO (use_sim_time:=true) ==="
 docker exec -d "$CTR" bash -lc "export RMW_IMPLEMENTATION=$RMW; $SRC && \
   ros2 launch ellipselio ellipselio_standalone.launch.py \
-    config_path:=$CFG config_file:=os1_64_ouster.yaml \
+    config_path:=$CFG config_file:=$CFG_FILE \
     use_sim_time:=true rviz:=false > $OUTDIR/ellipselio.log 2>&1"
 sleep 8
 

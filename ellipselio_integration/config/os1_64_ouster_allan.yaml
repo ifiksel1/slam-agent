@@ -1,0 +1,45 @@
+/**:
+    ros__parameters:
+
+        mapping:
+            # TUNED 0.1->0.2 (2026-06-11): the 0.1 floor was FINER than FAST-LIO (0.5) and
+            # SuperOdom (0.2) and FRAGMENTED features at feature-poor spots -> tensor-voting
+            # collapse (feats<50, obs_score<0.5) -> IMU runaway. 0.2 fixes the terminal runaway
+            # on the apartment bag (loop 0.00m @ boost, 2/2) AND cuts RAM. Pairs with CPU boost
+            # (1984MHz): at stock 1497 it's compute-marginal and the runaway recurs ~50% of runs.
+            map_resolution: 0.2
+            pub_map_n_secs: 10
+
+        lidar:
+            type: 3                  # LIVOX=1, VELODYNE=2, OUSTER=3, HESAI=4
+            rate: 20                 # THIS RIG RUNS 20Hz (1024x20). NCD configs use 10 — a 2x error
+                                     # here mis-associates IMU<->LiDAR (match_idx=floor(dt*rate)) and
+                                     # breaks deskew (scan_time=1/rate) -> EKF runs away under motion.
+            scan_lines: 64
+            vertical_fov: 42.4       # TUNE-CRITICAL for OS1-64; wrong value silently degrades accuracy
+            min_range: 0.3          # TUNED 0.5->0.3: recover near structure at sparse spots (SuperOdom uses 0.2)
+            max_range: 80.0         # TUNED 100->80: drop spurious far matches (rng_mean spiked to 400m at starvation)
+            topic: "/ouster/points"  # live Ouster ROS2 driver (was /os1_cloud_node/points for NCD bags)
+            # Extrinsic for THIS rig (OS1-64 built-in ICM-20948, IMU yaw-flipped vs LiDAR).
+            # Matches the validated SuperOdom/FAST-LIO calibration on this drone.
+            t_imu_lidar: [-0.006253, 0.011775, 0.028535]
+            r_imu_lidar: [-1.,  0.,  0.,
+                           0., -1.,  0.,
+                           0.,  0.,  1.]
+
+        imu:
+            rate: 100
+            # ALLAN-VARIANCE CALIBRATED (2026-07-13): 3.00h static, 1,079,800 samples @ 100Hz,
+            # 0 gaps, LiDAR spinning (in-situ). scripts/imu_allan_variance.py on
+            # scratchpad/allan/imu_static_seg_*.bag. Baseline (hand-set) values in comments.
+            acc_noise: 0.0183        # was 0.001249 — CALIBRATED in-situ noise density [m/s^2/sqrt(Hz)].
+                                     # ~15x higher: dominated by LiDAR self-vibration coupling into the
+                                     # built-in IMU. This is the noise the filter ACTUALLY sees in flight;
+                                     # the old value told the EKF to over-trust the accelerometer 15x.
+            gyr_noise: 0.000391      # was 0.000208 — CALIBRATED [rad/s/sqrt(Hz)]. Clean -0.5 slope, all 3
+                                     # axes agree (3.6-4.3e-4). Gyro is vibration-immune; trust this.
+            acc_bias:  0.000106      # UNCHANGED — Allan gave NO measurable accel bias random-walk
+                                     # (no +0.5 tail; curve still falling at 800s). Keep hand-set value.
+            gyr_bias:  0.000009      # was 0.000004 — CALIBRATED [rad/s^2/sqrt(Hz)]. Real +0.5 tail on
+                                     # 2 of 3 axes; ~2.2x higher than hand-set.
+            topic: "/ouster/imu"     # live Ouster ROS2 driver (was /os1_cloud_node/imu for NCD bags)
