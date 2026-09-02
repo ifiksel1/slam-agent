@@ -84,9 +84,23 @@ if add_param_failed then
    return
 end
 
+-- Check SLG_ENABLE BEFORE asking for a slot. Requesting one when the pool is full is not a
+-- read-only probe: AP_Arming::get_aux_auth_id() sets aux_auth_error, and that fails prearm with
+-- "Too many auxiliary authorisers" for the WHOLE aircraft, not just for this script. Asking
+-- first and apologising afterwards therefore grounds the vehicle. Ordering it this way makes
+-- SLG_ENABLE=0 a genuine kill switch that can be set from the GCS without touching the SD card.
+if SLG_ENABLE:get() == 0 then
+   gcs:send_text(6, "SLG: SLG_ENABLE=0 - latency gate off")
+   return
+end
+
+-- aux_auth_count_max is 3 and is a compile-time constant, not a parameter. On this airframe
+-- three other scripts already hold all three, so this request is what grounded the aircraft on
+-- 2026-09-02. There is no way to ask whether a slot is free without taking one, so a fourth
+-- aux-auth script is not possible: a slot has to be freed, or the limit raised in firmware.
 local auth_id = arming:get_aux_auth_id()
 if not auth_id then
-   gcs:send_text(0, "SLG: no aux auth slot free -- latency gate INACTIVE")
+   gcs:send_text(0, "SLG: no aux auth slot free -- SET SLG_ENABLE=0 AND REBOOT")
    return   -- do not reschedule: without a slot there is nothing this script can do
 end
 

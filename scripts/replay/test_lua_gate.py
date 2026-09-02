@@ -74,7 +74,11 @@ end
 arming = {
   -- NOT "_no_slot and nil or 1": in Lua that idiom can never yield nil, because
   -- (true and nil) is nil and (nil or 1) is 1. It silently handed out a slot.
-  get_aux_auth_id = function(self) if _no_slot then return nil end return 1 end,
+  get_aux_auth_id = function(self)
+    _auth_requested = true          -- merely ASKING poisons the pool when it is full
+    if _no_slot then return nil end
+    return 1
+  end,
   set_aux_auth_failed = function(self, id, m) auth.state = "failed"; auth.msg = m end,
   set_aux_auth_passed = function(self, id) auth.state = "passed"; auth.msg = "" end,
 }
@@ -95,6 +99,7 @@ function H_setup(no_slot, taken)
   _no_slot = no_slot
   _taken = taken
   _used_key = nil
+  _auth_requested = false
   now_ms, queue, sent = 0, {}, {}
   auth.state, auth.msg = "none", ""
   update = nil
@@ -110,6 +115,7 @@ function H_auth() return auth.state, auth.msg end
 function H_texts() local t = table.concat(sent, " | "); sent = {}; return t end
 function H_registered() return _registered end
 function H_used_key() return _used_key end
+function H_auth_requested() return _auth_requested end
 function H_set(name, v) _overrides[name] = v end
 """
 
@@ -235,9 +241,22 @@ def main():
     g.H_setup(False, L.table_from({82: True, 137: True, 163: True, 189: True, 211: True}))
     check("no free key: says INACTIVE rather than dying", "INACTIVE" in g.H_texts(), True)
 
-    print("\n=== no free aux-auth slot: degrades quietly, does not crash ===")
+    print("\n=== no free aux-auth slot ===")
+    # On 2026-09-02 this grounded the aircraft. aux_auth_count_max is 3, three other scripts held
+    # all three, and get_aux_auth_id() is not a read-only probe: asking when full sets
+    # aux_auth_error, which fails prearm with "Too many auxiliary authorisers" for the WHOLE
+    # vehicle. There is no way to test for a free slot without consuming one.
     g.H_setup(True, None)
-    check("says the gate is inactive", "INACTIVE" in g.H_texts(), True)
+    check("tells the operator how to recover", "SLG_ENABLE=0" in g.H_texts(), True)
+
+    print("\n=== SLG_ENABLE=0 must not touch the slot pool at all ===")
+    g.H_setup(False, None)
+    check("enabled: does request a slot", g.H_auth_requested(), True)
+    g.H_set("ENABLE", 0)
+    g.H_setup(False, None)
+    check("disabled: never asks, so cannot ground the vehicle", g.H_auth_requested(), False)
+    check("and says why", "SLG_ENABLE=0" in g.H_texts(), True)
+    g.H_set("ENABLE", 1)
 
     print()
     if FAILURES:
