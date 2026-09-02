@@ -57,8 +57,15 @@ numbers are directly comparable to BIEVR-LIO. true_drift = `||(p_end - p_start) 
 | cmem3qaqb 02:03 | **0.436** | 0.572 | **closed_loop TRUE** |
 | cmem9gs5j 03:18 | 18.703 | **0.912** | **closed_loop TRUE** |
 
-**GenZ wins 5/6; ALL SIX sub-metre (0.096-0.912 m), median 0.35 m. BIEVR: 1/6 sub-metre.**
-Strict subset (`closed_loop: True`, 3 bags): GenZ wins 2/3.
+**GenZ: ALL SIX sub-metre (0.096-0.912 m), median 0.35 m.** That absolute result stands.
+
+⚠️ **THE HEAD-TO-HEAD IS RETRACTED (2026-08-31).** The BIEVR column above is STOCK config; the
+GenZ column is TUNED. Phase-7 tuning of BIEVR (`map/pixel_size_m: 0.05 -> 0.40`, 8x stock)
+improves it up to **32x** -- 10.639 -> 0.334 m on MAX_8_LIO_SAM_3, where GenZ gets 0.342 m.
+Across the 4 GT bags, tuned BIEVR = 0.334 / 0.434 / 4.018 / 0.452 (3/4 sub-metre, median
+0.443) vs tuned GenZ 0.342 / 0.572 / 0.912 / 0.124 (4/4 sub-metre, median 0.457).
+**Medians are effectively identical -- neither estimator is meaningfully more accurate.**
+Never compare a tuned estimator against another's stock defaults. See [[bievr-lio-evaluation]].
 
 ## ⚠️ GROUND-TRUTH CAVEATS — read before quoting any of the above
 
