@@ -39,8 +39,13 @@ local RUN_INTERVAL_MS = 200          -- 5 Hz, comfortably faster than the 4 Hz f
 -- Asymmetric hysteresis, in loop iterations at RUN_INTERVAL_MS. Blocking is cheap and reversible,
 -- so latch it fast; releasing must survive the tail of a cold-start backlog, so make it slow.
 -- Mirrors the companion's own lat_k_arm_lock / lat_k_arm_release (10 / 60 scans at 20 Hz).
-local BLOCK_N = 2                    -- 0.4 s
-local RELEASE_N = 15                 -- 3.0 s
+-- Counted in DISTINCT SAMPLES, not loop iterations. The loop runs at 5 Hz against a 4 Hz feed,
+-- so polls outnumber messages and counting iterations let a SINGLE transient sample block
+-- arming - observed on 2026-09-02, when one 212 ms cold-start sample tripped the gate while the
+-- companion's own interlock (which requires 0.5 s of sustained badness) never moved.
+-- At the nominal 4 Hz feed: 2 samples = 0.5 s, 12 samples = 3.0 s.
+local BLOCK_N = 2
+local RELEASE_N = 12
 
 local NAMED_VALUE_FLOAT_ID = 251
 local VALUE_NAME = "SLAMLAT"
@@ -116,6 +121,7 @@ mavlink:register_rx_msgid(NAMED_VALUE_FLOAT_ID)
 
 local last_value = nil
 local last_rx_ms = nil
+local fresh_sample = false           -- a new SLAMLAT arrived since the last evaluation
 local n_bad, n_ok = 0, 0
 local state = nil        -- "blocked" | "open" | "stale-open" | "off", for edge-triggered messages
 
@@ -149,6 +155,7 @@ local function poll_mavlink()
          if name == VALUE_NAME then
             last_value = value
             last_rx_ms = millis():tofloat()
+            fresh_sample = true
          end
       end
    end
@@ -174,6 +181,13 @@ function update()
       announce("stale-open", "SLG: no SLAMLAT - latency gate open")
       return update, RUN_INTERVAL_MS
    end
+
+   if not fresh_sample then
+      -- Nothing new to judge. Hold the current verdict rather than re-counting a value we have
+      -- already counted; the fail-open timeout above is what handles a feed that has stopped.
+      return update, RUN_INTERVAL_MS
+   end
+   fresh_sample = false
 
    if last_value >= threshold then
       n_bad, n_ok = n_bad + 1, 0

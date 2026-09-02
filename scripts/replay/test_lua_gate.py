@@ -148,10 +148,10 @@ def main():
 
     print("\n=== healthy 70 ms: releases, but only after RELEASE_N ===")
     g.H_setup(False, None)
-    feed(14)
-    check("still blocked at 14 ticks (<15)", g.H_auth()[0], "failed")
+    feed(11)
+    check("still blocked at 11 samples (<12)", g.H_auth()[0], "failed")
     feed(1)
-    check("released at 15 ticks (3.0 s)", g.H_auth()[0], "passed")
+    check("released at 12 samples (3.0 s at the 4 Hz feed)", g.H_auth()[0], "passed")
 
     print("\n=== cold start 13600 ms: blocks fast ===")
     g.H_setup(False, None)
@@ -170,7 +170,7 @@ def main():
     feed(2, value=669.0)
     check("669 ms blocks", g.H_auth()[0], "failed")
     check("and only after draining does it clear", g.H_auth()[0], "failed")
-    feed(15, value=70.0)
+    feed(12, value=70.0)
     check("clears after 3 s of good values", g.H_auth()[0], "passed")
 
     print("\n=== 9999 unknown sentinel from the companion ===")
@@ -225,6 +225,22 @@ def main():
     g.H_tick()
     check("disabling clears the block", g.H_auth()[0], "passed")
     g.H_set("ENABLE", 1)
+
+    print("\n=== one transient sample must NOT block (5 Hz poll vs 4 Hz feed) ===")
+    # On 2026-09-02 a single 212 ms cold-start sample blocked arming, because BLOCK_N counted
+    # loop iterations and the loop outruns the feed. The companion's interlock, which needs
+    # 0.5 s of sustained badness, never moved - that mismatch was the tell.
+    g.H_setup(False, None)
+    feed(20)
+    check("settled open", g.H_auth()[0], "passed")
+    g.H_push(frame("SLAMLAT", 212.0)); g.H_advance(200); g.H_tick()
+    g.H_advance(200); g.H_tick()          # poll again, no new message
+    g.H_advance(200); g.H_tick()
+    check("one sample polled 3x does not block", g.H_auth()[0], "passed")
+    g.H_push(frame("SLAMLAT", 212.0)); g.H_advance(200); g.H_tick()
+    check("two genuine samples do block", g.H_auth()[0], "failed")
+    feed(12)
+    check("releases after 12 good samples", g.H_auth()[0], "passed")
 
     print("\n=== param table key collision - the bug that shipped ===")
     # 82 was taken on the real airframe by one of four other scripts, and the original assert
