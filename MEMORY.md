@@ -13,7 +13,7 @@
 - [Hangar 737 inspection architecture](hangar_737_inspection.md) — THE target mission: autonomous cm-pose drone inspection of a 737 in a fixed hangar; **2026-08-31 RE-OPENED: LiDAR-ONLY GenZ-ICP now does 20Hz + sub-metre (median 0.35m) on the real hangar bags, so the July 'pure LIO fails' verdict is superseded.** Anchor likely still needed for decimetre→centimetre, but NOT to prevent catastrophic failure — a refinement layer, not a rescue. Re-scope before committing to surveyed fiducials
 - [BIEVR-LIO evaluation](bievr_lio_evaluation.md) — ethz-asl RSS2026 degenerate-geometry LIO, built native-arm64 on Orin NX (ROS1 Noetic Docker). **2026-07-11: on the hard 3rd_floor bag = 1.35cm return-to-origin (vs COIN-LIO ~3.8m) AND byte-identical across 8 multi-thread + 1 single-thread runs → fully deterministic, the OPPOSITE of EllipseLIO. Strong hangar candidate; may replace the EllipseLIO base.** BUT **2026-07-13: FAILS on the 12 REAL 737-hangar bags (`~/all_bag_files/`) — metre-to-km drift, 2 numerical divergences (863km, 362km) on PRISTINE data (no dropouts); true drift 5.9/10.6/11.1/298m on bags where drone provably returned to ~0.2m. 3rd_floor was EASY. Root cause: no degeneracy gating vs smooth-hangar degeneracy. Pure LIO NOT viable standalone in hangar → validates absolute-anchor architecture.** ⚠️ **SUPERSEDED 2026-08-31: that verdict was BIEVR-specific, not a property of the hangar — LiDAR-only GenZ-ICP gets sub-metre real-time on the same 12 bags — AND BIEVR itself reaches 0.33m once tuned (pixel_size 0.05→0.40, 32x). The July verdict was a RESOLUTION MISMATCH, not hangar geometry. See [[genz-icp-evaluation]].** Also built ICP return-to-origin GT tool (`scripts/icp_return_gt.py`, validated vs onboard EKF). Live/MAVROS/flight pending
 - [IMU Allan-variance calibration](imu_allan_variance_calibration.md) — 3h static Allan cal of Ouster OS1-64 IMU (2026-07-13): only EllipseLIO consumes it; hand-set config over-trusted IMU (accel 15x, gyro 2x); calibrated `os1_64_ouster_allan.yaml`; A/B on 3rd_floor = NULL (20% vs 30% runaway, n=10, noise) — runaways are threading/FP-order not IMU prior; keep cal anyway (accuracy-neutral)
-- [GenZ-ICP evaluation](genz_icp_evaluation.md) — GenZ-LIO unreleased. LiDAR-ONLY GenZ-ICP, after fixing broken upstream defaults (iters 100→5, voxel 0.3→0.5): 20Hz & 100% scan capture on all 12 hangar bags, sub-metre true drift on all 6 scorable (median 0.35m, 0 divergences). ⚠️ only 3/12 bags have unimpeached GT; earlier stock-config sweep RETRACTED. Deskew A/B = NULL (≤7mm) → skip IMU graft. ⚠️ head-to-head vs BIEVR RETRACTED (was tuned-vs-stock): tuned BIEVR matches it
+- [GenZ-ICP evaluation](genz_icp_evaluation.md) — GenZ-LIO unreleased. LiDAR-ONLY GenZ-ICP, after fixing broken upstream defaults (iters 100→5, voxel 0.3→0.5): 20Hz & 100% scan capture on all 12 hangar bags, sub-metre true drift on all 6 scorable (median 0.35m, 0 divergences). ⚠️ only 3/12 bags have unimpeached GT; earlier stock-config sweep RETRACTED. Deskew A/B = NULL (≤7mm) → skip IMU graft. ⚠️ head-to-head vs BIEVR RETRACTED (was tuned-vs-stock). ⚠️ hangar config does NOT transfer: 3.06m on 3rd_floor vs 0.0112m at voxel 0.3 — voxel_size is scene-dependent, iters=5 is not
 - [GenZ-ICP algorithm reference](genz_icp_algorithm_reference.md) — how the adaptive planar/non-planar weighting works (alpha, the identity-Hessian trick), code line refs, paper benchmarks, and why it fixes conditioning but not observability
 - [IRIS-LIO (COIN-LIO ⊕ EllipseLIO photometric fusion)](coinlio_ellipselio_photometric_fusion.md) — LiDAR-intensity photometric residual fused into EllipseLIO's IKFoM. v1 stable+neutral on apartment (photo_scale=1e-9). **KEY REFRAME (2026-06-22): on the hard 3rd_floor bag, UPSTREAM COIN-LIO is rock-stable (0/6 runaway, deterministic ~3.8m loop closure) where EllipseLIO-base is 17% runaway and the photometric graft is 67% → the instability is the EllipseLIO BASE estimator / the graft, NOT the intensity-fusion idea.** Decouple was functionally done but efficacy NEGATIVE. Branch feat/coinlio-photometric-fusion, container coinlio_fusion; new ROS1 harness slam-agent/coinlio_integration/
 
@@ -21,18 +21,39 @@
 
 ## Critical Lessons
 
-### ⭐ Spatial-resolution defaults are the #1 SLAM failure cause seen so far (2026-08-31)
+### ⭐ Spatial resolution is SCENE-DEPENDENT and is the #1 SLAM failure cause seen so far (2026-08-31)
 **See:** `genz_icp_evaluation.md`, `bievr_lio_evaluation.md`
-- **Confirmed on TWO unrelated estimators on the same hangar data.** GenZ-ICP (LiDAR-only ICP): `voxel_size 0.3->0.5` + `max_num_iterations 100->5` gave 15.35m -> 0.21m AND 6->20 Hz. BIEVR-LIO (bump-image LIO with IMU): `map/pixel_size_m 0.05->0.40` gave 10.639m -> 0.334m AND ~0.67x -> 1.2-2.5x realtime. **Both: accuracy and speed improved TOGETHER, and COARSER always won.**
-- WHY (partial): fine cells against sparse returns (our bags are 512x20) are under-populated, so normals/gradients are ill-conditioned; coarser gives fewer but better-populated neighborhoods. For iteration caps specifically, in a near-singular scene extra Gauss-Newton steps walk ALONG the ill-conditioned direction — capping is early-stopping regularization. ⚠️ Incomplete: BIEVR's pixel response is non-monotonic and REPRODUCIBLE (0.20->0.369, 0.25->1.158, 0.30->0.361), so under-population alone doesn't explain it.
-- **Two failure modes that look like divergence but are config:** `pixel_size 0.025` OOM-KILLS an 8GB Orin; `downsample_resolution 0.05` (MORE points) DIVERGED to 4407m.
-- **RULES: (1) never judge an estimator at stock — sweep spatial resolution FIRST; (2) never compare a tuned estimator against another's stock defaults (this invalidated a whole head-to-head); (3) always report scan-capture % and wall-clock throughput, since a starved estimator's drift looks exactly like a geometry problem.**
 
-### Upstream SLAM defaults can be BROKEN for embedded real-time (2026-08-31)
-**See:** `genz_icp_evaluation.md`
-- GenZ-ICP stock `max_num_iterations: 100` + `voxel_size: 0.3` gave 6 Hz / 30% scan capture / **15.35m** drift. Setting iters=5 + voxel=0.5 gave 20 Hz / **100% capture** / **0.21m** — accuracy and speed improved TOGETHER, on the same bag and binary.
-- WHY: in a near-singular (degenerate) scene, extra Gauss-Newton iterations walk ALONG the ill-conditioned direction instead of converging → capping iterations is **early-stopping regularization**, not a speed/accuracy tradeoff. Coarser voxels give fewer but better-populated neighborhoods → cheaper AND better-conditioned normals.
-- Research defaults are tuned for offline benchmark accuracy, not an embedded budget. **ALWAYS sweep max_num_iterations + voxel_size before judging any KISS-ICP-family estimator, and ALWAYS report scan-capture % — a non-real-time estimator silently starves itself and the drift looks like a geometry problem.**
+**One spatial-resolution parameter per estimator carries a 100-225x accuracy swing, and its
+optimum FLIPS between scenes. Confirmed on TWO unrelated architectures, both directions.**
+
+| estimator | the parameter | hangar (sparse/open) | 3rd_floor (dense/indoor) |
+|---|---|---|---|
+| BIEVR-LIO (bump-image LIO, uses IMU) | `map/pixel_size_m` | **0.40** -> 0.334 m (0.05 gives 10.639) | **0.05** -> 0.0135 m (0.40 gives 1.4004) |
+| GenZ-ICP (LiDAR-only ICP) | `voxel_size` | **0.5** -> 0.12-0.34 m | **0.3** -> 0.0112 m (0.5 gives 3.06) |
+
+- ⚠️ **"COARSER ALWAYS WINS" IS WRONG — that was an earlier same-day conclusion from hangar
+  data only, now RETRACTED.** Optimal resolution tracks **RETURN DENSITY**: coarse for sparse /
+  distant returns (big open hangar, 512x20 mode), fine for dense / close ones (indoor). Getting
+  it backwards costs 2 orders of magnitude EITHER WAY (BIEVR 104x, GenZ 225x).
+- WHY: fine cells against sparse returns are under-populated -> ill-conditioned normals /
+  gradients. Fine cells against DENSE returns are well-populated and resolve real structure that
+  coarsening destroys. Same parameter, opposite optimum, because the DATA differs.
+- **The OTHER tuning is scene-AGNOSTIC and a free win.** GenZ `max_num_iterations: 100 -> 5`
+  helps in BOTH regimes (isolated 2026-08-31: at voxel 0.3, iters 5 gives 0.0112 m @ 18.5 Hz vs
+  stock 0.0136 m @ 7.7 Hz — MORE accurate AND 2.4x faster). Capping is not degenerate-scene-only
+  regularization. **Recipe: iters=5 everywhere; sweep voxel/pixel per scene.**
+- **Two config failures that LOOK like divergence:** `pixel_size 0.025` OOM-kills an 8GB Orin;
+  `downsample_resolution 0.05` (MORE points) diverged to 4407 m.
+- **OPERATIONAL HAZARD for [[hangar-737-inspection]]:** a hangar-tuned drone entering structured
+  space (near fuselage, doorway, corridor) degrades ~100x SILENTLY — nothing in the output flags
+  it. Since it is a single scalar, and GenZ already exposes alpha as a scene-structure signal,
+  scene-adaptive resolution scheduling is worth considering.
+- **RULES: (1) never judge an estimator at stock — sweep spatial resolution FIRST, and sweep it
+  in BOTH directions; (2) never compare a tuned estimator against another's stock defaults (this
+  invalidated a whole head-to-head); (3) re-sweep per environment, never assume a config
+  transfers; (4) always report scan-capture % and wall-clock throughput — a starved estimator's
+  drift looks exactly like a geometry problem.**
 
 ### Topic Configuration (2026-02-07)
 SLAM config hardcoded to `/os_cloud_node/points` but Ouster publishes `/ouster/points`. Silent failure. Always verify topics FIRST: `rostopic list | grep ouster`

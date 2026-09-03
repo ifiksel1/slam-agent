@@ -101,6 +101,27 @@ max_step r=+0.47) are likewise confounded — they largely measured starvation, 
 structure. Lesson: for a non-real-time estimator, replay rate and solver defaults are
 first-class experimental variables; ALWAYS report scan-capture %.
 
+## ⭐ The hangar config does NOT transfer indoors — and WHICH parameter is at fault (2026-08-31)
+
+`hangar_rt.yaml` on 3rd_floor, rate 1.0, 100% capture: **3.0624 m** — vs ~0.0136 m from the
+indoor config. **225x worse.** So GenZ is NOT scene-robust; an earlier guess that its flat
+parameter response might make it so was WRONG.
+
+2x2 isolation on 3rd_floor (rate 1.0, capture % in brackets — the `v0.5/it100` corner starved
+at 38% and is DISCARDED as uninterpretable):
+
+| | iters 100 | iters 5 |
+|---|---|---|
+| voxel 0.3 | 0.0136 m (@rate 0.5, 77%) | **0.0112 m [93%] @ 18.5 Hz** |
+| voxel 0.5 | *starved, discarded* | 3.0624 m [100%] |
+
+**Verdict: `voxel_size` carries ALL the scene dependence; `max_num_iterations` is scene-agnostic.**
+Holding iters=5 and varying only voxel: 0.3 -> 0.0112 m, 0.5 -> 3.06 m, both well-captured.
+**`voxel 0.3 + iters 5` is the new best indoor config: 0.0112 m at 18.5 Hz — MORE accurate than
+stock AND 2.4x faster** (stock indoor.yaml can only manage 7.7 Hz and needs half-rate replay).
+**Recipe: `max_num_iterations: 5` everywhere; sweep `voxel_size` per scene (0.3 indoor / 0.5
+hangar).** Same structure as BIEVR, where `pixel_size_m` alone carries the scene dependence.
+
 ## Deskew A/B = NULL, and what it says about adding an IMU (2026-08-31)
 
 Our bags DO carry a per-point `t` field (`x y z intensity t reflectivity ring ambient range`)
