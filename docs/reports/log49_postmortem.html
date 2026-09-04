@@ -1,0 +1,1025 @@
+<title>Log 49 Postmortem</title>
+<style>
+  /* ── tokens: light is the base set; dark redefines the same names ────────── */
+  :root {
+    color-scheme: light;
+    --ground:      #ECEEEF;
+    --surface:     #FBFCFC;
+    --surface-sunk:#E4E8E9;
+    --ink:         #14191B;
+    --ink-2:       #394548;
+    --muted:       #5C6669;
+    --border:      #D6DBDC;
+    --rule:        #B9C1C3;
+    /* data hues carry the whole accent budget: blue = measured, orange = estimated */
+    --measured:    #2a78d6;
+    --estimated:   #eb6834;
+    --measured-wash:  rgba(42,120,214,.10);
+    --estimated-wash: rgba(235,104,52,.12);
+
+    --serif: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground:      #0E1214;
+      --surface:     #151A1C;
+      --surface-sunk:#101617;
+      --ink:         #E6EBEC;
+      --ink-2:       #B7C2C4;
+      --muted:       #8D999C;
+      --border:      #262D30;
+      --rule:        #394245;
+      --measured:    #3987e5;
+      --estimated:   #d95926;
+      --measured-wash:  rgba(57,135,229,.14);
+      --estimated-wash: rgba(217,89,38,.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground:      #0E1214;
+    --surface:     #151A1C;
+    --surface-sunk:#101617;
+    --ink:         #E6EBEC;
+    --ink-2:       #B7C2C4;
+    --muted:       #8D999C;
+    --border:      #262D30;
+    --rule:        #394245;
+    --measured:    #3987e5;
+    --estimated:   #d95926;
+    --measured-wash:  rgba(57,135,229,.14);
+    --estimated-wash: rgba(217,89,38,.16);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 72px) clamp(18px, 4vw, 48px) 96px;
+  }
+
+  /* ── masthead ───────────────────────────────────────────────────────────── */
+  .masthead { border-bottom: 2px solid var(--ink); padding-bottom: 20px; }
+  .docline {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 20px;
+    margin-bottom: 22px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(30px, 5.4vw, 50px);
+    line-height: 1.1;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0 0 14px;
+  }
+  .standfirst {
+    font-family: var(--serif);
+    font-size: clamp(17px, 2.1vw, 20px);
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  /* ── verdict ────────────────────────────────────────────────────────────── */
+  .verdict {
+    margin-top: 34px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--estimated);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .verdict p { margin: 0; max-width: 72ch; }
+  .verdict strong { font-weight: 650; }
+
+  .metrics {
+    margin-top: 22px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+  }
+  .metric { background: var(--surface); padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+  .metric .val {
+    font-family: var(--mono);
+    font-size: clamp(22px, 3vw, 28px);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em;
+    line-height: 1.1;
+  }
+  .metric .val.hot { color: var(--estimated); }
+  .metric .val.cool { color: var(--measured); }
+  .metric .cap {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  /* ── sections ───────────────────────────────────────────────────────────── */
+  section { margin-top: 64px; }
+  .shead { display: flex; gap: 16px; align-items: baseline; border-bottom: 1px solid var(--rule); padding-bottom: 10px; margin-bottom: 26px; }
+  .snum {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    padding-top: 4px;
+    flex: none;
+  }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(22px, 3.2vw, 30px);
+    line-height: 1.2;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h3 {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    margin: 34px 0 12px;
+  }
+  p { max-width: 68ch; margin: 0 0 16px; }
+  a { color: var(--measured); text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--measured); outline-offset: 2px; }
+  code, .m { font-family: var(--mono); font-size: .88em; }
+  code { background: var(--surface-sunk); padding: 1px 5px; border-radius: 2px; }
+
+  pre.src { font-family: var(--mono); font-size: 13px; background: var(--surface);
+    border: 1px solid var(--border); border-left: 3px solid var(--measured);
+    padding: 14px 16px; overflow-x: auto; margin: 0 0 18px; line-height: 1.5; }
+
+  ul.notes { max-width: 68ch; margin: 0 0 16px; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  ul.notes li { padding-left: 20px; position: relative; }
+  ul.notes li::before { content: ""; position: absolute; left: 4px; top: .68em; width: 6px; height: 1px; background: var(--rule); }
+
+  /* ── tables ─────────────────────────────────────────────────────────────── */
+  .scroller { overflow-x: auto; border: 1px solid var(--border); background: var(--surface); margin-bottom: 18px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 560px; }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 16px 0;
+  }
+  th, td { text-align: left; padding: 9px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.t { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+  tr.mark td { background: var(--estimated-wash); }
+  tr.mark td.t { color: var(--ink); }
+  .cool { color: var(--measured); }
+  .hot { color: var(--estimated); }
+
+  /* ── figures ────────────────────────────────────────────────────────────── */
+  figure { margin: 0 0 22px; border: 1px solid var(--border); background: var(--surface); }
+  .figtop { padding: 16px 18px 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 18px; align-items: baseline; }
+  .figtitle { font-size: 15px; font-weight: 600; }
+  .legend { display: flex; gap: 16px; font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  .plot { padding: 4px 8px 8px; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .plot svg text { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  figcaption { padding: 0 18px 16px; font-size: 13.5px; color: var(--muted); max-width: 76ch; }
+
+  .tip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--ink);
+    color: var(--ground);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    padding: 7px 10px;
+    border-radius: 3px;
+    white-space: pre;
+    opacity: 0;
+    transition: opacity .1s;
+    z-index: 20;
+  }
+  .tip.on { opacity: 1; }
+
+  /* ── causal chain ───────────────────────────────────────────────────────── */
+  .chain { display: flex; flex-direction: column; gap: 0; margin: 8px 0 22px; max-width: 74ch; }
+  .link { display: grid; grid-template-columns: 30px 1fr; gap: 16px; }
+  .link .rail { position: relative; }
+  .link .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--estimated); margin: 8px auto 0; position: relative; z-index: 1; }
+  .link .line { position: absolute; left: 50%; top: 8px; bottom: -8px; width: 1px; background: var(--rule); transform: translateX(-.5px); }
+  .link:last-child .line { display: none; }
+  .link .body { padding-bottom: 22px; }
+  .link .lt { font-weight: 600; margin-bottom: 2px; }
+  .link .ld { color: var(--ink-2); font-size: 14.5px; }
+
+  /* ── ruled-out grid ─────────────────────────────────────────────────────── */
+  .cleared { display: grid; grid-template-columns: repeat(auto-fit, minmax(288px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); }
+  .cleared > div { background: var(--surface); padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+  .cleared .tag { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--measured); }
+  .cleared .why { font-size: 14px; color: var(--ink-2); }
+
+  /* ── recommendations ────────────────────────────────────────────────────── */
+  ol.recs { counter-reset: r; list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 1px; background: var(--border); border: 1px solid var(--border); }
+  ol.recs li { counter-increment: r; background: var(--surface); padding: 18px 20px 18px 58px; position: relative; }
+  ol.recs li::before {
+    content: counter(r);
+    position: absolute; left: 20px; top: 18px;
+    font-family: var(--mono); font-size: 13px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  ol.recs .rt { font-weight: 600; margin-bottom: 4px; }
+  ol.recs .rd { color: var(--ink-2); font-size: 14.5px; max-width: 74ch; }
+  ol.recs .where { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
+
+  footer { margin-top: 72px; border-top: 1px solid var(--rule); padding-top: 20px; font-size: 13.5px; color: var(--muted); }
+  footer p { max-width: 76ch; }
+
+
+  /* ── print / PDF ─────────────────────────────────────────────────────────── */
+  @media print {
+    :root {
+      --ground: #ffffff; --surface: #ffffff; --surface-sunk: #f2f4f4;
+      --ink: #14191B; --ink-2: #394548; --muted: #55605f;
+      --border: #c9d0d1; --rule: #aab2b3;
+    }
+    body { background: #fff; font-size: 10.5pt; }
+    .page { max-width: none; padding: 0; }
+    section { margin-top: 30pt; page-break-inside: auto; }
+    .shead { page-break-after: avoid; }
+    h1 { font-size: 26pt; }
+    h2 { font-size: 15pt; }
+    figure, .metrics, .cleared, .verdict { page-break-inside: avoid; }
+    .link, ol.recs li, tr { page-break-inside: avoid; }
+    thead { display: table-header-group; }
+    .scroller { overflow: visible; }
+    table { min-width: 0; font-size: 9pt; }
+    .tip, .so { display: none; }
+    figcaption { font-size: 9pt; }
+    a { text-decoration: none; }
+    @page { margin: 16mm 14mm; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="docline">
+      <span>Incident review</span>
+      <span>Dataflash log 49</span>
+      <span>25 Aug 2026</span>
+      <span>ArduCopter 4.6.3 · mRoPixracerPro · QUAD/X</span>
+    </div>
+    <h1>Hard landing and uncommanded re&#8209;liftoff under LAND mode</h1>
+    <p class="standfirst">A GPS-denied quadcopter running FAST-LIO external navigation entered LAND on an EKF failsafe, struck the ground at 3.7&nbsp;g, and then climbed back to 0.84&nbsp;m before the pilot disarmed. Both events trace to a single measurable cause.</p>
+  </header>
+
+  <div class="verdict">
+    <p><strong>FAST-LIO's odometry output latency grew from 82&nbsp;ms to 669&nbsp;ms during the flight.</strong> ArduPilot was told the vision measurement was 75&nbsp;ms old (<code>VISO_DELAY_MS</code>) and structurally cannot compensate for more than 250&nbsp;ms. The EKF therefore fused every vision fix at the wrong point in its time history.</p>
+    <p>The vehicle descended at 1.1&nbsp;m/s while its own estimate showed 0.28&nbsp;m/s, so the controller never arrested the sink. After impact, the late height estimate collapsed below the still-descending LAND target, and the position controller did the only thing it can with a below-target altitude error: it added throttle.</p>
+    <p>The lidar, the optical flow sensor, the rangefinders and the Lua scripts were all healthy and are ruled out. <strong>No component reported a fault at any point.</strong></p>
+    <p>A sweep of all 22 recorded flights found this was the only one to diverge. The stack normally runs at ~70&nbsp;ms with margin to spare and lost it to a load threshold rather than a regression &mdash; which is why nothing looked wrong beforehand.</p>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><span class="val hot">669 ms</span><span class="cap">Peak vision latency<br>0.1 s before impact</span></div>
+    <div class="metric"><span class="val">250 ms</span><span class="cap">Maximum ArduPilot<br>can compensate</span></div>
+    <div class="metric"><span class="val">75 ms</span><span class="cap">Latency the FC<br>was configured for</span></div>
+    <div class="metric"><span class="val hot">1.07 m</span><span class="cap">Altitude error<br>at ground contact</span></div>
+    <div class="metric"><span class="val">3.7 g</span><span class="cap">Vertical acceleration<br>at impact</span></div>
+    <div class="metric"><span class="val">1 of 22</span><span class="cap">Flights that diverged<br>9 Jul &ndash; 25 Aug</span></div>
+  </div>
+
+  <!-- ── 01 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">01</span><h2>What happened</h2></div>
+
+    <p>The vehicle was hovering indoors in LOITER at roughly 1&nbsp;m. All navigation — position, velocity, height and yaw — came from FAST-LIO over MAVROS; there was no GPS, and neither the barometer nor the two downward rangefinders were fused into the state estimate.</p>
+
+    <p>Times below are relative to takeoff. Raw log timestamps are included so every row can be traced back to the file.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Sequence of events — log 49</caption>
+        <thead>
+          <tr>
+            <th class="num">T+</th>
+            <th class="num">Log&nbsp;t</th>
+            <th>Event</th>
+            <th class="num">Vision latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="t">0.0 s</td><td class="t">2103.3</td><td>Takeoff. Latency steady at 82–100 ms, matching the configured 75 ms.</td><td class="num">~85 ms</td></tr>
+          <tr><td class="t">+7.7 s</td><td class="t">2111.0</td><td>Latency passes 200 ms and is climbing at ~74 ms per second. Nothing reports a fault.</td><td class="num">205 ms</td></tr>
+          <tr><td class="t">+10.7 s</td><td class="t">2114.0</td><td>EKF position innovation variance first exceeds <code>FS_EKF_THRESH</code> (0.8). Position estimate begins oscillating ±2–3 m.</td><td class="num">407 ms</td></tr>
+          <tr><td class="t">+13.4 s</td><td class="t">2116.7</td><td>The second variance vote crosses: <code>XKF4.SM</code>. Despite the name it is not the magnetometer &mdash; with <code>EK3_SRC1_YAW=6</code> that field carries the SLAM <em>yaw</em> innovation.</td><td class="num">~560 ms</td></tr>
+          <tr class="mark"><td class="t">+18.1 s</td><td class="t">2121.4</td><td><strong>EKF variance failsafe fires.</strong> Two of {mag, vel, pos} have been over threshold together for a full second &mdash; but the two are <code>SP</code> and <code>SM</code>, both fed by FAST-LIO. Mode changes to LAND, reason 6 (EKF_FAILSAFE). Four-second descent pause begins.</td><td class="num">~570 ms</td></tr>
+          <tr><td class="t">+21.3 s</td><td class="t">2124.6</td><td>Vehicle has <em>climbed</em> to 2.36 m during the pause, chasing the oscillating estimate.</td><td class="num">601 ms</td></tr>
+          <tr><td class="t">+22.1 s</td><td class="t">2125.4</td><td>Pause expires exactly on schedule. Descent target begins ramping down at 0.5 m/s (<code>LAND_SPEED</code>).</td><td class="num">585 ms</td></tr>
+          <tr class="mark"><td class="t">+22.9 s</td><td class="t">2126.2</td><td><strong>Ground contact at 36.8 m/s² (3.7 g).</strong> Rangefinder 0.11 m; EKF altitude still reads 1.18 m.</td><td class="num">669 ms</td></tr>
+          <tr><td class="t">+23.7 s</td><td class="t">2127.0</td><td>On the ground, motionless. The late height estimate collapses 1.04 → 0.00 m in one second.</td><td class="num">556 ms</td></tr>
+          <tr class="mark"><td class="t">+24.3 s</td><td class="t">2127.6</td><td><strong>Uncommanded liftoff.</strong> Estimate now 0.65 m below the LAND target; controller commands climb.</td><td class="num">~490 ms</td></tr>
+          <tr><td class="t">+25.3 s</td><td class="t">2128.6</td><td>Back to 0.84 m AGL and still rising. Land detector has not latched.</td><td class="num">~455 ms</td></tr>
+          <tr><td class="t">+25.9 s</td><td class="t">2129.2</td><td>Pilot disarms on the aux switch (<code>RC6_OPTION=153</code>). Flight ends.</td><td class="num">443 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── 02 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">02</span><h2>Root cause: the estimate ran late</h2></div>
+
+    <p>Measured as the interval between a scan's own timestamp and the moment its pose was published, FAST-LIO's output latency grows linearly through the flight and then saturates. The two controls in the same recording rule out any measurement artefact: <code>/lidar_points</code> holds a flat 52 ms, and <code>/mavros/local_position/pose</code> — written by the same recorder on the same machine — sits at 1.2 ms.</p>
+
+    <figure>
+      <div class="figtop">
+        <span class="figtitle">FAST-LIO publish latency</span>
+        <span class="legend"><span>log 49 · 25 Aug 2026</span></span>
+      </div>
+      <div class="plot"><svg id="c1" role="img" aria-label="Line chart of FAST-LIO publish latency against flight time, rising from about 85 milliseconds before takeoff to a peak of 669 milliseconds at ground impact."></svg></div>
+      <figcaption>Latency by flight time, from 6 s before takeoff. The dashed rules mark the 75 ms the flight controller was configured for and the 250 ms ceiling above which ArduPilot cannot compensate at all. <span class="so">Hover for values.</span></figcaption>
+    </figure>
+
+    <p>The cause is a small, sustained real-time overrun rather than a crash or a stall. Scan load is roughly 115,000 points at 20&nbsp;Hz. As the vehicle climbed and the map densified, matched points rose from ~4,900 to ~7,200 and solve time from 25 ms to 37 ms — leaving no margin inside the 50 ms budget. The pipeline ended up running about 8% over, so the backlog accumulated at ~74 ms per second until the input queue saturated near 0.6 s.</p>
+
+    <h3>Why no amount of tuning fixes this on the flight controller</h3>
+    <p><code>VISO_DELAY_MS</code> has a documented range of 0–250 ms, and <code>AP_NavEKF3_core.cpp</code> hard-caps what it will honour:</p>
+    <pre class="src">maxTimeDelay_ms = MAX(maxTimeDelay_ms, MIN(visual_odom-&gt;get_delay_ms(), 250));</pre>
+    <p>Against an actual 332 ms mean and 669 ms peak, the EKF was fusing each measurement at the wrong point in its time history no matter how the parameter was set. This has to be fixed on the companion computer.</p>
+
+    <h3>This was not the normal state &mdash; 22 flights compared</h3>
+    <p>Every FAST-LIO recording on the drive was measured the same way. The stack is normally healthy: <strong>21 of 22 flights hold 67&ndash;78 ms from start to finish</strong>, with peaks under 90 ms, across runs up to two minutes. The crash flight is the only in-flight divergence in six weeks.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>FAST-LIO publish latency across every recorded flight</caption>
+        <thead><tr><th>Period</th><th class="num">Flights</th><th class="num">Start &rarr; end</th><th class="num">Max</th><th class="num">Matched points</th></tr></thead>
+        <tbody>
+          <tr><td>11&ndash;14 Jul</td><td class="num">10</td><td class="num">67&ndash;73 &rarr; 69&ndash;74 ms</td><td class="num">84&ndash;125 ms</td><td class="num">379 &ndash; 2,479</td></tr>
+          <tr><td>19&ndash;25 Aug, before the crash</td><td class="num">5</td><td class="num">71&ndash;78 &rarr; 69&ndash;78 ms</td><td class="num">85&ndash;101 ms</td><td class="num">301 &ndash; 5,213</td></tr>
+          <tr class="mark"><td><strong>25 Aug, crash flight</strong></td><td class="num">1</td><td class="num"><strong>83 &rarr; 453 ms</strong></td><td class="num"><strong>669 ms</strong></td><td class="num"><strong>4,709 &ndash; 7,271</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Points per scan is <strong>identical at 115,456 in every flight</strong> &mdash; the input load never varied. What varies is the match count, and it separates the flights cleanly: everything up to 5,213 matched stayed flat, including several August flights; the crash flight ran 4,709&ndash;7,271 and diverged. The pipeline has headroom to roughly 5,200 matched points and loses it before 7,300. That is a load threshold, not decay over calendar time.</p>
+
+    <p>One recording quantifies the headroom exactly. <span class="m">08_25_20_44_47</span> opens with a 13.6-second backlog draining linearly to 78 ms over 9.1 s; working back from the slope, FAST-LIO was processing at <strong>~2.5&times; realtime</strong> at that map load. The crash flight had it at ~0.93&times;. Effective throughput swings by roughly 2.7&times; with match count &mdash; which is why 21 flights look perfect and one falls apart.</p>
+
+    <p>Three flights on 13 July already showed transient spikes to 206&ndash;313 ms against a flat 72 ms baseline. The margin was being touched six weeks before it was lost.</p>
+
+    <h3>A second, separate hazard: cold start</h3>
+    <p>That 13.6-second backlog is a startup transient. For the first ~9 seconds after FAST-LIO begins publishing, its output was up to <strong>13.6 seconds stale</strong> &mdash; arriving punctually at 20 Hz, so nothing on the flight controller could detect it. Arming inside that window would put the vehicle in the air navigating on 13-second-old position. It is a different failure mode from the one that caused the crash, and unlike that one it is entirely preventable before takeoff.</p>
+
+    <h3>Confirmed against the companion's own recording</h3>
+    <p>The flight controller log and the FAST-LIO bag are independent recordings on independent
+    clocks, so the ordering above is only an argument until they are put on one timeline. Aligning
+    them by cross-correlating SLAM north against the <code>VISP</code> records in the flight
+    controller log gives an <strong>RMS mismatch of 3&nbsp;mm across 633 samples</strong> &mdash; the
+    aircraft received precisely what FAST-LIO published. Nothing is corrupted in transport. Only
+    late.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Companion and aircraft on one clock</caption>
+        <thead>
+          <tr>
+            <th class="num">T+</th>
+            <th class="num">Latency</th>
+            <th class="num">Matched</th>
+            <th class="num">eig<sub>min</sub></th>
+            <th class="num">XKF4.SP</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="t">-5 s</td><td class="num">82</td><td class="num">4,918</td><td class="num">1.02</td><td class="num">0.01</td><td></td></tr>
+          <tr><td class="t">+0 s</td><td class="num">84</td><td class="num">5,034</td><td class="num">1.11</td><td class="num">0.02</td><td>takeoff</td></tr>
+          <tr><td class="t">+3 s</td><td class="num">86</td><td class="num">5,188</td><td class="num">1.22</td><td class="num">0.03</td><td></td></tr>
+          <tr><td class="t">+5 s</td><td class="num">95</td><td class="num">5,720</td><td class="num">1.30</td><td class="num">0.04</td><td></td></tr>
+          <tr class="mark"><td class="t">+6 s</td><td class="num">106</td><td class="num">6,315</td><td class="num">1.53</td><td class="num">0.04</td><td>latency leaves its baseline</td></tr>
+          <tr><td class="t">+7 s</td><td class="num">175</td><td class="num">6,626</td><td class="num">1.68</td><td class="num">0.07</td><td></td></tr>
+          <tr class="mark"><td class="t">+8 s</td><td class="num">210</td><td class="num">6,412</td><td class="num">1.60</td><td class="num">0.05</td><td>past 200 ms</td></tr>
+          <tr class="mark"><td class="t">+9 s</td><td class="num">244</td><td class="num">6,393</td><td class="num">1.56</td><td class="num">0.17</td><td>FC estimate departs baseline</td></tr>
+          <tr><td class="t">+10 s</td><td class="num">310</td><td class="num">6,726</td><td class="num">1.55</td><td class="num">0.67</td><td></td></tr>
+          <tr class="mark"><td class="t">+11 s</td><td class="num">403</td><td class="num">7,044</td><td class="num">1.46</td><td class="num">1.21</td><td>SP crosses FS_EKF_THRESH</td></tr>
+          <tr><td class="t">+13 s</td><td class="num">561</td><td class="num">5,954</td><td class="num">1.34</td><td class="num">3.07</td><td></td></tr>
+          <tr class="mark"><td class="t">+18 s</td><td class="num">569</td><td class="num">5,044</td><td class="num">1.30</td><td class="num">4.26</td><td>EKF variance failsafe &rarr; LAND</td></tr>
+          <tr><td class="t">+20 s</td><td class="num">627</td><td class="num">5,925</td><td class="num">1.42</td><td class="num">19.12</td><td>peak</td></tr>
+          <tr class="mark"><td class="t">+22 s</td><td class="num">585</td><td class="num">5,704</td><td class="num">1.40</td><td class="num">1.13</td><td>ground impact, 3.7 g</td></tr>
+          <tr><td class="t">+24 s</td><td class="num">533</td><td class="num">5,050</td><td class="num">1.29</td><td class="num">1.15</td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:-6px"><span class="m" style="font-size:12px">Latency in ms and match count from the bag; eig<sub>min</sub> in millions; SP is the flight controller's own position innovation variance. One-second medians.</span></p>
+
+    <p><strong>The companion moves first, by about three seconds.</strong> Latency is flat at
+    82&ndash;84 ms from T&minus;5 through T+3, lifts at T+5, and is already at 210 ms by T+8. The
+    aircraft's <code>XKF4.SP</code> does not budge until T+9. The cause is visible on the companion
+    three seconds before the consequence is visible on the vehicle.</p>
+
+    <p><strong>The trigger is load, and it is in the table.</strong> Matched points climb
+    4,918 &rarr; 6,626 across T&minus;5 to T+7, and latency departs at exactly the point that count
+    crosses roughly 6,000. The climb after takeoff brought more of the room into view, the match
+    count rose about 30%, and the pipeline went over its 50 ms budget.</p>
+
+    <p><strong>And eig<sub>min</sub> never degrades &mdash; it improves</strong>, 1.02M &rarr;
+    1.68M, as the map densifies. Both of the detector's original dimensions were moving in the
+    direction it reads as <em>healthier</em> while the aircraft was losing its position estimate.
+    That is the blind spot, measured on the flight where it mattered.</p>
+
+    <p>Two smaller things the joint view exposes. From T+13 the latency plateaus at 530&ndash;640 ms
+    while SP keeps compounding to 19 &mdash; the companion's problem stopped worsening, the
+    aircraft's did not, because error accumulates against a stale reference. And after the impact
+    latency is still 585&ndash;635 ms: <strong>it never drained</strong>, which is the evidence
+    behind escalating to a restart rather than waiting indefinitely on the optical-flow failover.</p>
+
+    <p>One caveat on the match count: it is noisy second to second (5,044&ndash;7,044 across this
+    run), so &ldquo;crossed about 6,000&rdquo; is a correlation within one flight, not a calibrated
+    trigger &mdash; the fleet sweep put the safe ceiling nearer 5,200. Latency remains the thing to
+    trigger on. Match count is the explanation, not the detector.</p>
+
+    <h3>The failsafe needed two witnesses and got one twice</h3>
+
+    <p><code>ekf_check</code> declares a variance failsafe only when <strong>two</strong> of
+    {mag, velocity, position} exceed <code>FS_EKF_THRESH</code> together for a full second. The
+    rule exists to demand corroboration &mdash; one sensor going bad should not ground an aircraft.
+    In log 49 the pair was <code>SP</code> and <code>SM</code>, and both are FAST-LIO.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Innovation test ratios &mdash; which votes crossed, and when</caption>
+        <thead><tr><th>XKF4</th><th>Actually fed by</th><th class="num">First &ge; 0.80</th><th class="num">Peak</th><th>Part in the failsafe</th></tr></thead>
+        <tbody>
+          <tr class="mark"><td class="num">SP</td><td>ExternalNav position</td><td class="num">T+10.7 s</td><td class="num">20.1</td><td>First vote</td></tr>
+          <tr class="mark"><td class="num">SM</td><td>ExternalNav <strong>yaw</strong> &mdash; not the compass</td><td class="num">T+13.4 s</td><td class="num">1.44</td><td>Second vote, same sensor</td></tr>
+          <tr><td class="num">SV</td><td>ExternalNav velocity</td><td class="num">T+17.1 s</td><td class="num">2.5</td><td>Read 0.34 at the declaration; never sustained until after LAND</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><code>XKF3.IMX/IMY/IMZ</code> are identically zero for the whole flight &mdash; the compass is
+    never fused, because <code>EK3_SRC1_YAW=6</code> takes yaw from external nav. Yet <code>SM</code>
+    still climbs to 1.44. The reason is one line in <code>AP_NavEKF3_Outputs.cpp:499</code>:</p>
+
+    <pre class="src">magVar.x = sqrtF(MAX(magTestRatio.x, yawTestRatio));</pre>
+
+    <p>With <code>magTestRatio</code> pinned at zero, <code>SM</code> <em>is</em>
+    <code>yawTestRatio</code>: the ExternalNav yaw innovation. The field that reads as a magnetometer
+    check is a second look at the same failing sensor, and the EKF yaw is visibly dragging behind the
+    vision yaw through the same window &mdash; 23.4&deg; against 27.8&deg; at T+11.</p>
+
+    <p><strong>So the two-of-three rule was satisfied by one witness voting twice.</strong> That is
+    not a defect in <code>ekf_check</code>; it is what happens when a single sensor is assigned
+    <code>POSXY</code>, <code>POSZ</code>, <code>VELXY</code>, <code>VELZ</code> and <code>YAW</code>
+    at once. The corroboration the check is built around does not exist on this vehicle, and the
+    failsafe therefore fires on evidence weaker than its design assumes &mdash; which here meant LAND.</p>
+
+    <p><strong>Velocity was the one channel that stayed clean</strong>, which is the opposite of what
+    the latency mechanism first suggests. Position error under lag grows as
+    <span class="m">v&middot;&Delta;t</span>; velocity error grows as
+    <span class="m">a&middot;&Delta;t</span>. The manoeuvre was a sustained 3.3 m/s translation at
+    near-constant velocity, so the position term dominated while the velocity term stayed small
+    &mdash; a lagged velocity of a constant-velocity motion is still correct; a lagged position never
+    is. The arithmetic closes: at T+12.9 the EKF sat 0.66 m ahead of the vision position, against
+    287 ms of uncompensated lag &times; 3.3 m/s &asymp; 0.95 m. <code>SP</code> is that offset and
+    little else.</p>
+  </section>
+
+  <!-- ── 03 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">03</span><h2>How a late estimate became a bounce</h2></div>
+
+    <p>The flight controller had two sources of height information and used only one of them. The rangefinder was accurate throughout and invisible to the state estimator.</p>
+
+    <figure>
+      <div class="figtop">
+        <span class="figtitle">Height: measured versus believed</span>
+        <span class="legend">
+          <span><i class="swatch" style="background:var(--measured)"></i>rangefinder</span>
+          <span><i class="swatch" style="background:var(--estimated)"></i>EKF estimate</span>
+        </span>
+      </div>
+      <div class="plot"><svg id="c2" role="img" aria-label="Two-series line chart comparing rangefinder height with the EKF altitude estimate during the landing. The estimate lags the true height, still reading 1.18 metres at ground contact, then collapses below zero while the vehicle sits on the ground."></svg></div>
+      <figcaption>The traces separate from T+21 s onward. At ground contact the estimate is 1.07 m high; one second later, with the vehicle motionless on the ground, it has fallen below the descending LAND target. <span class="so">Hover for values.</span></figcaption>
+    </figure>
+
+    <div class="chain">
+      <div class="link"><div class="rail"><div class="line"></div><div class="dot"></div></div><div class="body">
+        <div class="lt">The descent was four times faster than the estimate showed</div>
+        <div class="ld">Over T+21.3 → T+22.9 the rangefinder fell 2.45 → 0.11 m — 1.1 m/s. The EKF showed 1.79 → 1.18 m, just 0.28 m/s. The controller believed it was descending <em>slower</em> than its 0.5 m/s target, so it kept trimming throttle down instead of arresting the sink.</div>
+      </div></div>
+      <div class="link"><div class="rail"><div class="line"></div><div class="dot"></div></div><div class="body">
+        <div class="lt">Impact went unnoticed by the estimator</div>
+        <div class="ld">At 3.7 g of vertical deceleration the EKF altitude still read 1.18 m against a true 0.11 m. Nothing in the state estimate registered that the vehicle had arrived.</div>
+      </div></div>
+      <div class="link"><div class="rail"><div class="line"></div><div class="dot"></div></div><div class="body">
+        <div class="lt">The backlog then drained while the vehicle sat still</div>
+        <div class="ld">Over the next second the delayed height finally caught up and collapsed 1.04 → 0.00 m — a metre of apparent descent by an airframe that was motionless on the floor.</div>
+      </div></div>
+      <div class="link"><div class="rail"><div class="line"></div><div class="dot"></div></div><div class="body">
+        <div class="lt">LAND kept ramping its target down through the floor</div>
+        <div class="ld"><code>land_run_vertical_control()</code> had been lowering the target at <code>LAND_SPEED</code> the whole time. By T+24.1 s the target sat 0.65 m <em>above</em> the reported altitude, and continued down through zero to −0.15 m.</div>
+      </div></div>
+      <div class="link"><div class="rail"><div class="line"></div><div class="dot"></div></div><div class="body">
+        <div class="lt">The controller did the only correct thing with that error</div>
+        <div class="ld">A position controller holding an altitude 0.65 m below target adds throttle. It lifted to 0.84 m AGL and was still climbing when the pilot disarmed.</div>
+      </div></div>
+    </div>
+
+    <h3>Three safeguards that should have stopped it, and why none did</h3>
+    <ul class="notes">
+      <li><strong>The land detector never latched.</strong> It requires <code>motors-&gt;limit.throttle_lower</code>, and the controller was commanding climb — so throttle sat at 0.29–0.47 against a hover value of 0.388. The false climb demand suppresses the very detector that would have disarmed the vehicle. Its rangefinder gate was satisfied at 0.06 m; that was not the blocker.</li>
+      <li><strong>Nothing independent could contradict the estimate.</strong> <code>EK3_SRC1_POSZ=6</code> (ExternalNav) and <code>EK3_RNG_USE_HGT=-1</code> mean the barometer and both rangefinders are invisible to the EKF. The flight controller was reading 0.06 m on a healthy sensor and structurally could not act on it.</li>
+      <li><strong>The pilot could not cancel LAND from the sticks.</strong> <code>PILOT_THR_BHV=5</code> leaves the high-throttle-cancels-land bit clear, and <code>FLTMODE_CH=0</code> disables RC mode switching. Disarming was the only lever available.</li>
+    </ul>
+
+    <h3>A note on the automatic baro fallback</h3>
+    <p>ArduPilot does have one: <code>selectHeightForFusion()</code> reverts to the barometer when external-nav height is lost. It keys on <em>arrival</em> time — <code>extNavDataIsFresh = age &lt; 500 ms</code> — and external nav kept arriving at 20 Hz with a largest gap of 0.31 s. The data was punctual and wrong, which is the one case this check cannot catch. The same blind spot defeats <code>VISO_DELAY_MS</code> compensation and the companion's own drift monitor.</p>
+  </section>
+
+  <!-- ── 04 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">04</span><h2>Ruled out</h2></div>
+    <p>Each of these was a plausible alternative explanation and each is excluded by direct evidence.</p>
+    <p>Most importantly, the vehicle <em>does</em> have an automatic SLAM-failure response: <code>drift_monitor.py</code> on the companion, which on a CRITICAL verdict switches the EKF to optical flow via <code>MAV_CMD_DO_AUX_FUNCTION</code> (func 90) and restarts FAST-LIO. It has fired automatically in the field (log 46) and on the pilot's CH9 switch (log 47, twice), completing a failover-and-recover cycle in 5.3&ndash;5.6 s. It was running throughout the crash flight and correctly reported <span class="m">OK</span> &mdash; because its detector measures geometric observability, and the geometry never degraded.</p>
+    <div class="cleared">
+      <div>
+        <span class="tag">Lidar sensor</span>
+        <span class="why">20 Hz, ~115,000 points per scan, zero dropped frames, zero gaps. Publish latency a flat 52 ms for the entire recording.</span>
+      </div>
+      <div>
+        <span class="tag">Optical flow</span>
+        <span class="why">Healthy the whole time — ~22 Hz, quality 34/57.7/78 (min/mean/max). Not used on this flight — source set 1 was active throughout — but proven in service: <code>drift_monitor</code> failed over to it cleanly in logs 46 and 47.</span>
+      </div>
+      <div>
+        <span class="tag">Source-switch script</span>
+        <span class="why">The <code>SPLIT_ARCADE_MODE</code> Lua fired once, at log t=2166.2 — 37 s after disarm. It guards on <code>not arming:is_armed()</code>, so it cannot select the null source set in flight. v1.8 was flown; v1.10 now on the card keeps that guard and adds a real prearm block.</span>
+      </div>
+      <div>
+        <span class="tag">VOXL toggle</span>
+        <span class="why">RC9 sat flat at 1050 µs for all 486 samples and never crossed its 1500 µs threshold. Whatever it drives on the companion was never triggered.</span>
+      </div>
+      <div>
+        <span class="tag">SLAM self-assessment</span>
+        <span class="why"><code>drift_monitor.py</code> reported <span class="m">OK</span> throughout. Its floors are <span class="m">eig_min&lt;5,000</span> and <span class="m">matched&lt;150</span>; actuals were 989k–1.53M and 4,709–7,271 — 200× and 31× clear. Every test is a lower bound, and none involves time.</span>
+      </div>
+      <div>
+        <span class="tag">ExternalNav velocity fusion</span>
+        <span class="why">Sending FAST-LIO's velocity to the flight controller as
+        <code>VISION_SPEED_ESTIMATE</code> was suspected of over-weighting a measurement correlated
+        with the position it is fused alongside. It played no part here: <code>XKF4.SV</code> read
+        <span class="m">0.34</span> at the moment the failsafe declared and did not hold above 0.80
+        until T+18.3 &mdash; after LAND had already been commanded.</span>
+      </div>
+      <div>
+        <span class="tag">LAND mode logic</span>
+        <span class="why">Executed correctly on every count: 4 s pause, 0.5 m/s target ramp, position hold, land-detector gating. It was fed a bad estimate, not miscoded.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 05 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">05</span><h2>Configuration findings</h2></div>
+    <p>Found while reading the live parameter set, re-confirmed against the flight controller after the sweep. The first is independent of this incident and is the most serious.</p>
+
+    <div class="scroller">
+      <table>
+        <caption>Parameters worth changing</caption>
+        <thead><tr><th>Parameter</th><th class="num">Value</th><th>Finding</th></tr></thead>
+        <tbody>
+          <tr class="mark">
+            <td class="num">FS_EKF_ACTION</td><td class="num">0</td>
+            <td><strong>Not a legal value on 4.6.3</strong> — the documented set is 1/2/3. It falls into <code>default:</code> in <code>failsafe_ekf_event()</code> and triggers LAND. "0 = Report only" exists only on 4.7 and master. This is what put the vehicle into LAND.</td>
+          </tr>
+          <tr>
+            <td class="num">EK3_SRC1_POSZ</td><td class="num">6</td>
+            <td>Height comes entirely from SLAM. With <code>EK3_RNG_USE_HGT=-1</code> there is no independent vertical reference at any altitude.</td>
+          </tr>
+          <tr class="mark">
+            <td class="num">EK3_SRC1_YAW</td><td class="num">6</td>
+            <td>Yaw comes from SLAM too. Together with <code>POSXY</code>, <code>POSZ</code>,
+            <code>VELXY</code> and <code>VELZ</code>, one sensor feeds every axis of the estimate
+            &mdash; which is what collapsed <code>ekf_check</code>'s two-of-three rule to a single
+            witness. Worth deciding deliberately rather than inheriting.</td>
+          </tr>
+          <tr>
+            <td class="num">EK3_RNG_USE_HGT</td><td class="num">-1</td>
+            <td>Disabled — and inoperative regardless: that path is gated on the primary Z source being Baro or GPS, so it can never engage while <code>POSZ</code> is ExternalNav.</td>
+          </tr>
+          <tr>
+            <td class="num">TANK_NAV_SRC</td><td class="num">1</td>
+            <td>Selects SLAM. Setting it to 0 selects <code>EK3_SRC2</code> (optical flow). The mechanism is already built and wired — it is a pre-flight choice, not an automatic fallback.</td>
+          </tr>
+          <tr>
+            <td class="num">SURFTRAK_MODE</td><td class="num">0</td>
+            <td>Surface tracking disabled; the firmware default is 1 (Ground). With <code>TERRAIN_ENABLE=0</code> there is no terrain following at any level. This bears on the height-source choice: <code>SURFTRAK</code> clears obstacles by moving the controller's target, whereas <code>POSZ=1</code> does it by making the EKF's altitude terrain-relative.</td>
+          </tr>
+          <tr>
+            <td class="num">PILOT_THR_BHV</td><td class="num">5</td>
+            <td>High-throttle-cancels-land bit is clear. Combined with <code>FLTMODE_CH=0</code>, a failsafe LAND cannot be aborted from the sticks.</td>
+          </tr>
+          <tr>
+            <td class="num">ARMING_CHECK</td><td class="num">60912</td>
+            <td>VisualOdometry, Baro, Compass, INS and GPS-lock checks are all disabled. The vehicle will arm with a sick vision system.</td>
+          </tr>
+          <tr>
+            <td class="num">FENCE_RADIUS<br>FENCE_ALT_MAX</td><td class="num">1 m<br>3 m</td>
+            <td>Latent: the fence is disabled, but <code>FENCE_ACTION=4</code> with these limits would breach almost immediately if it were ever switched on.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── 06 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">06</span><h2>Recommendations</h2></div>
+    <ol class="recs">
+      <li>
+        <div class="rt">Add a latency term to drift_monitor's detector</div>
+        <div class="rd">The failover mechanism already exists and is proven; it is the <em>detector</em> that is blind. <code>_evaluate()</code> tests only lower bounds on <code>eig_min</code> and <code>matched_pts</code>, and nothing in the node's 366 lines compares a header stamp to the clock. Subscribe to <code>/Odometry</code>, compute <span class="m">now &minus; header.stamp</span>, and WARN at ~150 ms / CRIT at ~250 ms &mdash; ArduPilot's compensation ceiling &mdash; reusing the existing K=5 hysteresis. A CRITICAL verdict then routes into <code>_execute_restart()</code>, which already switches to optical flow and restarts FAST-LIO in about five seconds.</div>
+        <div class="where">Companion &middot; drift_monitor.py</div>
+      </li>
+      <li>
+        <div class="rt">Publish latency on the risk topic and gate arming on it</div>
+        <div class="rd">Latency exceeded 200 ms a full 10 s before the failsafe and 15 s before impact &mdash; ample warning, entirely unmeasured. The arming gate matters separately: the interlock currently relies on vision <em>dropping</em> during a restart, which does not cover vision that is present but 13.6 s stale, as it was when the vehicle armed and took off in log 50.</div>
+        <div class="where">Companion &middot; drift_monitor.py</div>
+      </li>
+      <li>
+        <div class="rt">Stamp vision messages with the measurement time, not the publish time</div>
+        <div class="rd">The bridge re-stamps with <code>rospy.Time.now()</code> at publish, so
+        everything upstream of it is erased from the flight controller's view. The FC's own measured
+        age &mdash; <code>VISP</code>/<code>VISV</code> <code>CTimeMS</code> against system time
+        &mdash; peaked at 376 ms while the companion was in fact 669 ms late. The aircraft was handed
+        roughly half the real lag and told the rest was <code>VISO_DELAY_MS=75</code>. The fix is not
+        to revert the re-stamp, which solved a genuine clock-domain bug, but to carry
+        <code>lidar_end_time</code> translated into the synced clock so ArduPilot can compensate
+        honestly up to its 250 ms ceiling. Velocity is the worse case: it arrives a median 53 ms
+        staler than position (against 10 ms) despite sharing one header stamp, and both are
+        compensated with the same constant.</div>
+        <div class="where">Companion &middot; fastlio_mavros_bridge.py</div>
+      </li>
+      <li>
+        <div class="rt">Set FS_EKF_ACTION deliberately to 1 or 2</div>
+        <div class="rd">One parameter, immediate effect, independent of everything else here. Whatever the intent behind <span class="m">0</span> was, on this firmware it is the most aggressive available response.</div>
+        <div class="where">Flight controller</div>
+      </li>
+      <li>
+        <div class="rt">Fix the barometer before relying on it</div>
+        <div class="rd">It swings 5.99 m with the props turning (&sigma; 1.24 m) against 0.39 m at rest &mdash; prop wash and ground effect, not sensor failure. That makes it useless as the fallback every height-source scheme depends on, including the one below.</div>
+        <div class="where">Hardware</div>
+      </li>
+      <li>
+        <div class="rt">Give the vertical loop an independent source &mdash; once the baro is fixed</div>
+        <div class="rd">Target <code>EK3_SRC1_POSZ=2</code> with <code>EK3_RNG_USE_HGT=70</code>: inertial height in cruise, rangefinder only in the last few metres, with the built-in speed and terrain-stability gates active. Prefer this to <code>POSZ=1</code>, which makes the EKF's altitude terrain-relative &mdash; the vehicle then balloons over any object beneath it, and the speed gate does not apply. For obstacle clearance use <code>SURFTRAK_MODE=1</code>, which moves the controller's target and leaves the reference inertial.</div>
+        <div class="where">Flight controller</div>
+      </li>
+      <li>
+        <div class="rt">Bound matched points from above, not just below</div>
+        <div class="rd">Every threshold in the detector guards against too few features. This failure was caused by too many: the match count rose 4,709 &rarr; 7,271 and took the pipeline over its real-time budget, while the monitor read that same rising number as maximally healthy. Cap map density, and answer why the 25 August scene produced 40% more matches than any previous flight.</div>
+        <div class="where">Companion</div>
+      </li>
+      <li>
+        <div class="rt">Make the CH9 recovery discoverable</div>
+        <div class="rd">The pilot had a proven one-switch recovery &mdash; CH9 triggers the same failover, demonstrated twice 18 hours earlier &mdash; and RC9 sat at 1050 &micro;s throughout the crash. Nothing told them to reach for it. Whatever telemetry the latency term produces has to reach the pilot in the air, not just the log.</div>
+        <div class="where">Operations</div>
+      </li>
+      <li>
+        <div class="rt">Separate the routine EKF warning from the real one</div>
+        <div class="rd">Eight of the nine <span class="m">EKF variance</span> events across these logs were self-inflicted by the tank-mode switch selecting the null source set, all while disarmed. The ninth was real, in flight, and crashed the aircraft &mdash; and looked identical. Suppress or re-word the expected one so the exceptional one is legible.</div>
+        <div class="where">Operations</div>
+      </li>
+      <li>
+        <div class="rt">Restore the VisualOdometry arming check; give the pilot an abort</div>
+        <div class="rd">Bit 16 of <code>ARMING_CHECK</code>, plus <code>PILOT_THR_BHV</code> bit 1 and a mode switch or aux LAND. Real but last-resort: it depends on a human reacting within a few seconds.</div>
+        <div class="where">Flight controller</div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ── 07 ─────────────────────────────────────────────────────────────── -->
+  <section>
+    <div class="shead"><span class="snum">07</span><h2>Method and evidence</h2></div>
+    <ul class="notes">
+      <li><strong>Parameters</strong> read live from the flight controller over MAVLink — 1138 values, full set.</li>
+      <li><strong>Dataflash logs 49 and 50</strong> downloaded over MAVLink at ~550 kB/s, both verified complete with zero missing bytes.</li>
+      <li><strong>Log 49 re-pulled</strong> over MAVLink at 790 kB/s (15,499,069 bytes,
+      byte-complete) to read <code>XKF3</code>, <code>XKF4</code>, <code>VISP</code> and
+      <code>VISV</code> directly &mdash; the innovation test ratios that decide the failsafe, and the
+      flight controller's own measurement of vision age, neither of which the companion bag can
+      show.</li>
+      <li><strong>Lua scripts</strong> recovered from the logs themselves via <code>FILE</code> messages rather than the SD card. <code>lua_scripts.cpp:309</code> logs every script that loads successfully unless <code>SCR_DEBUG_OPTS</code> suppresses it, and it is 0 here — so the three recovered scripts are the complete set. The logs also carry <code>@SYS/storage.bin</code>, a byte-exact 32 KB snapshot of the parameter EEPROM as it stood during the flight.</li>
+      <li><strong>FAST-LIO bag</strong> <span class="m">08_25_2026_20_38_04_flight</span>, correlated to the flight controller clock through the log's own "recording started / finished" messages; the 32.2 s bag span matches the 33.4 s logged interval. Read with ROS Noetic in a container.</li>
+      <li><strong>Fleet sweep</strong> across all 24 flight bags on the drive (22 carried odometry), measuring publish latency as bag-record time minus header stamp &mdash; the same method, and the same two in-bag controls, as the crash flight.</li>
+      <li><strong>Lua scripts</strong> also pulled live from the SD card over MAVLink FTP, which is how the v1.8-flown / v1.10-current discrepancy surfaced.</li>
+      <li><strong>Behavioural claims</strong> checked against the ArduCopter 4.6.3 source at the tagged release, not against current master — several relevant parameters were renamed or re-valued afterwards.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>Prepared from log 49 (15.5 MB, 25 Aug 2026) with log 50 and the matching FAST-LIO bag as corroboration. Timestamps are flight-controller time; the vehicle armed at t=2095.7 and the flight ran 26 s from takeoff to disarm.</p>
+  </footer>
+</div>
+
+<div class="tip" id="tip" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ── data ────────────────────────────────────────────────────────────────
+  // FAST-LIO publish latency: [seconds since takeoff (log t 2103.3), ms]
+  var LAT = [
+    [-6.40,82],[-5.39,84],[-4.39,83],[-3.39,81],[-2.38,84],[-1.36,98],[-0.37,84],
+    [0.63,84],[1.64,88],[2.64,82],[3.65,89],[4.65,86],[5.66,98],[6.18,106],
+    [6.72,145],[7.26,191],[7.78,205],[8.29,217],[8.82,239],[9.34,263],[9.89,304],
+    [10.43,349],[10.99,407],[11.57,476],[12.14,547],[12.65,561],[13.16,562],
+    [13.64,545],[14.16,557],[14.66,560],[15.19,584],[15.68,579],[16.21,603],
+    [16.76,651],[17.25,640],[17.70,586],[18.15,538],[18.71,588],[19.23,613],
+    [19.75,626],[20.25,625],[20.73,606],[21.23,601],[21.70,573],[22.22,585],
+    [22.80,669],[23.26,620],[23.69,556],[24.15,507],[24.61,464],[25.11,460],[25.59,443]
+  ];
+
+  // Height during the landing: [seconds since takeoff, rangefinder m, EKF estimate m]
+  var HGT = [
+    [17.7,0.71,0.93],[18.1,0.69,0.76],[18.5,0.97,0.65],[18.9,1.14,0.67],
+    [19.3,1.62,0.93],[19.7,2.07,1.21],[20.1,2.35,1.46],[20.5,2.53,1.69],
+    [20.9,2.52,1.89],[21.3,2.36,2.15],[21.7,2.01,2.27],[22.1,1.44,2.12],
+    [22.5,0.78,1.73],[22.7,0.44,1.46],[22.9,0.11,1.18],[23.1,0.07,1.04],
+    [23.3,0.06,0.81],[23.5,0.07,0.62],[23.7,0.07,0.46],[23.9,0.11,0.22],
+    [24.1,0.19,0.00],[24.3,0.33,-0.08],[24.5,0.48,-0.04],[24.7,0.65,0.07],
+    [24.9,0.76,0.20],[25.1,0.83,0.33],[25.3,0.84,0.44],[25.5,0.74,0.51],
+    [25.7,0.58,0.53],[25.9,0.22,0.47]
+  ];
+
+  var NS = "http://www.w3.org/2000/svg";
+  function el(n, a) {
+    var e = document.createElementNS(NS, n);
+    for (var k in a) if (a[k] !== null && a[k] !== undefined) e.setAttribute(k, a[k]);
+    return e;
+  }
+  function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+  var tip = document.getElementById("tip");
+  function showTip(evt, text) {
+    tip.textContent = text;
+    tip.classList.add("on");
+    var pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    var x = evt.clientX + pad, y = evt.clientY - h - pad;
+    if (x + w > innerWidth - 8) x = evt.clientX - w - pad;
+    if (y < 8) y = evt.clientY + pad;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  }
+  function hideTip() { tip.classList.remove("on"); }
+
+  // ── generic time-series renderer ────────────────────────────────────────
+  function chart(svg, opts) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    var W = 900, H = opts.height || 300;
+    var m = { t: 18, r: 18, b: 34, l: 52 };
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+    var iw = W - m.l - m.r, ih = H - m.t - m.b;
+    var xd = opts.xDomain, yd = opts.yDomain;
+    var X = function (v) { return m.l + (v - xd[0]) / (xd[1] - xd[0]) * iw; };
+    var Y = function (v) { return m.t + (1 - (v - yd[0]) / (yd[1] - yd[0])) * ih; };
+
+    var cRule = css("--border"), cMuted = css("--muted"), cInk = css("--ink");
+
+    // grid + y axis
+    opts.yTicks.forEach(function (t) {
+      svg.appendChild(el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t),
+        stroke: cRule, "stroke-width": 1 }));
+      var lb = el("text", { x: m.l - 10, y: Y(t) + 4, "text-anchor": "end",
+        fill: cMuted, "font-size": 11 });
+      lb.textContent = opts.yFmt(t);
+      svg.appendChild(lb);
+    });
+    // x axis
+    opts.xTicks.forEach(function (t) {
+      var lb = el("text", { x: X(t), y: H - 12, "text-anchor": "middle",
+        fill: cMuted, "font-size": 11 });
+      lb.textContent = opts.xFmt(t);
+      svg.appendChild(lb);
+    });
+
+    // reference rules (dashed)
+    (opts.refs || []).forEach(function (r) {
+      svg.appendChild(el("line", { x1: m.l, x2: W - m.r, y1: Y(r.y), y2: Y(r.y),
+        stroke: cMuted, "stroke-width": 1, "stroke-dasharray": "3 4", opacity: .85 }));
+      var lb = el("text", { x: m.l + 8, y: Y(r.y) - 6,
+        fill: cMuted, "font-size": 10.5, "letter-spacing": ".06em",
+        stroke: css("--surface"), "stroke-width": 3, "paint-order": "stroke" });
+      lb.textContent = r.label;
+      svg.appendChild(lb);
+    });
+
+    // event markers (vertical)
+    (opts.events || []).forEach(function (e) {
+      svg.appendChild(el("line", { x1: X(e.x), x2: X(e.x), y1: m.t, y2: m.t + ih,
+        stroke: cInk, "stroke-width": 1, opacity: .35 }));
+      var lb = el("text", { x: X(e.x) + 5, y: m.t + 12, fill: cInk,
+        "font-size": 10.5, "letter-spacing": ".06em",
+        opacity: .75 });
+      lb.textContent = e.label;
+      svg.appendChild(lb);
+    });
+
+    // series
+    opts.series.forEach(function (s) {
+      var d = s.points.map(function (p, i) {
+        return (i ? "L" : "M") + X(p[0]).toFixed(2) + " " + Y(p[1]).toFixed(2);
+      }).join(" ");
+      if (s.fill) {
+        var base = Y(Math.max(yd[0], 0));
+        svg.appendChild(el("path", {
+          d: d + " L" + X(s.points[s.points.length - 1][0]).toFixed(2) + " " + base +
+             " L" + X(s.points[0][0]).toFixed(2) + " " + base + " Z",
+          fill: s.wash, stroke: "none"
+        }));
+      }
+      svg.appendChild(el("path", { d: d, fill: "none", stroke: s.color,
+        "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      // emphasized endpoint
+      var last = s.points[s.points.length - 1];
+      svg.appendChild(el("circle", { cx: X(last[0]), cy: Y(last[1]), r: 4,
+        fill: s.color, stroke: css("--surface"), "stroke-width": 2 }));
+      // direct label
+      if (s.label) {
+        var anchor = s.points[s.labelAt || 0];
+        var t = el("text", { x: X(anchor[0]) + (s.dx || 8), y: Y(anchor[1]) + (s.dy || -10),
+          fill: s.color, "font-size": 11.5,
+          "font-weight": 600, "letter-spacing": ".04em",
+          stroke: css("--surface"), "stroke-width": 3, "paint-order": "stroke" });
+        t.textContent = s.label;
+        svg.appendChild(t);
+      }
+    });
+
+    // hover layer: crosshair + markers + tooltip
+    var hair = el("line", { y1: m.t, y2: m.t + ih, stroke: cInk, "stroke-width": 1,
+      opacity: 0, "pointer-events": "none" });
+    svg.appendChild(hair);
+    var dots = opts.series.map(function (s) {
+      var c = el("circle", { r: 5, fill: s.color, stroke: css("--surface"),
+        "stroke-width": 2, opacity: 0, "pointer-events": "none" });
+      svg.appendChild(c);
+      return c;
+    });
+
+    var hit = el("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+    svg.appendChild(hit);
+
+    function nearest(sx) {
+      var pts = opts.series[0].points, best = 0, bd = Infinity;
+      for (var i = 0; i < pts.length; i++) {
+        var d = Math.abs(X(pts[i][0]) - sx);
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    }
+    function move(evt) {
+      var r = svg.getBoundingClientRect();
+      var sx = (evt.clientX - r.left) / r.width * W;
+      var i = nearest(sx);
+      var px = X(opts.series[0].points[i][0]);
+      hair.setAttribute("x1", px); hair.setAttribute("x2", px);
+      hair.setAttribute("opacity", .3);
+      var lines = [opts.xFmt(opts.series[0].points[i][0]) + opts.xUnit];
+      opts.series.forEach(function (s, k) {
+        var p = s.points[i];
+        if (!p) return;
+        dots[k].setAttribute("cx", X(p[0]));
+        dots[k].setAttribute("cy", Y(p[1]));
+        dots[k].setAttribute("opacity", 1);
+        lines.push((s.label || s.name) + "  " + opts.vFmt(p[1]));
+      });
+      showTip(evt, lines.join("\n"));
+    }
+    function leave() {
+      hair.setAttribute("opacity", 0);
+      dots.forEach(function (d) { d.setAttribute("opacity", 0); });
+      hideTip();
+    }
+    hit.addEventListener("pointermove", move);
+    hit.addEventListener("pointerleave", leave);
+  }
+
+  function draw() {
+    chart(document.getElementById("c1"), {
+      height: 300,
+      xDomain: [-6.4, 25.6], yDomain: [0, 700],
+      xTicks: [-5, 0, 5, 10, 15, 20, 25],
+      yTicks: [0, 200, 400, 600],
+      xFmt: function (v) { return (v > 0 ? "+" : "") + Math.round(v); },
+      xUnit: " s",
+      yFmt: function (v) { return v; },
+      vFmt: function (v) { return Math.round(v) + " ms"; },
+      refs: [
+        { y: 250, label: "250 ms — EKF compensation ceiling" },
+        { y: 75,  label: "75 ms — configured VISO_DELAY_MS" }
+      ],
+      events: [
+        { x: 0, label: "takeoff" },
+        { x: 18.1, label: "LAND" },
+        { x: 22.9, label: "impact" }
+      ],
+      series: [{
+        name: "latency", labelAt: 0,
+        points: LAT, color: css("--estimated"), wash: css("--estimated-wash"), fill: true
+      }]
+    });
+
+    chart(document.getElementById("c2"), {
+      height: 300,
+      xDomain: [17.7, 25.9], yDomain: [-0.4, 2.7],
+      xTicks: [18, 20, 22, 24],
+      yTicks: [0, 1, 2],
+      xFmt: function (v) { return "+" + Math.round(v); },
+      xUnit: " s",
+      yFmt: function (v) { return v + " m"; },
+      vFmt: function (v) { return v.toFixed(2) + " m"; },
+      refs: [{ y: 0, label: "ground" }],
+      events: [
+        { x: 18.1, label: "LAND" },
+        { x: 22.1, label: "descent" },
+        { x: 22.9, label: "impact" },
+        { x: 24.3, label: "liftoff" }
+      ],
+      series: [
+        { name: "rangefinder", label: "rangefinder", labelAt: 7, dx: -22, dy: -14,
+          points: HGT.map(function (r) { return [r[0], r[1]]; }),
+          color: css("--measured") },
+        { name: "EKF estimate", label: "EKF estimate", labelAt: 14, dx: 10, dy: -12,
+          points: HGT.map(function (r) { return [r[0], r[2]]; }),
+          color: css("--estimated") }
+      ]
+    });
+  }
+
+  draw();
+  // re-render on theme change so series colors re-read their tokens
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", draw);
+  }
+  new MutationObserver(draw).observe(document.documentElement,
+    { attributes: true, attributeFilter: ["data-theme"] });
+  addEventListener("resize", function () { hideTip(); });
+})();
+</script>

@@ -193,27 +193,56 @@ docker exec slam-hesai-fastlio bash -lc \
 
 `VISO_DELAY_MS` is defined by ArduPilot as the delay between the vision sensor **measuring** the position and the autopilot **receiving** the message.
 
-Because the Hesai driver runs `use_timestamp_type: 1` (host receive clock) and `fastlio_mavros_bridge` runs `restamp_system_time: false`, `header.stamp` propagates **unchanged** along `/lidar_points → /Odometry → /mavros/vision_pose/pose`. So `now() - header.stamp` at the last ROS hop directly measures the delay up to MAVLink serialisation, and the per-hop increments decompose it.
+`now() - header.stamp` at the **last** ROS hop directly measures the delay up to MAVLink serialisation. That works because the vision-pose stamp is exactly the instant the pose refers to:
+
+- FAST-LIO propagates the state to `pcl_end_time` and deskews every point into the **end-of-scan** frame (`IMU_Processing.hpp:291-292`, `319-324`), and stamps `/Odometry` with that same `lidar_end_time` (`laserMapping.cpp:613`, `405`).
+- `fastlio_mavros_bridge` runs `restamp_system_time: false`, so it forwards that stamp untouched (`fastlio_mavros_bridge.py:106`).
+
+Deskew target and stamp therefore coincide, and the age at `/mavros/vision_pose/pose` is the delay against the true measurement instant.
+
+> **Do not decompose this per-hop.** `header.stamp` does **not** propagate unchanged along the chain — the stamps are taken against *different reference instants*, so subtracting the ages is meaningless:
+>
+> - the driver stamps `/lidar_points` with `frame.points[0].timestamp` (`source_driver_ros1.hpp:247`) — the **first** point, i.e. sweep **start**;
+> - FAST-LIO restamps `/Odometry` to `lidar_end_time` — sweep **end**, ~50 ms later at 20 Hz.
+>
+> An earlier revision of this document claimed the stamp was carried through unchanged and derived a "+17 ms FAST-LIO compute" term from the difference. That figure was wrong; the real transport-to-transport latency is ~70 ms (see below). The final `VISO_DELAY_MS` was unaffected, because it is measured end-to-end at the last hop and never relied on the decomposition.
 
 The ROS 2 script instead takes `p95` of `/Odometry → /mavros/local_position/pose`. That is wrong here on two counts:
 
-1. **It is a round trip.** `/mavros/local_position/pose` is the FC's *output* returning over telemetry, so it includes FC→host latency that is not part of the sensor delay — while missing the `scan → /lidar_points` segment, which is the **largest** single term on this rig (~55 ms).
+1. **It is a round trip.** `/mavros/local_position/pose` is the FC's *output* returning over telemetry, so it includes FC→host latency that is not part of the sensor delay — while missing the `scan → /lidar_points` segment entirely.
 2. **`p95 + margin` is the wrong statistic.** `VISO_DELAY_MS` is a fixed constant the EKF uses to index its state-history buffer, so it wants the **central** value. Padding it high makes the EKF fuse each measurement against a too-old state. Over- and under-estimating are both harmful.
 
-### Measured budget (2026-08-09, idle bench, 2×30 s + 1×15 s runs)
+### Measured budget (2026-08-10, idle bench, 25 s, n≈495 per topic)
 
-| Stage | Median age vs. `header.stamp` |
+Ages, each against that topic's **own** stamp — not subtractable, see the warning above:
+
+| Topic | Stamp reference | Median age | sd |
+|---|---|---|---|
+| `/lidar_points` | sweep **start** | 54.0 ms | 2.2 ms |
+| `/Odometry` | sweep **end** | 73.5 ms | 4.5 ms |
+| `/mavros/vision_pose/pose` | sweep **end** (forwarded) | 73.9 ms | 4.5 ms |
+
+Derived by pairing each `/Odometry` message with the cloud it came from:
+
+| Interval | Median |
 |---|---|
-| `/lidar_points` — driver assembly | ~55 ms |
-| `/Odometry` — + FAST-LIO compute | ~72 ms (**+17 ms**) |
-| `/mavros/vision_pose/pose` — + bridge hop | ~73 ms (**+0.3 ms**) |
+| Sweep duration (`odom stamp − cloud stamp`) | 50.6 ms |
+| Cloud assembly beyond the sweep | 3.5 ms |
+| FAST-LIO transport-to-transport (`odom recv − cloud recv`) | 69.8 ms |
+| EKF solve alone (`/fastlio_health` field 2) | 6–10 ms |
 
-Spread was tight (sd ≈ 4 ms). Plus ~1.5 ms USB CDC-ACM transit → **`VISO_DELAY_MS = 75`** (set 2026-08-09, was 60).
+**`VISO_DELAY_MS` = age at `/mavros/vision_pose/pose` + ~1.5 ms USB CDC-ACM transit = 73.9 + 1.5 ≈ 75 ms.** Independently re-measured 2026-08-10 and unchanged from the 2026-08-09 value of 75 (was 60 before that).
+
+#### The ~70 ms FAST-LIO term is latency, not a throughput deficit
+
+Measured rates: `/lidar_points` 19.95 Hz, `/Odometry` 19.94 Hz, `/mavros/vision_pose/pose` 19.93 Hz. **No scans are being dropped**, and the age is stable over the run (sd 4.5 ms, no upward drift) — so per-scan CPU is comfortably under the 50 ms scan period, consistent with the 6–10 ms EKF solve.
+
+A stable ~70 ms latency at 20 Hz with matched throughput is the signature of a standing **one-scan backlog**: ~50 ms of queue plus ~20 ms of preprocessing, solve and transport. If that is right, draining the backlog would remove ~50 ms of control latency — worth investigating, but unconfirmed. It does not affect `VISO_DELAY_MS`, which measures the delay as it actually is.
 
 ### Limitations
 
-- **The result is a lower bound.** `header.stamp` is the host's *packet receive* time, not the true scan instant, so LiDAR-internal acquisition and ethernet transit fall outside the measurement.
-- **Deskew convention adds up to ±25 ms** of uncertainty at 20 Hz, depending on whether FAST-LIO deskews to sweep start or sweep end.
+- **The result is a lower bound.** `header.stamp` is the host's *packet parse* time (`udp1_4_parser.cc:274`, `use_timestamp_type: 1`), not the true scan instant, so LiDAR-internal acquisition and ethernet transit fall outside the measurement.
+- ~~Deskew convention adds up to ±25 ms of uncertainty~~ — **resolved, no longer a caveat.** FAST-LIO deskews to sweep end *and* stamps at sweep end (`IMU_Processing.hpp:319-324`, `laserMapping.cpp:613`), so the two agree exactly and no ambiguity remains. This had been listed as the largest single uncertainty.
 - **Validate in motion, handheld and disarmed** — never as a flight test. Watch whether FC position innovation correlates with velocity; if it grows with speed, step the value and re-check.
 - **Re-measure after any FAST-LIO tuning change.** The ~17 ms compute term moves with `point_filter_num`, `max_iteration`, and the voxel filter sizes, and idle bench CPU is less contended than flight.
 
