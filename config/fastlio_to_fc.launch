@@ -123,6 +123,14 @@
     <!-- EKF source failover (replaces LAND). ekf_src_auxfn=90 (ArduPilot "EKF Source Set");
          pos 1=MIDDLE->OF(SRC2), 0=LOW->SLAM(SRC1). -->
     <param name="enable_source_failover" type="bool" value="true" />
+    <!-- Minimum seconds between AUTOMATIC node restarts (CH9 is never suppressed). A restart
+         assumes SLAM is stuck and a fresh process will clear it; when the condition returns
+         immediately that assumption was wrong -- starved geometry has no features for a new
+         process to find. Observed 2026-09-03 17:25:17 on this aircraft: five restarts in 26 s,
+         one every 5.2 s, matched 26-33 against a floor of 150, each followed by a clean re-warm
+         that re-fired at once. Inside the cooldown the OF failover still stands; only the kill
+         is declined, with one "Still degraded, holding on OF" banner per window. -->
+    <param name="restart_cooldown_sec"   type="double" value="45.0" />
     <param name="ekf_src_auxfn"    type="int"    value="90" />
     <param name="src2_switch_pos"  type="int"    value="1" />
     <param name="src1_switch_pos"  type="int"    value="0" />

@@ -283,6 +283,15 @@ class DriftMonitor:
         # so the vehicle keeps flying on Optical Flow while SLAM re-inits; switch back SRC2->SRC1 on recovery.
         # Mechanism: MAV_CMD_DO_AUX_FUNCTION(218), func 90 = "EKF Source Set", switch position selects the set.
         self.enable_source_failover = bool(g("~enable_source_failover", True))
+        # Minimum seconds between AUTOMATIC node restarts. A restart is a hypothesis: that SLAM
+        # is stuck and a fresh process will clear it. When the condition returns immediately the
+        # hypothesis was wrong -- starved geometry has no features for a new process to find --
+        # and repeating it just kills SLAM every few seconds. Observed 2026-09-03 17:25:17: five
+        # restarts in 26 s, one every 5.2 s, matched 26-33 against a floor of 150, each one
+        # followed by a clean re-warm that immediately re-fired. Inside the cooldown the
+        # FAILOVER still stands (it is correct either way); only the kill is declined. A
+        # pilot-commanded CH9 restart is never suppressed.
+        self.restart_cooldown_sec = float(g("~restart_cooldown_sec", 45.0))
         self.ekf_src_auxfn = int(g("~ekf_src_auxfn", 90))       # ArduPilot RCx_OPTION 90 = EKF Source Set
         self.src2_switch_pos = int(g("~src2_switch_pos", 1))    # DO_AUX_FUNCTION pos 1=MIDDLE -> source set 2 (OF)
         self.src1_switch_pos = int(g("~src1_switch_pos", 0))    # pos 0=LOW -> source set 1 (SLAM/vision)
@@ -328,6 +337,9 @@ class DriftMonitor:
         self._warned_no_health_ever = False
         self._health_lost = False           # watchdog: /fastlio_health currently silent?
         self._health_wd_fired = False       # one-shot failover per outage
+        self._last_restart_at = None        # for restart_cooldown_sec
+        self._cooldown_announced = False    # one banner per cooldown window, not per scan
+        self._suppress_node_kill = False    # set by the cooldown, read by _restart_worker
 
         # interlock is a two-source OR with one arbiter, so the restart-recovery state machine
         # below keeps working untouched while latency can also hold it.
@@ -374,6 +386,7 @@ class DriftMonitor:
                       self.enable_drift_land, self.enable_ch9_land, self.enable_auto_restart,
                       self.enable_critical_fc, self.ch9_channel, self.ch9_low, self.ch9_high,
                       self.k_warn, self.k_crit)
+        rospy.loginfo("drift_monitor: restart cooldown %.0fs", self.restart_cooldown_sec)
         rospy.loginfo("drift_monitor: restart_mode=%s | source_failover=%s auxfn=%d (OF/SRC2 pos=%d, SLAM/SRC1 pos=%d) | land_mode=%s",
                       self.restart_mode, self.enable_source_failover, self.ekf_src_auxfn,
                       self.src2_switch_pos, self.src1_switch_pos, self.land_mode)
@@ -799,6 +812,31 @@ class DriftMonitor:
     # ---- shared response (drift CRITICAL, CH9, and latency escalation; branches on restart_mode) ----
     def _execute_restart(self, source):
         manual = source.startswith("CH")
+        now = time.time()
+        cooling = (not manual
+                   and self._last_restart_at is not None
+                   and (now - self._last_restart_at) < self.restart_cooldown_sec)
+
+        if cooling:
+            # Hold the failover, decline to kill SLAM again. _lat_no_restart tells the interlock
+            # not to wait for a health gap that is never going to arrive, and the latency blank is
+            # deliberately NOT re-armed: there is no outage of our own making to blind it to.
+            self._restart_lock = True
+            self._lat_no_restart = True
+            self._refresh_interlock()
+            if not self._cooldown_announced:
+                self._cooldown_announced = True
+                rospy.logwarn("drift_monitor: %s came back %.1fs after the last restart "
+                              "(cooldown %.0fs) -- holding on OF, not restarting again",
+                              source, now - self._last_restart_at, self.restart_cooldown_sec)
+                self._send_statustext(_SEV_CRITICAL, "Still degraded, holding on OF", force=True)
+            self._suppress_node_kill = True
+            self._spawn(self._restart_worker)
+            return
+
+        self._cooldown_announced = False
+        self._last_restart_at = now
+        self._suppress_node_kill = False
         rospy.logwarn("drift_monitor: RESTART (%s) triggered by %s", self.restart_mode, source)
         self._restart_lock = True
         self._refresh_interlock()
@@ -832,7 +870,7 @@ class DriftMonitor:
                 self.failover_active = ok
                 self._send_statustext(_SEV_CRITICAL,
                                       "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
-        if self.enable_auto_restart:
+        if self.enable_auto_restart and not self._suppress_node_kill:
             rospy.logwarn("drift_monitor: restarting [%s] (rosnode kill -> roslaunch respawns)", self.restart_nodes)
             try:
                 subprocess.Popen(["rosnode", "kill"] + self.restart_nodes.split())
