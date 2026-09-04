@@ -37,23 +37,34 @@ What is being measured, and why not the ROS 2 script's method
 ArduPilot defines VISO_DELAY_MS as the delay between the vision sensor
 MEASURING the position and the autopilot RECEIVING the message.
 
-Because the Hesai driver runs `use_timestamp_type: 1` (host receive clock) and
-fastlio_mavros_bridge runs `restamp_system_time: false`, header.stamp is carried
-UNCHANGED along /lidar_points -> /Odometry -> /mavros/vision_pose/pose. So
+The measurement that matters is taken at the LAST hop only:
 
-    age = rospy.Time.now() - msg.header.stamp
+    age = rospy.Time.now() - msg.header.stamp        # at /mavros/vision_pose/pose
 
-is elapsed host time since the scan stamp, and the age at the last ROS hop
-(/mavros/vision_pose/pose) is the delay up to the moment MAVROS serialises the
-MAVLink frame. Serial transit is added afterwards as a separate estimated term.
+That is the delay up to the moment MAVROS serialises the MAVLink frame. Serial
+transit is added afterwards as a separate estimated term. It is valid because
+the vision-pose stamp IS the instant the pose refers to: FAST-LIO propagates to
+pcl_end_time and deskews into the end-of-scan frame (IMU_Processing.hpp:291-292,
+319-324) and stamps /Odometry with that same lidar_end_time (laserMapping.cpp:613),
+and the bridge forwards it untouched under restamp_system_time:false
+(fastlio_mavros_bridge.py:106).
+
+DO NOT decompose the per-hop ages. header.stamp is NOT carried unchanged along
+the chain: the driver stamps /lidar_points with frame.points[0].timestamp
+(source_driver_ros1.hpp:247) = sweep START, while /Odometry is restamped to
+lidar_end_time = sweep END, ~50 ms later at 20 Hz. The two ages are measured
+against different reference instants, so their difference is meaningless. An
+earlier version of this docstring claimed otherwise and derived a bogus "+17 ms
+FAST-LIO compute" term; the true transport-to-transport latency is ~70 ms. The
+VISO_DELAY_MS result was never affected -- it only ever used the last hop.
 
 The ROS 2 script instead uses p95 of /Odometry -> /mavros/local_position/pose.
 That is wrong on this stack for two reasons:
 
   1. It is a ROUND TRIP. /mavros/local_position/pose is the FC's OUTPUT coming
      back over telemetry, so it includes FC->host latency that is not part of
-     the sensor delay -- while missing the scan -> /lidar_points segment, which
-     is the LARGEST single term here (~55 ms).
+     the sensor delay -- while missing the scan -> /lidar_points segment
+     entirely.
   2. p95 + margin is the wrong statistic. VISO_DELAY_MS is a fixed constant the
      EKF uses to index its state history buffer, so it wants the CENTRAL value.
      Padding it high makes the EKF fuse each measurement against a too-old

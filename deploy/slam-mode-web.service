@@ -1,0 +1,19 @@
+[Unit]
+Description=SLAM restart-mode web switch (OF/LAND, phone UI on :8088)
+Documentation=https://github.com/ifiksel1/slam-agent
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=revolute
+Group=revolute
+WorkingDirectory=/home/revolute/Documents
+Environment=PORT=8088
+# Zero-dependency stdlib server; calls switch_restart_mode.sh (docker access via the docker group).
+ExecStart=/usr/bin/python3 /home/revolute/Documents/mode_switch_server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

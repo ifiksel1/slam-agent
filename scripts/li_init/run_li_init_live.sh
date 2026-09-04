@@ -163,6 +163,20 @@ source /opt/ros/noetic/setup.bash
 source /root/li_ws/devel/setup.bash
 roslaunch /root/li_ws/config/li_init_jt128_live.launch'
 
+# Stop the recorder and wait for rosbag to rename "<bag>.active" -> "<bag>".
+# This MUST happen before the docker cp below: while recording is live the file
+# on disk is still "<bag>.active", so a copy of "<bag>" silently finds nothing
+# and the archive is left stranded inside the container.
+echo
+echo "--- closing archive bag ---"
+docker exec "$CONTAINER" pkill -INT -f "rosbag record" 2>/dev/null
+for i in $(seq 1 60); do
+  docker exec "$CONTAINER" test -f "/root/${BAG}" 2>/dev/null && break
+  sleep 1
+done
+docker exec "$CONTAINER" test -f "/root/${BAG}" 2>/dev/null \
+  || echo "WARNING: /root/${BAG} did not finalize; check for /root/${BAG}.active" >&2
+
 echo
 echo "=================== BUILD VERSIONS ==================="
 docker run --rm --network none "$IMAGE" cat /root/li_ws/BUILD_VERSIONS.txt
