@@ -32,6 +32,15 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       # Mount FAST-LIO config dir for easy editing (Hesai JT128 config lives here)
       - ./config:/root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/config:rw
+      # Persist the Hesai driver config (use_timestamp_type:1 = receive/host time, so the
+      # whole lidar->imu->odom chain is on the ROS/host clock). Without this single-file
+      # mount the driver config lives only in the image layer and reverts to type:0 on any
+      # `docker compose up` recreate. Host-editable; survives container recreation.
+      - ./config/hesai_driver_config.yaml:/root/slam_ws/src/FAST_LIO_SLAM/HesaiLidar_ROS_2.0/config/config.yaml:rw
+      # Persist drift_monitor.py (restart_mode logic: OF-failover vs LAND). Without this single-file
+      # mount the node lives only in the image layer and reverts on any `docker compose up` recreate.
+      # Host-editable (host copy is the source of truth); survives container recreation.
+      - ./docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/src/drift_monitor.py:/root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/src/drift_monitor.py:rw
 
     # Device access. The flight controller (mRo Pixracer Pro) enumerates over USB
     # CDC-ACM as /dev/ttyACM0 (MAVLink, used by mavros) and /dev/ttyACM1. Mapping

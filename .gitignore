@@ -17,3 +17,6 @@ logs/
 
 # LI-Init calibration outputs (results + logs, regenerated per run)
 li_init_result/
+
+# LI-Init calibration archive bags (multi-GB)
+bags/

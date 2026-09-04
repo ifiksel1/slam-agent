@@ -10,6 +10,8 @@ mcp
 config
 workspace
 logs
+*.bag
+replay_out
 *.md
 LICENSE
 .gitignore

@@ -72,6 +72,11 @@ RUN apt-get update && apt-get install -y \
     tmux \
     && rm -rf /var/lib/apt/lists/*
 
+# Python deps: laspy for ch9_logger LAS map export (pip not present in base -> install it)
+RUN apt-get update && apt-get install -y python3-pip && \
+    pip3 install --no-cache-dir laspy && \
+    rm -rf /var/lib/apt/lists/*
+
 # Initialize rosdep
 RUN rosdep init || echo "rosdep already initialized" && \
     rosdep update
