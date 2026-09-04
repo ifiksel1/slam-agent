@@ -9,7 +9,7 @@ meta:
   goal: >
     Stream FAST-LIO map + diagnostic topics from the NUC to a remote computer via
     Foxglove, to understand WHEN and HOW FAST-LIO fails (GPS-denied drone SLAM).
-  last_updated: "2026-06-20"
+  last_updated: "2026-07-23"
   branch: "boot-services"
   safety_note: "Read-only visualization only. NEVER arm or command the drone/FC. Also: do NOT change system state (params/configs/y-flip) the user did not explicitly ask to change."
 
@@ -25,7 +25,7 @@ system:
   container:
     name: "slam-hesai-fastlio"
     image: "slam-system:latest"
-    image_id_current: "3173572c612b   # 2026-06-12: bridge yaw-datum + re-stamp + flip_position_y, laserMapping eigenvalues. (prior: 6849d0d18a89 -> e4b85ce4496e -> 3173572c612b)"
+    image_id_current: "5fb89f2fae6f   # 2026-06-21: + ExternalNav VELOCITY baked in (laserMapping /Odometry twist from IEKF vel; bridge -> /mavros/vision_speed/speed_vector). (history: 6849d0d18a89 -> e4b85ce4496e -> 3173572c612b -> 5e5a726b8610 -> 825038356ce3 -> 5fb89f2fae6f)"
     network_mode: "host"
     ros_distro: "noetic"
   repo:
@@ -37,19 +37,21 @@ system:
   systemd:
     - "slam-container.service   # docker compose up -d slam-system (oneshot, RemainAfterExit)"
     - "slam-fastlio.service     # docker exec roslaunch fastlio_to_fc.launch"
-    note: "systemctl start/restart needs root (no passwordless sudo in agent shell). Reboot to apply."
+    - "NOTE: systemctl start/restart needs root (no passwordless sudo in agent shell). Reboot to apply."
   sensor: "Hesai JT128 LiDAR (publishes /lidar_points + /lidar_imu directly)"
   flight_controller: "mRo Pixracer Pro over USB CDC-ACM /dev/ttyACM0 @921600, MAVROS, ArduPilot"
   fc_ekf_sources: >
-    POSXY=6 POSZ=6 YAW=6 (ExternalNav/vision). GPS1_TYPE=0, no RC source-switch.
-    VELXY/VELZ: CURRENTLY = 6 (user set back 2026-06-12 end-of-session) BUT the VALIDATED value is 0.
-    See T13: VELXY/VELZ=6 with NO velocity source published = the runaway root cause. 0 (None) fixed it.
-    6 only works if velocity is published (FAST-LIO twist is currently zero) -> otherwise runaway returns under motion.
+    SRC1 (vision/SLAM mode): POSXY=6 POSZ=6 VELXY=6 VELZ=6 YAW=6 (all ExternalNav). GPS1_TYPE=0.
+    *** 2026-06-21: VELXY/VELZ=6 is now VALID -- velocity IS published (T23/P9 resolved): laserMapping
+    fills /Odometry twist from the IEKF velocity state, bridge forwards it to /mavros/vision_speed/speed_vector.
+    The T13 runaway only happened when 6 had NO velocity source; that's fixed. VISO_VEL_M_NSE=0.1. ***
+    SRC2 (optical-flow mode): POSXY=0 POSZ=2(RangeFinder) VELXY=5(OpticalFlow) VELZ=0 YAW=1(Compass). FLOW_TYPE=6.
+    SRC3: all 0 (unused). Compass deliberately ENABLED as the OF-mode yaw fallback (see audit note).
   fc_frame: "/mavros/local_position/pose = ENU world frame (x=East, y=North, z=Up), ~50Hz. NOT body-relative. mavros auto-converts ArduPilot NED<->ROS ENU. Body=FLU (fwd+x,left+y,up+z) per REP-103; yaw CCW-positive, 0=East."
   fc_baud: "fcu_url /dev/ttyACM0:921600 (USB CDC-ACM -> baud is cosmetic, USB ignores it). timesync locked ~3ms RTT."
   fc_params_dump: "config/fc_ekf_params.parm  # captured FC params for reflash reproducibility (NOTE: lists VELXY/VELZ=0, the validated value)"
   fc_prearm: "PreArm: PRX1: No Data (PRX1_TYPE=2 MAVLink proximity, unfed) + RC_RECEIVER unhealthy (no TX). Block arming; not fixed."
-  fc_audit_deferred: "COMPASS_USE=1 (consider 0 for vision-yaw indoors); EK3_SRC1_POSZ=6 vision height (consider 1=baro); VISO_DELAY_MS=50 (estimate, validate); no loop-closure node (SC-PGO not launched -> drift)."
+  fc_audit_deferred: "COMPASS_USE=1 is DELIBERATE (2026-06-22) = OF-mode (SRC2) yaw fallback; do NOT disable. Only 1 physical compass (DEV_ID 590090; slots 2/3 empty, USE2/3=1 harmless). EK3_SRC1_POSZ=6 vision height (consider 1=baro); VISO_DELAY_MS=50 (estimate, validate); no loop-closure node (SC-PGO not launched -> pure FAST-LIO odometry, drift not corrected)."
 
 # -----------------------------------------------------------------------------
 # COMPLETED WORK
@@ -391,6 +393,132 @@ tasks:
          source published -> independent motion-runaway config (T13). Resolve P9 (publish velocity OR set VEL*=0)
          before flight. ** Tools added: logs/vision_bench.py.
 
+  - id: T22
+    title: "Uncontrolled CW yaw spin in flight -> ROOT CAUSE was MECHANICAL (motor spin direction)"
+    status: done
+    detail: >
+      (2026-06-21.) Flight: uncontrolled CW yaw spin, altitude held. Diagnosed at length. Ruled OUT:
+      vision yaw sign (bench rotation test: CW -> vision_pose yaw -90 deg, CORRECT sign+magnitude);
+      compass (disabled it on a wrong hypothesis -> no change; then RESTORED, see below). REAL CAUSE
+      (found by user): TWO REAR MOTORS spinning the WRONG DIRECTION -> net uncommanded yaw torque the
+      controller couldn't null; altitude unaffected (collective thrust fine). NOT SLAM/EKF/frame/compass.
+      LESSON: for a pure yaw spin with altitude holding, rule out mechanical/motor-order/FRAME_TYPE FIRST.
+      Compass churn: temporarily set COMPASS_USE/USE2/USE3=0, ENABLE=0, EK3_SRC2/3_YAW=6; then REVERTED to
+      originals (USE*=1, ENABLE=1, SRC2_YAW=1, SRC3_YAW=0) because compass is the OF-mode yaw fallback.
+    files: ["FC params (EEPROM): COMPASS_* and EK3_SRC2/3_YAW restored to originals"]
+
+  - id: T23
+    title: "Publish ExternalNav VELOCITY (VISION_SPEED_ESTIMATE) -> RESOLVES P9 / T13"
+    status: done
+    detail: >
+      (2026-06-21.) FAST-LIO /Odometry twist was all-zero, so EK3_SRC1_VELXY/VELZ=6 had no source (the T13
+      runaway config). FIX (approach A, native EKF velocity, not differentiation):
+        (1) laserMapping.cpp publish_odometry: fill odomAftMapped.twist.twist.linear from state_point.vel
+            (WORLD/camera_init frame, same frame as pose.position).
+        (2) fastlio_mavros_bridge.py: new publisher /mavros/vision_speed/speed_vector (Vector3Stamped),
+            transforms the twist with the SAME chain as position (position_matrix + Rz(-yaw0)) so velocity and
+            position share one frame. mavros vision_speed plugin already enabled (listen_twist:false -> speed_vector).
+      VALIDATED on the bench (DISARMED): at rest ~0 m/s; hand-move directional test fwd->+x, left->+y, up->+z,
+      clean axis isolation, sane magnitudes. Then flew with EK3_SRC1_VELXY/VELZ=6, VISO_VEL_M_NSE=0.1 ->
+      user reports "no noticeable difference" (EXPECTED: velocity aiding is subtle when position is already
+      fused; mainly tightens Loiter braking / reduces overshoot). Whether the EKF actually FUSED vs gated it
+      was NOT verified from the dataflash log (offered, user moved on).
+      PERSISTENCE: baked into image slam-system:latest (5fb89f2fae6f) and verified; survives container recreate.
+      Fork commit of the 2 files PENDING (P10, blocked on git identity). Checkpoint commit 1e0d985 (tracked files).
+    files: ["docker_src/.../FAST-LIO/src/laserMapping.cpp", "docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py", "slam-system:latest (5fb89f2fae6f)"]
+
+  - id: T24
+    title: "CAN (DroneCAN) rangefinder silent -> CAN driver/protocol index mismatch (fixed)"
+    status: done
+    detail: >
+      (2026-06-22.) RNGFND1_TYPE=24 (DroneCAN, downward, ORIENT=25) on CAN2 reported NO data;
+      /mavros/rangefinder/rangefinder empty; PreArm 'AHRS: EK3 sources require RangeFinder' blocked arming
+      (ArduPilot validates ALL EK3 source sets; SRC2_POSZ=2 needs a rangefinder for OF mode). ROOT CAUSE:
+      CAN_P2_DRIVER=1 (CAN2->virtual driver 1) but CAN_D1_PROTOCOL=0 (None), while DroneCAN was on driver 2
+      (CAN_D2_PROTOCOL=1) which no port routed to -> no DroneCAN stack on the wire -> node never enumerated.
+      A reboot ALONE does not help while the protocol mapping is wrong. FIX: CAN_D1_PROTOCOL=1 (match D2),
+      keep CAN_P2_DRIVER=1, CAN_P2_BITRATE=1000000, then REBOOT FC (CAN init only at boot). RESULT: rangefinder
+      live (range 0.12 m), prearm cleared. Saved as learning solution #5.
+    files: ["FC params (EEPROM): CAN_D1_PROTOCOL=1"]
+
+  - id: T25
+    title: "FAST-LIO health check + confined-space tuning plan (drafted, NOT applied)"
+    status: "advisory-pending"
+    detail: >
+      (2026-06-22, read-only.) Health snapshot (at rest, post-reboot): /lidar_points 20Hz, /lidar_imu 443Hz,
+      /Odometry 20Hz, /fastlio_health 20Hz. fastlio_health: matched ~610, mean_residual ~0.031 m, ekf_update
+      ~3 ms, eig[min/mid/max] ~80k/148k/380k (well-conditioned, NO degeneracy), velocity ~0 at rest.
+      fastlio_mapping ~141% CPU of 12 cores (big headroom). Verdict: healthy + real-time; only a STATIC snapshot.
+      CONFINED-SPACE TUNING PLAN drafted (advisory, user will revisit): Tier1 filter_size_surf/map 0.5->0.2-0.3,
+      blind 1.0->0.3-0.5 (stay beyond self-return), point_filter_num 3->1-2; Tier2 det_range 100->20-30,
+      cube_side_length 300->50-100. Validate via /fastlio_health (mean_residual ~cm, ekf_ms<<40, eig_min up,
+      matched up). Full plan saved to scratchpad fastlio_confined_tuning.md (session-scoped; offer to move to docs/).
+      NOTE: launch params OVERRIDE yaml -> filter_size/point_filter_num/cube_side/max_iter edit the LAUNCH;
+      blind/det_range edit the YAML.
+
+  - id: T26
+    title: "Offline bag A/B (current vs confined-tuned) + APPLIED the tuning"
+    status: done
+    detail: >
+      (2026-06-22, fully OFFLINE replay -- no FC/no arming.) Built a replay harness (scripts/replay/:
+      fastlio_replay.launch, run_one.sh, compare_bags.py, run_experiment.sh, transcode_bag.py) that plays
+      a recorded bag through laserMapping on an ISOLATED ros master :11312 (never touches live :11311),
+      records /Odometry + /fastlio_health, and diffs two runs. Tested on massrobotics_3rd_floor.bag (233s).
+      GOTCHA 1: that bag's /lidar_points carries per-point time in a 'timestamp' (f64 absolute) field, but
+        FAST-LIO (lidar_type=2 Velodyne) needs a 'time' (f32 relative) field -> every scan dropped -> ZERO
+        /Odometry in both runs. FIX: transcode_bag.py rewrites clouds to velodyne layout (time = timestamp -
+        scan_min, f32), passing /lidar_imu through -> input_velodyne.bag. (Live driver already emits 'time'.)
+      GOTCHA 2: first A/B ran at rate 1.0 ALONGSIDE the live pipeline -> CPU contention + tuned too heavy ->
+        tuned dropped ~237 scans, ended early, trajectory garbage; ekf_ms inflated (p95 141, max 210). Re-ran
+        CLEAN: SIGSTOP the live laserMapping (frees CPU, reversible via SIGCONT), rate 0.5 -> both runs
+        processed the FULL bag.
+      CLEAN RESULT (current -> tuned): mean_residual 0.051 -> 0.036 m (-30%); matched_pts 361 -> 2556 (7x);
+        eig_min mean 56.9k -> 539k, MIN 178 -> 20719 (worst-case observability hugely improved); ekf_update_ms
+        mean 4.7 -> 13.9, max 19 -> 33 ms (< 50 ms / 20 Hz budget => real-time-safe). Net-displacement dropped
+        as a metric (no ground truth). Verdict: tuned is better-constrained AND affordable.
+      APPLIED (this is now the live config, pending restart): see changes section. det_range/cube_side kept.
+      CAVEAT: offline bag was 10 Hz; onboard 20 Hz has tighter 50 ms budget (33 ms max should still hold).
+        blind=0.4 on the LIVE sensor -> verify no airframe self-returns in 0.4-1.0 m.
+    files: ["scripts/replay/* (new harness)", "config/fastlio_to_fc.launch", "config/hesai_jt128.yaml"]
+
+  - id: T27
+    title: "Thumbdrive re-clone fallout: boot-from-USB fix, reformat, fstab dedup + record verify"
+    status: done
+    detail: >
+      (2026-07-08.) The SanDisk Extreme Pro thumbdrive had been dd-cloned from the internal OS disk
+      (nvme0n1), so it carried IDENTICAL GPT partition GUIDs + filesystem UUIDs. Two consequences fixed:
+      (1) BOOT-FROM-USB: firmware boot entry Boot0001 targets the ESP by GPT GUID (ff9ebfc2-...); the clone's
+        ESP had the same GUID, so with the stick plugged in at power-on the firmware booted the USB copy.
+        FIX: randomized the clone's partition GUIDs -> `sgdisk --partition-guid=1:R/2:R /dev/sda`. Boot0001 now
+        resolves only to the internal disk. (Data/filesystems untouched; PARTUUID changes only.)
+      (2) MOUNT / RECORDINGS: original recordings were lost when the stick was dd'd over (accepted by user).
+        Reformatted the recordings partition: `mkfs.ext4 -L recordings /dev/sda2` (PARTUUID preserved:
+        30bbee5a-e842-41ea-9b11-91d15f90e637). Persistent mount is now by PARTUUID (unique), NOT fs-UUID
+        (still duplicated with internal root -> using fs-UUID would be ambiguous/dangerous):
+          PARTUUID=30bbee5a-...-91d15f90e637  /mnt/thumbdrive  ext4  defaults,nofail,x-systemd.device-timeout=10s  0  2
+        GOTCHA: a STALE duplicate fstab line (UUID=4667-2F38 ... exfat, the old pre-clone stick) shadowed the
+        new one -> systemd built mnt-thumbdrive.mount from the dead exfat device -> "Dependency failed", nothing
+        mounted after reboot. FIX: deleted the stale line. Also recreated the `.slam_thumbdrive` marker (mkfs
+        wiped it; loggers refuse to record without it) and restarted the container so the /mnt/thumbdrive:/mnt/usb
+        bind re-resolved to the freshly-mounted drive. Verified end-to-end: host /mnt/thumbdrive == /dev/sda2 (rw),
+        marker present, container /mnt/usb writable.
+      RECORD VERIFICATION (fake triggers, NO ARMING, disarmed bench):
+        - auto-record (flight_recorder, fake /mavros/state armed=true->false): SESSION START/STOP OK, valid lz4
+          bag, 29-topic diagnostic set. (Real mavros publishes armed=false @2Hz -> races the fake, so hold the
+          fake window short; short bag is expected, mechanism confirmed.)
+        - ch9-record (ch9_logger, fake /mavros/rc/in ch9=1800 HIGH -> 1000 LOW): ~5s session, 65MB bag
+          (/lidar_imu 1926 + /lidar_points 87) + .las map snapshot; clean stop on CH9 LOW. HIGH/LOW values kept
+          OUTSIDE drift_monitor band [1400,1600] so NO LAND fired (confirmed in drift_monitor log).
+        - ch9-reset (drift_monitor): NOT triggered -- fake CH9 mid-band would make drift_monitor send set_mode
+          LAND to the live FC (a mode-change command; barred by the hard safety rule). Wiring confirmed from
+          logs/source only (subscribed /mavros/rc/in, band[1400,1600], 1.5s dwell, gates auto_restart+critical_fc).
+      NOTE: container healthcheck reports "unhealthy" -- false alarm; the healthcheck runs `rostopic` without
+        sourcing ROS so it always errors. Pipeline itself fully up (lidar 20Hz, imu 438Hz, Odometry/vision_pose
+        20Hz, local_position 50Hz).
+    files: ["/etc/fstab (host: stale exfat line removed, PARTUUID line kept)", "/dev/sda GPT GUIDs (host)", "/mnt/thumbdrive/.slam_thumbdrive"]
+    supersedes: "T20 (old UUID=bd2f03a0 fs-UUID mount; drive was re-cloned -> now PARTUUID mount)"
+    priority: high
+
 # -----------------------------------------------------------------------------
 # CODE CHANGES (source of truth for what was modified)
 # -----------------------------------------------------------------------------
@@ -426,6 +554,27 @@ changes:
   - file: "docker_src/.../FAST-LIO/src/laserMapping.cpp (eigenvalues)"
     change: "T12: HtDH translation-block eigenvalues -> global hdh_eig_pos; /fastlio_health 4->7 floats [..,eig_min,mid,max]."
     tracked_in_git: false
+  - file: "docker_src/.../FAST-LIO/src/laserMapping.cpp (velocity)"
+    change: "T23: publish_odometry fills odomAftMapped.twist.twist.linear from state_point.vel (WORLD frame) -> /Odometry twist no longer zero. Enables ExternalNav velocity fusion."
+    tracked_in_git: false
+    warning: "GITIGNORED. Baked into image 5fb89f2fae6f. Fork push pending (P10)."
+  - file: "docker_src/.../FAST-LIO/src/fastlio_mavros_bridge.py (velocity)"
+    change: "T23: new ~publish_velocity (default true) publisher /mavros/vision_speed/speed_vector (Vector3Stamped); transforms /Odometry twist with the SAME position_matrix + Rz(-yaw0) as position. Import Vector3Stamped."
+    tracked_in_git: false
+    warning: "GITIGNORED. Baked into image 5fb89f2fae6f. Fork push pending (P10)."
+  - file: "config/fastlio_to_fc.launch (confined tuning T26)"
+    change: "point_filter_num 3->1, filter_size_surf 0.5->0.25, filter_size_map 0.5->0.25, max_iteration 3->4. cube_side_length kept 300."
+    tracked_in_git: "tracked (committed 1e0d985); bind-mounted -> live on next restart"
+  - file: "config/hesai_jt128.yaml (confined tuning T26)"
+    change: "blind 1.0->0.4 (use close walls/ceiling). det_range kept 100. VERIFY no airframe self-returns 0.4-1.0 m."
+    tracked_in_git: "tracked; bind-mounted -> live on next restart"
+  - file: "docker_src/.../FAST-LIO/src/drift_monitor.py (NEW, T27)"
+    change: "Drift early-warning node: subscribes /fastlio_health (eig_min+matched), OR-logic+hysteresis, publishes /slam/drift_risk + /slam/arm_interlock, GCS banner on WARN. CRITICAL actions (kill/respawn laserMapping; set_mode LAND) GATED OFF by default."
+    tracked_in_git: false
+    warning: "GITIGNORED (docker_src). Built+installed in container; needs image bake + fork push to persist."
+  - file: "docker_src/.../FAST-LIO/CMakeLists.txt + config/fastlio_to_fc.launch (T27)"
+    change: "Register drift_monitor.py (catkin_install_python); add drift_monitor node (flags OFF) + respawn=\"true\" on laserMapping (auto-restart only that node on exit)."
+    tracked_in_git: "launch tracked/bind-mounted; CMakeLists gitignored (docker_src)"
   - file: "config/hesai_jt128.yaml"
     change: "T14: pcd_save_en true->false (was writing multi-GB PCDs + blocking disk I/O)."
     tracked_in_git: "untracked"
@@ -524,9 +673,9 @@ pending:
 
   - id: P6
     title: "Motion runaway (flyaway risk) -- TRUE root cause was VELXY/VELZ, see T13"
-    status: "fixed-then-reverted-by-user"
-    detail: "Two compounding causes found+fixed: (1) timestamp clock (T11) and (2) THE BIG ONE: EK3_SRC1_VELXY/VELZ=6 with no velocity source (T13). With both fixed (VELXY=0), run-3 bench showed clean tracking+hold. *** User set VELXY/VELZ back to 6 at session end -> runaway will return under motion unless velocity is published (see P9). *** Also note y-flip (T15) re-introduces motion divergence independently."
-    priority: high
+    status: "resolved"
+    detail: "Two compounding causes found+fixed: (1) timestamp clock (T11) and (2) EK3_SRC1_VELXY/VELZ=6 with no velocity source (T13). RESOLVED 2026-06-21: velocity is now PUBLISHED (T23/P9), so VELXY/VELZ=6 is a valid config -- no runaway. y-flip (T15) was already removed in T18. NOTE: the separate uncontrolled-yaw-spin flight (T22) was MECHANICAL (motor direction), unrelated to this."
+    priority: done
 
   - id: P4
     title: "Remote layout: add HtDH eigenvalue plots"
@@ -549,9 +698,358 @@ pending:
 
   - id: P9
     title: "Publish a velocity source so EK3_SRC1_VELXY=6 is valid"
+    status: done
+    detail: "DONE 2026-06-21 (T23). Approach (b): laserMapping fills /Odometry twist from IEKF state_point.vel; bridge publishes /mavros/vision_speed/speed_vector with the same frame transform as position. Bench-validated (fwd+x/left+y/up+z, ~0 at rest). Baked into image. VELXY/VELZ=6 is now a valid (non-runaway) config. Flew; effect subtle (no noticeable difference, as expected). Whether EKF fused vs gated not log-confirmed."
+    priority: done
+
+  - id: P10
+    title: "Push velocity code (laserMapping.cpp + fastlio_mavros_bridge.py) to the RevoluteRobotics fork"
+    status: blocked
+    detail: "BLOCKED on git identity: docker_src/FAST_LIO_SLAM clone (remote origin RevoluteRobotics/FAST_LIO_SLAM, branch master, shallow) has no user.name/user.email. User decided to commit EVERYTHING in the 2 files to master (velocity + pre-existing uncommitted production code: T18 bridge rewrite, /fastlio_health, /Laser_map thread, mutex locking). Need a name+email to author the commit (I refused to fabricate one; classifier also blocked impersonating 'idan'). Image bake (5fb89f2fae6f) means runtime persistence is solid regardless; fork push is for re-clone durability only."
+    priority: medium
+
+  - id: P11
+    title: "Durable FC USB device mapping (mavros keeps dropping after reboot)"
     status: pending
-    detail: "User set VELXY/VELZ=6 (T13) but FAST-LIO publishes no velocity. To make 6 work (and improve fast-motion tracking): (a) bridge differentiates position -> /mavros/vision_speed/speed_vector, or (b) patch laserMapping to fill the zeroed /Odometry twist with the IEKF velocity state. NEITHER done. Until done, VELXY=6 = runaway config."
+    detail: "Recurring pain: docker-compose maps /dev/ttyACM0 STATICALLY at container CREATE. On reboot, if the FC isn't enumerated yet (unplugged/still booting) the container comes up WITHOUT the device -> mavros dies, no respawn. Also USB renumbering (ttyACM0<->1). Durable fix: map by-id (/dev/serial/by-id/usb-mRo_mRoPixracerPro-bdshot_4B0032001551333237343033-if00:/dev/ttyACM0) + add a wait-for-device ExecStartPre to slam-container.service. Workaround for now: ensure FC powered+plugged BEFORE boot; if container lacks ttyACM, recreate (docker compose up -d --force-recreate)."
+    priority: medium
+
+  - id: P12
+    title: "Apply confined-space FAST-LIO tuning (plan drafted T25)"
+    status: done
+    detail: "DONE 2026-06-22 (T26). A/B-validated subset applied (Tier 1 + max_iter; Tier 2 excluded per user): launch -> point_filter_num 3->1, filter_size_surf/map 0.5->0.25, max_iteration 3->4; yaml -> blind 1.0->0.4. det_range(100)/cube_side(300) unchanged. Applies on next pipeline restart (bind-mounted)."
+    priority: medium
+
+  - id: P13
+    title: "Drift early-warning + LAND/restart (drift CRITICAL + CH9 trigger) -- IMPLEMENTED, gates ON, live-tested"
+    status: in_progress
+    implementation: >
+      (2026-06-23, T27/T28) drift_monitor.py full feature set, gates ENABLED per user sign-off. LAND + restart
+      fires from EITHER drift CRITICAL OR pilot CH9 (3-pos middle ~1500, edge-triggered, 1400-1600 band).
+      Shared _land_and_restart: set_mode LAND (enable_critical_fc) + restart BOTH /laserMapping AND
+      /fastlio_mavros_bridge (enable_auto_restart, restart_nodes; both respawn=true) so the SLAM->FC chain
+      reboots fully (clears bridge yaw-datum). Arm-block left to FC EKF prearm (vision drops during restart);
+      /slam/arm_interlock is advisory. Robustness: (a) startup-in-band guard (ch9_in_band=None -> never fire if
+      booted in-band); (b) gap re-warm (health gap => SLAM restarted => drop baseline, latch OK => no CRITICAL
+      restart-loop); (c) interlock releases ONLY after the restart's health-gap is seen + k_release healthy
+      scans (fixes premature 'ready to arm'). GCS msgs trimmed to 3: 'Restart triggered manually'|'Drift
+      detected, restart triggered' -> 'Restart in progress' -> 'Restarted, ready to arm'. No heartbeat. WARN
+      is /slam/drift_risk topic-only (no banner).
+    live_test: >
+      CH9 flip on the real controller (DISARMED): out-of-band(1045) -> middle(1495) fired correctly -> LAND
+      commanded, FC->LAND, both nodes restarted+recovered, re-warm prevented a loop. First test exposed a
+      premature 'ready to arm' (released instantly off stale n_ok) -> FIXED (saw_gap guard) + re-validated
+      offline (locked at risk-msg#24, released only at #70 after the simulated gap+recovery).
+    validation_offline: >
+      Replayed out_tuned.bag /fastlio_health (2327 scans) into the node: 2148 OK (92%) / 179 WARN (8%) / 0
+      CRITICAL. WARN fired on the degenerate stretch (~scans 1348-1539, longest run 158) and stayed OK
+      elsewhere; NO false CRITICAL (bag never hit eig<5k or matched<150); interlock stayed RELEASED (only
+      locks on CRITICAL); clean hysteresis (solid blocks, no flicker). Detection logic confirmed correct.
+    detail: >
+      Read-only drift_monitor node design (2026-06-22). Detects the CAUSE of drift (lost observability)
+      from /fastlio_health BEFORE the trajectory diverges. Primary signal eig_min (weakest-axis
+      observability); matched_pts is a secondary/confirming signal (weaker -- it measures quantity not
+      geometry, so it misses the high-count corridor-degeneracy case eig_min catches). NO ground truth
+      online, so this detects drift-prone CONDITIONS + divergence symptoms, not absolute drift.
+    signals: "eig_min = /fastlio_health.data[4] (primary) ; matched_pts = data[0] (secondary)"
+    logic: >
+      Each metric gets a RELATIVE trigger (vs rolling median, adapts to env/config) -> WARN, and an
+      ABSOLUTE floor (safety net if baseline itself is bad) -> CRITICAL. Combine with OR within each tier
+      (any one is enough -- NOT both), severity = worst that fired, then HYSTERESIS K=5 consecutive scans
+      before latching (suppresses single-scan blips). eig_min owns the primary CRITICAL; matched CRITICAL
+      is the extreme-starvation backstop.
+    thresholds_calibrated: >
+      From massrobotics_3rd_floor.bag, TUNED config (T26 calibrate_thresholds.py; recalibrate per config --
+      old config baselines were ~7-10x lower). eig_min median ~591k: WARN < 0.2xmedian (~110k) OR < 40k ;
+      CRITICAL < ~5k. matched median ~2638: WARN < 0.25xmedian (~600) OR < 300 ; CRITICAL < 150.
+      (Bag was 10 Hz; live 20 Hz -- relative thresholds transfer, re-confirm absolute floors live.)
+    response: >
+      WARN  -> notify pilot only: STATUSTEXT to GCS message banner ("DRIFT WARNING: eig_min/matched"). NO FC action.
+      CRITICAL -> (1) command FC to LAND mode, (2) restart the FAST-LIO node, (3) set ARM INTERLOCK = LOCKED
+                  (prearm refuses arm) until FAST-LIO finishes restarting AND health back in nominal range for
+                  K scans, then RELEASE -> pilot may arm only after that.
+    safety_caveats: >
+      (a) CRITICAL auto-commands the FC (LAND + arm lock) -> a false-positive CRITICAL forces an unwanted
+      mid-flight auto-land; consider a LARGER K for the CRITICAL/LAND path than for WARN.
+      (b) LAND still uses the (degraded) SLAM for horizontal hold during descent -- confirm LAND behaves
+      acceptably under poor position, or pick a mode safer under bad horizontal estimate.
+      *** Implementing the CRITICAL path crosses the project read-only rule (it commands the FC); explicit
+      user sign-off required before any code that sends mode-change/arming commands. ***
+    flowchart: |
+      (drift_monitor logic -- one pass per /fastlio_health scan, read top to bottom)
+                  ┌──────────────────────────────┐
+                  │ /fastlio_health (per scan)    │
+                  │  eig_min (d[4]), matched (d[0])│
+                  └───────────────┬──────────────┘
+                                  ▼
+              ┌───────────────────────────────────────────────────────────┐
+              │ WARN gate (OR):  eig_min<0.2×med  OR  matched<0.25×med OR <300│
+              │ CRIT gate (OR):  eig_min<40k/5k   OR  matched<150 (starvation)│
+              │ severity = worst that fired ; HYSTERESIS K=5 scans           │
+              └───────────────┬───────────────────────────────────────────┘
+                              ▼
+                      ┌───────────────┐
+                      │  severity?    │
+                      └──┬────────┬───┬┘
+                  OK     │   WARN │   │ CRITICAL
+              ┌──────────┘        │   └───────────────────────────────┐
+              ▼                   ▼                                    ▼
+       ┌─────────────┐  ┌──────────────────────┐  ┌──────────────────────────────────┐
+       │ nominal;     │  │ NOTIFY pilot only:    │  │ (1) FC → LAND mode                │
+       │ keep interlock│  │  STATUSTEXT to GCS    │  │ (2) restart FAST-LIO node          │
+       │ until healthy │  │  msg banner           │  │ (3) ARM INTERLOCK = LOCKED         │
+       │ + restart done│  │ NO FC action          │  └─────────────────┬────────────────┘
+       └──────┬───────┘  └───────────┬──────────┘                    ▼
+              │                      │             ┌──────────────────────────────────┐
+              │                      │             │ FAST-LIO restarting...             │
+              │                      │             │  wait re-init + health nominal     │
+              │                      │             │  for K scans                       │
+              │                      │             └─────────────────┬────────────────┘
+              │                      │                               ▼ healthy
+              │                      │             ┌──────────────────────────────────┐
+              │                      │             │ ARM INTERLOCK = RELEASED           │
+              │                      │             │ pilot may arm ONLY now             │
+              │                      │             └─────────────────┬────────────────┘
+              └──────────────────────┴───────────────────────────────┘
+                                     ▼
+                       (loop on next /fastlio_health scan)
+
+       ARM INTERLOCK gate (enforced every arm attempt):
+         LOCKED   → prearm refuses arm ("FAST-LIO restarting")
+         RELEASED → arm permitted
+    files: ["docker_src/.../FAST-LIO/src/drift_monitor.py (NEW, built+installed)", "docker_src/.../FAST-LIO/CMakeLists.txt (catkin_install_python)", "config/fastlio_to_fc.launch (drift_monitor node + laserMapping respawn=true)", "scripts/replay/calibrate_thresholds.py (thresholds)", "docs/DRIFT_MONITOR_PLAN.md (plan)"]
+    trigger_update: "WARN now uses rolling-AVERAGE baseline + factor 0.2 for both (eig<0.2xavg|<40k OR matched<0.2xavg|<300); K=5 for BOTH warn & crit (=0.25s @20Hz). Re-validated offline: 2212 OK/115 WARN/0 CRIT, same degenerate stretch."
+    image_baked: "DONE -- slam-system:latest = 9be489cc0e95 (drift_monitor + velocity verified baked). Survives container RECREATE."
+    remaining: "fork push (P10 -- docker_src gitignored, re-clone would wipe drift_monitor.py); live read-only run (needs P14 pipeline restart); bench/SITL test enable_auto_restart, then enable_critical_fc (LAND) -- LATTER NEEDS EXPLICIT SIGN-OFF."
     priority: high
+
+  - id: P14
+    title: "Live laserMapping is DOWN -- restart the pipeline"
+    status: pending
+    detail: >
+      (2026-06-22) Live /laserMapping not running (only roslaunch/hesai/mavros remain; no /Odometry,
+      /fastlio_health). Almost certainly crashed after the SIGSTOP/SIGCONT freeze of the live node during
+      the clean A/B run (T26 clean re-run) -- the RUNNING launch predates the respawn="true" fix so it
+      wasn't auto-restarted. Drone benched, no danger. FIX: `sudo systemctl restart slam-fastlio.service`
+      -- recovers laserMapping AND activates the confined tuning (P12) + drift_monitor (P13) + respawn.
+      After restart, future laserMapping exits self-heal via respawn.
+    resolution: "(2026-07-01) RESOLVED. Reboot brings the full pipeline up cleanly from systemd + baked image; confirmed laserMapping/Odometry/health streaming post-reboot. Confined tuning + drift_monitor + respawn all active."
+    status_final: done
+    priority: high
+
+  - id: P15
+    title: "CH9 RC-triggered logger (rosbag + LAS map) -- DONE"
+    status: done
+    detail: >
+      ch9_logger.py: CH9 HIGH(>=1700) -> start session /mnt/usb/MM_DD_YYYY_HH_mm_ss/ with <ts>.bag
+      (lz4, /lidar_points+/lidar_imu) + <ts>.las (LAS of /Laser_map, overwritten every 30s); CH9 LOW(<=1300)
+      or LAND/restart -> stop. Thumbdrive marker guard (.slam_thumbdrive) -> never writes internal disk.
+      GCS banners now include free space: "recording started/finished, X/Y GB (Z% free)". CH9 middle stays
+      the drift_monitor LAND trigger (dwell) so transit LOW<->HIGH won't fire LAND. Validated live (real CH9
+      toggle -> real bag+las) and via fake trigger.
+    files: ["docker_src/.../FAST-LIO/src/ch9_logger.py", "config/fastlio_to_fc.launch (node 9)", "Dockerfile (laspy)"]
+    priority: medium
+
+  - id: P16
+    title: "flight_recorder -- arm-triggered full diagnostic rosbag recorder -- DONE"
+    status: done
+    detail: >
+      flight_recorder.py: records ONLY while ARMED (reads /mavros/state.armed; start on arm, stop on disarm;
+      drift/LAND does NOT stop it). READ-ONLY toward FC -- never arms/commands. Captures 29-topic Tier1+2
+      diagnostic set to /mnt/usb/MM_DD_YYYY_HH_mm_ss_flight/<ts>_N.bag (lz4, 2-min splits): raw lidar+imu
+      (offline replay), FAST-LIO odom/health, vision_pose+speed we SEND, and what FC REPORTS back
+      (local_position, altitude, estimator_status, statustext, rc in/out, imu/vibe, setpoints, battery, tf,
+      monitor verdicts) -> diagnoses the vision->FC->EKF->controller chain (e.g. the Loiter climb). trigger
+      param arm|always (always = bench test only). Thumbdrive marker guard shared with ch9_logger.
+      Validated via fake-arm test (no arming): 119MB session, 25/29 topics recorded.
+    open: "4 topics not streaming from FC on ground: altitude, estimator_status, setpoint_raw/target_local, extended_state. target_local expected silent until in a position-controlled mode; altitude/estimator_status diagnosis in progress (plugin loaded, FC not emitting msg). vfr_hud (50Hz) covers altitude+climb-rate meanwhile."
+    files: ["docker_src/.../FAST-LIO/src/flight_recorder.py (NEW)", "docker_src/.../FAST-LIO/CMakeLists.txt", "config/fastlio_to_fc.launch (node 10)"]
+    priority: high
+
+  - id: P17
+    title: "Persistent thumbdrive mount for auto-recording -- DONE"
+    status: done
+    detail: >
+      Recording drive standardized: Extreme Pro (exfat, UUID 4667-2F38). fstab: old ext4 stick (bd2f03a0)
+      entry removed, added 'UUID=4667-2F38 /mnt/thumbdrive exfat defaults,nofail,uid=1000,gid=1000 0 0' ->
+      auto-mounts at boot before slam-container. Container bind /mnt/thumbdrive->/mnt/usb is rprivate, so
+      the drive MUST be mounted before container start (reboot handles ordering; live change needs container
+      recreate). Marker .slam_thumbdrive on the drive. Verified post-reboot: /mnt/usb=/dev/sda1 932G, marker
+      present, both loggers see it.
+    note: "Dir structure: both loggers write timestamped dirs at drive root; flight_recorder appends _flight, ch9_logger bare. Double-writes lidar if armed AND CH9-high simultaneously (redundant, not a conflict)."
+    priority: medium
+
+  - id: P18
+    title: "Loiter altitude instability (facility) -- ROOT-CAUSED + FIX VALIDATED in flight"
+    status: RESOLVED
+    resolution: >
+      (2026-07-02) VALIDATED FIXED in flight. Post-tuning flight 'hover_flight_after_problem_resolution'
+      (log 96, xcorr 1.000 to its bag) matches the office baseline on EVERY metric vs the bad 'before' flight:
+      /Odometry 17->20Hz; ekf_update_ms peak 83->44ms (under 50 budget); ds_pts 13.4k->11k; VISP 17.5->20Hz;
+      velocity-innov rejection 26%->0%; EKF lane switches 4->0; FC-climb-rate-vs-vision corr -0.18->+0.94;
+      FC-alt-vs-vision divergence 5.66m->0.06m. The tuning half (vision rate) is causally proven: ekf_ms/Odom/VISP
+      improvements are deterministic results of the P19 config change, not vibration.
+      VIBRATION reframed (user insight + data): NOT an independent cause -- it is largely downstream/co-occurring
+      via a feedback loop (weak SLAM feed -> bad EKF climb-rate -> altitude excursions -> extra vibration -> noisier
+      IMU -> worse EKF). Data: within-flight corr(VibeZ,|climb-rate|)=0.38 (weak), corr(VibeZ,|throttle-change|)=0.17
+      (throttle output steady ~0.38 despite estimate swinging); vibration is mostly baseline 'motors-at-flight-power'
+      (~8-11 airborne, ~0 landed). before VibeZ peak 36.6 vs hover 14.7. So fixing SLAM rate breaks the loop at the
+      source -> hover clean on BOTH axes without any mechanical change. Vibration NOT confirmed as downstream 100%;
+      optional confirmation = a deliberately dynamic flight (manhole) staying stable+low-vibe.
+    detail: >
+      Symptom: altitude unstable in Loiter in the big facility; a prior office flight was rock-solid; Stabilize
+      (manual throttle) always fine (doesn't use the EKF vertical loop). Deep-diagnosed with BOTH the auto-record
+      rosbag (companion side) and the ArduPilot dataflash .bin (FC side), comparing the good office flight vs the
+      bad facility flight.
+      CONFIRMED PAIR: FC log '94 01-07-2026' <-> bag 07_01_2026_20_08_26_flight (altitude-trace xcorr=1.000);
+      bad flight = 07_02_2026_14_47_09_flight + log '95'.
+      RULED OUT: config change (params byte-identical except auto-relearned gyro/baro cal); SLAM accuracy
+      (observability healthy eig_min 1-2M, vision pos/vel self-consistent); FC<->NUC connection (VISP delivered,
+      0% Ign); vibration-ALONE (within-flight VibeZ<->rejection corr only 0.39; rejection even at ~0 vibe).
+      ROOT CAUSE: DEGRADED vision update rate to FC -- VISP 17.5Hz w/ 2x jitter (std 6.6->13.2ms) because FAST-LIO
+      frame-starved in the dense facility (ekf_update_ms 40mean/83peak vs 50 budget, 13.4k ds_pts ~2x office's 7k)
+      -> EKF rejected 26% of velocity innovations + 4 IMU-lane switches -> vertical-velocity estimate DECOUPLED from
+      vision (fc_vz vs vis_vz corr -0.18; FC alt diverged up to 5.66m) -> Loiter chases bad climb-rate. Vibration
+      is a downstream/co-occurring amplifier via feedback loop (see resolution), not an independent root cause.
+      Good office flight: 20Hz vision, 0% rejection, 0 lane switches, alt tracked vision to 7cm, corr 0.87.
+    fix_status: "RESOLVED by P19 compute-load tuning; validated in the 'hover' flight. Flight-data archive: office_test (good/94), before_problem_resolution (bad/95), hover_flight_after_problem_resolution (fixed/96), manhole_flight (dynamic post-fix/97) -- each dir has bag+.bin, verified xcorr=1.000."
+    detail: >
+      Symptom: altitude unstable in Loiter in the big facility; a prior office flight was rock-solid; Stabilize
+      (manual throttle) always fine (doesn't use the EKF vertical loop). Deep-diagnosed with BOTH the auto-record
+      rosbag (companion side) and the ArduPilot dataflash .bin (FC side), comparing the good office flight vs the
+      bad facility flight.
+      CONFIRMED PAIR: FC log '94 01-07-2026' <-> bag 07_01_2026_20_08_26_flight (altitude-trace xcorr=1.000);
+      bad flight = 07_02_2026_14_47_09_flight + log '95'.
+      RULED OUT: config change (params byte-identical except auto-relearned gyro/baro cal); SLAM accuracy
+      (observability healthy eig_min 1-2M, vision pos/vel self-consistent); FC<->NUC connection (VISP delivered,
+      0% Ign); vibration-ALONE (within-flight VibeZ<->rejection corr only 0.39; rejection even at ~0 vibe).
+      ROOT CAUSE (two co-occurring): (1) DEGRADED vision update rate to FC -- VISP 17.5Hz w/ 2x jitter (std
+      6.6->13.2ms) because FAST-LIO frame-starved in the dense facility (ekf_update_ms 40mean/83peak vs 50 budget,
+      13.4k ds_pts ~2x office's 7k); (2) elevated vibration PEAKS (VibeZ 36.6, 6 accel clips). Together -> EKF
+      rejected 26% of velocity innovations + 4 IMU-lane switches -> vertical-velocity estimate DECOUPLED from
+      vision (fc_vz vs vis_vz corr -0.18; FC alt diverged up to 5.66m from vision) -> Loiter chases bad climb-rate.
+      Good office flight: 20Hz vision, 0% rejection, 0 lane switches, alt tracked vision to 7cm, corr 0.87.
+    fix_status: "Half the cause (vision rate) addressed by P19 compute-load tuning. Vibration half unverified: find mechanical source since the good flight (loose prop/motor/mount), improve FC isolation, enable/tune INS_HNTCH notch. Decisive test = next facility flight."
+    next: "Facility re-flight after P19 tuning; auto-diff bag+.bin (VISP rate/jitter, VibeZ, XKF4.SV reject%, lane switches, fc_vz-vs-vision corr) vs the two baselines. If vision holds 20Hz and still unstable -> vibration; else -> was the rate."
+    priority: high
+
+  - id: P19
+    title: "FAST-LIO compute-load tuning for dense facility (reduce ekf_update_ms) -- VALIDATED"
+    status: RESOLVED
+    detail: >
+      Facility flight ran /Odometry at 17Hz (ekf_update_ms mean 40 / PEAK 83ms vs 50ms budget; ~13.4k downsampled
+      pts, ~2x the office). point_filter_num 1->2 (done earlier) was INSUFFICIENT in the facility (user-confirmed:
+      still 17Hz). Relaxed the confined-space tuning further (config/fastlio_to_fc.launch, bind-mounted -> no
+      rebuild): point_filter_num 2->3, max_iteration 4->3, filter_size_surf 0.25->0.35, filter_size_map 0.25->0.35.
+      Tradeoff: coarser map/scan resolution (fine in a big open facility).
+    validated: >
+      (2026-07-02) CONFIRMED in the 'hover' flight (log 96): ekf_update_ms peak 83->44ms (under budget),
+      /Odometry 17->20Hz, ds_pts 13.4k->11k, VISP 17.5->20Hz -- which cascaded to fix P18 (0% innov rejection,
+      0 lane switches, altitude re-coupled to vision). Directly resolves the P18 root cause.
+    alt_fix: "Not needed now, but if a denser space starves it again: raise MP_PROC_NUM (OpenMP threads) in FAST-LIO CMakeLists 3->~8 to use the idle cores (laserMapping was ~293% CPU / 3 of 12 cores) -- keeps full resolution, needs rebuild+rebake."
+    persistence: "All bind-mounted config; image already baked (flight_recorder+ch9 banners = slam-system:latest 5e076c1628b9); NO rebuild needed. Reboot restores everything incl FC link. Changelog: CHANGELOG.md (new)."
+    next: "Optional: run auto-diff on manhole_flight (log 97, dynamic profile) to confirm it holds under aggressive climb/descent and to test whether vibration is downstream."
+    priority: high
+
+  - id: P20
+    title: "Manhole-entrance altitude excursions -- RESOLVED: surface tracking off glitchy rangefinder"
+    status: RESOLVED
+    detail: >
+      manhole_flight (log 97 + bag): took off, climbed to the manhole entrance (~4.4m) fine, then hit
+      uncommanded altitude drop/climb (~1-1.5m) while trying to hold at the opening; aborted, did not enter.
+      Flew into the SAME manhole fine in STABILIZE (no logs) -- the natural experiment that isolates the fault
+      to a Loiter-only control path.
+      RULED OUT (all with data): SLAM/vision (accurate; smooth, no jumps; XKF3 innovations ~0; /Odometry held
+      20Hz -- the P19 fix stuck); vibration (VibeZ 15.6 low); EKF velocity-rejection (0%); IMU lane switches (0);
+      attitude-thrust coupling (tilt 2-9deg); thrust saturation (motors ~1750/1965); battery sag (gradual only);
+      throttle-stick trim (user confirms calibrated; centered stick coincided with a COMMANDED descent);
+      inner-loop PID (DCRt~=CRt and PSCD TVD~=VD to +-4cm/s -> inner controller HEALTHY).
+      CONFIRMED ROOT CAUSE: ArduPilot SURFACE TRACKING was driving the altitude TARGET off the downward
+      rangefinder. Params at flight time: SURFTRAK_MODE=1, WPNAV_RFND_USE=1, RNGFND1_TYPE=10 ORIENT=25(down),
+      MAX_CM=5000. This is SEPARATE from the EKF height source (EK3_SRC1_POSZ=6 vision, EK3_RNG_USE_HGT=-1 --
+      user correctly 'not using rangefinder' for the EKF, but surface tracking is a different active consumer).
+      Over the open shaft the rangefinder glitched (RFND status flickered NoData/OutOfRange/Good, 0-5m while
+      hovering at 4.4m); surface tracking kept dis/re-engaging and latched garbage terrain targets. DIRECT PROOF:
+      CTUN.DSAlt (surface-tracking target) drove CTUN.DAlt (altitude target) -- DAlt converged to DSAlt at both
+      drops (4.4->3.0, then 3.5->2.0); ST engaged 79% of the first drop; SAlt terrain-est 50% noisier at entrance
+      (1.66 vs 1.10m). Loiter-only -> Stabilize flew in fine (no surface tracking). NOT PID, NOT SLAM, NOT airframe.
+    patch: "FC param SURFTRAK_MODE=0 (stop rangefinder from moving the altitude target); keep EK3_SRC1_POSZ=6 (vision). Belt-and-suspenders WPNAV_RFND_USE=0 also recommended for nav modes."
+    validated: >
+      (2026-07-08) USER APPLIED SURFTRAK_MODE=0 and re-flew -- the changes WORKED: manhole entrance
+      altitude now holds in Loiter (no uncommanded drop/climb), vision-only vertical loop stable.
+      Confirms the surface-tracking root cause. SURFTRAK_MODE=0 alone was sufficient to resolve.
+    flight_archive: "office_test(94), before_problem_resolution(95), hover_flight_after_problem_resolution(96), manhole_flight(97) -- each dir on thumbdrive has bag+.bin, xcorr=1.000 verified. CHANGELOG.md at drive root."
+    next: "Done. (Optional: capture a post-fix manhole flight via flight_recorder for the archive.)"
+    priority: high
+
+  - id: P21
+    title: "CH9 restart never reached controller -- FC not streaming RC to companion (SR0_RC_CHAN=0)"
+    status: RESOLVED
+    detail: >
+      User reported no GCS banners on the SIYI UniRC 7 Pro when flipping CH9 to restart. Isolated the chain:
+      drift_monitor DOES publish 4 banners to /mavros/statustext/send and mavros relays them (confirmed a manual
+      test banner reached the SIYI). Real cause: /mavros/rc/in was EMPTY -- the FC was not streaming RC_CHANNELS
+      to the companion/USB link (SERIAL0). Root cause param: SR0_RC_CHAN=0 (SR1_RC_CHAN=2 was fine -> SIYI had RC,
+      mavros did not). So CH9 flips never reached drift_monitor -> failover never fired -> no banners generated.
+      NOT related to the OF-failover code (banner path proven working).
+    patch: >
+      FC param SR0_RC_CHAN 0->10 (persists in FC EEPROM). BUT the param alone is insufficient: ArduPilot latches
+      SR rates at GCS-connect, so mavros must REQUEST the stream after each (re)connect. Added a permanent
+      keepalive in drift_monitor.py: on every /mavros/state connect it calls /mavros/set_stream_rate
+      (STREAM_RC_CHANNELS=3 @ rc_stream_rate Hz). Params request_rc_stream=true, rc_stream_rate=10 in the launch.
+    validated: >
+      (2026-07-23) Verified live: real CH9 flip fired the full failover sequence (FAILOVER -> EKF src OF(SRC2) ->
+      3.85s health gap = SLAM restart -> back to SRC1). Keepalive proven on a container recreate: RC auto-streamed
+      at 10Hz with NO manual kick. drift_monitor.py now bind-mounted (docker-compose.yml) + recreate-tested.
+    priority: high
+
+  - id: P22
+    title: "Switchable OF/LAND restart mode + phone web UI + confined-space FAST-LIO param sweep"
+    status: RESOLVED
+    detail: >
+      (1) restart_mode: added a param (of|land) to drift_monitor.py. Both triggers (drift CRITICAL + CH9) share
+      _execute_restart() which branches: 'of' = EKF source failover SLAM(SRC1)->OF(SRC2), switch back on recovery
+      (NO flight-mode change); 'land' = set_mode LAND (code-complete, NEVER fired/armed during testing).
+      (2) ~/Documents/switch_restart_mode.sh {of|land|--status} -- edits launch file (persistent) + live rosparam
+      + restarts drift_monitor node (~5s, no full pipeline bounce). Verified of<->land both ways.
+      (3) ~/Documents/mode_switch_server.py -- zero-dep stdlib web UI (black/yellow Revolute theme #FDD300/#000/#CCC),
+      auto-starts via systemd slam-mode-web (enabled), served at STATIC URL http://revolute.local:8088 (mDNS/avahi,
+      follows the machine across hotspots). Shows live mode + state; LAND button confirms.
+      (4) Confined-space param sweep: 35 offline replays (7 configs S0..S6 x 5 newest flight bags) on isolated ROS
+      master :11312 (never touched live pipeline/FC). Determinism <1%. Harness: scripts/replay/sweep_all.sh,
+      sweep_run_one.sh, analyze_sweep.py.
+    findings: >
+      Finer voxel (S0 0.35/pf3/it3 -> S6 0.15/pf1/it4) DOUBLES average observability (matched +135%, eig_min +140%
+      on starved bags) BUT does NOT reduce drift risk: m_min and crit-exposure FLAT across all configs; worst-case
+      scan is byte-identical across S0/S3/S6 (matched=54/81, feats_down=354/424) because it is INPUT STARVATION
+      (raw scan had ~no points at that viewpoint) -- unfixable by any downsample param. Confirmed root cause is
+      sensing/geometry, not processing. Max sub-floor DWELL only 3-4 scans (~0.2s), p5=242-282 (well above 150
+      floor) -> starvation was brief/borderline sub-threshold; k_crit=5 hysteresis well-tuned. Compute rises 2-3x
+      by S6 (offline ms only, directional). BEST BUCKET = S3 (0.25/0.25/pf2/it4): +28% matched/+31% eig_min at
+      compute ~= baseline (the knee). NOTE: S3 raises AVERAGE margin only; it does NOT reduce drift events.
+    triggers_analysis: >
+      Separate: matched_pts<150 is the primary/earliest drift detector; eig_min<5000 is near dead-weight (could
+      raise to ~15-20k as free insurance for corridor/degenerate-axis geometry, zero false positives on 8 bags).
+      Condition number (eig_min/eig_max) LAGS matched and misses events -> classifier only, NOT a trigger.
+      matched+eig already OR-combined (design). Better worst-case metric than m_min = max sub-floor DWELL (says
+      'how long starved', distinguishes survivable blips from sustained). NO trigger changes applied (user pinned).
+    persistence: "restart_mode/RC params in bind-mounted launch (git-tracked); drift_monitor.py bind-mounted + recreate-verified; SR0_RC_CHAN in FC EEPROM; web UI systemd-enabled. NONE pushed to fork yet (docker_src gitignored)."
+    docs: "docs/DRIFT_MONITOR_FLOW.md (ASCII flowchart). Sweep outputs: /mnt/usb/replay_sweep/<config>/*.bag (35). Effective config snapshots: ~/Documents/hesai_jt128_effective.yaml + _current.yaml."
+    profiles_decided: >
+      (2026-07-23) THREE env profiles chosen (surf/map, point_filter_num, max_iteration; constants blind 0.4,
+      det_range 100, cube 300 unless noted). Logic: fine voxel is affordable where input is SPARSE and
+      unaffordable where DENSE -> inverts onto environment.
+        1. OPEN space           = S0 baseline (0.35 / 3 / 3) -- dense input, compute-bound, coarse holds 20Hz.
+        2. TIGHT / small rooms   = S3          (0.25 / 2 / 4) -- moderate density, the knee (+28% matched @ ~base compute).
+        3. CONFINED / rounded / corners = S4    (0.22 / 2 / 4) -- sparse input, extract max, still real-time (~84ms max).
+      Rejected S5/S6 (pf1): 2-3x compute tail for gains that DON'T touch the drift floor. NEVER run tight/confined
+      (fine-voxel) config in open/dense space -> would blow the compute budget. Optional untested: lower
+      det_range/cube for small rooms to save compute+RAM. Confined config raises AVERAGE margin only, NOT drift-event rate.
+    next: >
+      Optional: (a) build switch_slam_profile.sh {open|tight|confined} = S0/S3/S4 (restart-based, like the OF/LAND
+      switch; deferred pending user go); (b) save docs/CONFINED_SPACE_SWEEP_RESULTS.md; (c) push drift_monitor.py
+      to the fork; (d) real confined-space drift fix is PHYSICAL (sensor FOV/orientation, flight profile), not params.
+    priority: medium
 
 # -----------------------------------------------------------------------------
 # QUICK VERIFICATION COMMANDS

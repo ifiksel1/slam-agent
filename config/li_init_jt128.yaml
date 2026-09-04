@@ -29,9 +29,13 @@ initialization:
     # Live pipeline runs at 20 Hz (measured), not the upstream default of 10.
     orig_odom_freq: 20
     cut_frame_num: 2             # 20 Hz x 2 = 40 Hz effective, in line with upstream configs
-    # MEASURED on this unit, 8690 samples over 20 s stationary (sd 0.028 m/s^2).
-    # Gravity sits on +y, consistent with the body-frame convention.
-    mean_acc_norm: 9.7977
+    # PER-UNIT VALUE -- re-measure whenever the sensor is swapped. This is the new
+    # unit's accel scale; it differs from the previous unit's 9.7977 by 0.063 m/s^2
+    # (0.64%), enough to bias the accel-bias estimate and the gravity alignment.
+    # MEASURED on THIS unit, 4278 samples over 22 s stationary (sd 0.048 m/s^2).
+    # Gravity sits on +y, same body-frame convention as the previous unit.
+    #   previous unit (2026-08-09): 9.7977, 8690 samples, sd 0.028
+    mean_acc_norm: 9.8605
     online_refine_time: 20.0     # upstream recommends 15-30 s
     data_accum_length: 300       # dense sensor (115200 pts/frame); raise if it reports insufficient data
     Rot_LI_cov:   [ 0.00005, 0.00005, 0.00005 ]

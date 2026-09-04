@@ -14,10 +14,10 @@
   <!-- FAST-LIO params (same as mapping_hesai_jt128.launch) -->
   <rosparam command="load" file="$(find fast_lio)/config/hesai_jt128.yaml" />
   <param name="feature_extract_enable" type="bool" value="0"/>
-  <param name="point_filter_num" type="int" value="3"/>   <!-- 2->3 (2026-07-02): =2 still 17Hz/ekf 83ms peak in DENSE facility (13.4k ds_pts); =3 cuts input points -->
-  <param name="max_iteration" type="int" value="3" />     <!-- 4->3 (2026-07-02): cut IEKF iterations to reduce per-scan cost in dense facility -->
-  <param name="filter_size_surf" type="double" value="0.35" />  <!-- 0.25->0.35 (2026-07-02): coarser voxel -> fewer ds_pts in dense facility -->
-  <param name="filter_size_map" type="double" value="0.35" />   <!-- 0.25->0.35 (2026-07-02): coarser map voxel -> less EKF cost -->
+  <param name="point_filter_num" type="int" value="2"/>   <!-- 2->3 (2026-07-02): =2 still 17Hz/ekf 83ms peak in DENSE facility (13.4k ds_pts); =3 cuts input points -->
+  <param name="max_iteration" type="int" value="4" />     <!-- 4->3 (2026-07-02): cut IEKF iterations to reduce per-scan cost in dense facility -->
+  <param name="filter_size_surf" type="double" value="0.22" />  <!-- 0.25->0.35 (2026-07-02): coarser voxel -> fewer ds_pts in dense facility -->
+  <param name="filter_size_map" type="double" value="0.22" />   <!-- 0.25->0.35 (2026-07-02): coarser map voxel -> less EKF cost -->
   <!-- NOTE: confined tuning kept cube_side_length=300 + det_range=100 unchanged (Tier 2 excluded).
        Real-time cost validated offline (uncontended): ekf_update_ms max 33 ms < 50 ms (20 Hz budget). -->
 
