@@ -10,11 +10,20 @@ Replays the ACTUAL trigger timestamps from that flight's drift_monitor log:
   17:25:33.738  ...                                           eig=4651 matched=33
   17:25:39.066  ...                                           eig=4391 matched=32
 
-Five restarts in 26 seconds. Each killed laserMapping, each re-warmed cleanly,
-and each re-fired within 2 s of the re-warm because the geometry was starved --
-matched 26-33 against a floor of 150 -- and a fresh process cannot invent
-features. The vehicle was disarmed; armed it would have been on optical flow
-with SLAM dying every 5.2 s.
+PROVENANCE: these triggers were INDUCED. The operator held a hand in front of
+the lidar, deliberately, with the vehicle disarmed on the bench. So this is not
+evidence that the aircraft starves its own geometry in flight -- the confined
+-space sweep puts the worst real sub-floor dwell at 3-4 scans, below the k_crit
+of 5, meaning drift CRITICAL would not have fired at all in any of those 22
+flights. It is a controlled, reproducible starvation source, which is what makes
+it a good regression fixture.
+
+What it exposed is real regardless of cause. Five restarts in 26 seconds: each
+killed laserMapping, each re-warmed cleanly, and each re-fired within 2 s
+because the occlusion was still there -- matched 26-33 against a floor of 150,
+and a fresh process cannot invent features. Any sustained starvation source does
+this: a hand, a featureless corridor, a tight corner. Armed, it would have been
+optical flow with SLAM dying every 5.2 s.
 
 Mirrors the cooldown gate in DriftMonitor._execute_restart. Keep the two in
 step: this is a mirror, not the real object, because constructing one needs a
