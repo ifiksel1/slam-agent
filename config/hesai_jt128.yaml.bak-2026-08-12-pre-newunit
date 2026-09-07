@@ -1,0 +1,127 @@
+common:
+    lid_topic:  "/lidar_points"
+    imu_topic:  "/lidar_imu"
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    # LI-Init "Time Lag IMU to LiDAR", MEAN OF 4 RUNS (2026-08-09/10):
+    #   run1 -0.021389 | run2 -0.013224 | run3 -0.010857 | run4 -0.016883
+    #   mean -0.015588, sd 0.004590, range 0.010532 s
+    # This is a summary of a SCATTERED sample, not a converged estimate. Four bags across
+    # two locations and two motion profiles (run3 was deliberately rotation-rate-heavy to
+    # target the lag) failed to converge, so the spread is not a bag-quality problem that
+    # more recording will fix -- LI-Init does not resolve the lag on this rig to better
+    # than ~+/-5 ms. Treat this value as -15.6 +/- 4.6 ms. Was -0.021389 (run1 alone),
+    # which sits at the extreme edge of the distribution.
+    # Arbitrate empirically before trusting it further: replay a closed-loop bag through
+    # scripts/replay/ at competing values and compare position closure. Bags for all four
+    # runs are kept in bags/li_init/.
+    #
+    # Sign verified, NOT guessed: LI-Init subtracts this same quantity from the IMU stamp
+    # internally (LiDAR_IMU_Init/src/laserMapping.cpp:416), and upstream FAST-LIO applies
+    # common/time_offset_lidar_to_imu the identical way (imu_cbk: stamp - time_diff_lidar_to_imu).
+    # Same form both sides => transfers directly, no negation.
+    #
+    # NOTE: this key was DEAD on this fork until 2026-08-09 -- it appeared only in this yaml
+    # and was never read by the code. Backported from upstream; requires the patched
+    # laserMapping.cpp (globals + nh.param + imu_cbk). Reverting this value alone is safe;
+    # 0.0 restores the previous behaviour exactly.
+    time_offset_lidar_to_imu: -0.015588
+                                  # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+
+preprocess:
+    lidar_type: 2                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR
+    scan_line: 128               # JT128 has 128 scan lines
+    blind: 0.4                   # Minimum range threshold (confined-space tuning 2026-06-22: 1.0->0.4; VERIFY no airframe self-returns within 0.4-1.0 m on the live sensor)
+    time_scale: 1.0              # Time scale for point timestamps
+
+mapping:
+    acc_cov: 0.1
+    gyr_cov: 0.1
+    b_acc_cov: 0.0001
+    b_gyr_cov: 0.0001
+    fov_degree:    180          # Field of view for mapping
+    det_range:     100.0        # Maximum detection range
+    extrinsic_est_en:  false    # DISABLED: online extrinsic estimation causes drift - calibrate offline!
+    # LI-Init rotation: MEAN OF 4 RUNS (2026-08-09/10), refinement results.
+    #   run1 0.472 deg | run2 0.490 | run3 0.207 | run4 0.732   (all pairwise <= 0.60 deg)
+    #   mean 0.446 deg, rpy [0.1372, -0.4121, 0.1027]; each run is 0.08-0.32 deg from it.
+    # Proper SO(3) chordal mean (average the matrices, project back with SVD), NOT an
+    # element-wise average of rotation matrices or of Euler angles -- verified det = 1.000000000
+    # and |R^T R - I| < 1e-15. The rpy extraction convention was confirmed by re-deriving
+    # each run's reported rpy from its own matrix to 4 decimals.
+    #
+    # The rotation is the ONE quantity these runs agree on: 4 bags, 2 locations, 2 motion
+    # profiles, all landing sub-1 deg and all 2.8-3.2 deg from the 2026-06-20 incumbent.
+    # (Translation and time lag did NOT converge -- see the time_offset note at the top.)
+    #
+    # Direction is LiDAR->IMU: IMU_Processing.hpp:324 computes offset_R_L_I*P_lidar + offset_T_L_I,
+    # matching LI-Init's "LiDAR to IMU" output, so the values transfer with no inversion.
+    # (The old "IMU->LiDAR" comment here was mislabelled; the code is LiDAR->IMU.)
+    #
+    # REPLACES (2026-06-20, suspect): T [0.006622, -0.009142, -0.039155]
+    #                                 R  0.998625 -0.032668 -0.040998
+    #                                    0.033462  0.999262  0.018837
+    #                                    0.040353 -0.020183  0.998982   (= 3.206 deg)
+    # Those were the frozen output of FAST-LIO's own online estimator (committed in the
+    # same commit that disabled it, 1e0d985) and were fitted under the OLD stamping
+    # regime (use_timestamp_type:0). Rotation and time offset are correlated during
+    # motion; estimated jointly, the rotation collapses 3.206 -> 0.472 deg and a
+    # -21.4 ms LiDAR/IMU time lag appears instead. The two disagree by 2.83 deg.
+    #
+    # NOT YET VALIDATED by closed-loop replay. To revert:
+    #   cp config/hesai_jt128.yaml.bak-2026-08-09-pre-li-init config/hesai_jt128.yaml
+    #
+    # ---- extrinsic_T: GEOMETRIC, not from LI-Init (2026-08-10) ----------------------
+    # Set to the sensor's optical-centre offset, i.e. the IMU is assumed to sit at the
+    # JT128's mechanical coordinate origin. NOT an LI-Init output -- all four LI-Init
+    # translations were rejected as unusable (below).
+    #
+    # WHY the LI-Init translations were rejected. extrinsic_T is the LiDAR-frame origin
+    # expressed in the IMU frame; with distance_correction_flag:false (hesai_driver_config
+    # .yaml:28) that LiDAR frame IS the optical centre, so implied IMU position =
+    # optical_centre - T. Against the JT128 envelope (height 73.0 mm, bottom dia 62.5 mm
+    # => radius 31.25 mm, User Manual J01 sec 1.5), measured radially from the spin axis:
+    #     run1 T [ 50.8,  18.3, -23.1] mm -> IMU at radius 58.6 mm  IMPOSSIBLE (was LIVE)
+    #     run2 T [-17.6,  -8.2,  -3.3] mm -> IMU at radius 24.0 mm  plausible
+    #     run3 T [-15.9, -19.0,   1.6] mm -> IMU at radius 33.7 mm  IMPOSSIBLE
+    #     run4 T [  0.7,  11.3,  38.3] mm -> IMU at radius  8.6 mm  plausible
+    # Two of four place the IMU outside the housing, and the run-to-run spread (~60 mm)
+    # is the width of the whole sensor. LI-Init does not resolve the lever arm on this
+    # rig; the numbers are noise, so their mean is not meaningful either.
+    #
+    # WHY the mechanical origin. The IMU cannot be at the optical centre: that point is on
+    # the SPINNING assembly ("as the lidar rotates, the optical centre constantly changes
+    # its position", Manual Appendix D.1), so extrinsic_T = 0 is physically wrong. The IMU
+    # must be on stationary structure, and the origin lies on the axis of rotation (sec 1.3,
+    # "Z-axis is the axis of rotation") -- the natural spot for a base-mounted IMU, and the
+    # only candidate on-axis. It is also consistent with all four runs to <1.5 std errors.
+    # Hesai does NOT publish the IMU position: the manual specifies the IMU only as a data
+    # source (sec 3.1.2.3), and HesaiLidar_ROS_2.0 issue #107 asks this exact question with
+    # no reply. So this is inference from the mechanical envelope, not a datasheet value.
+    #
+    # VALUE = the SDK's own optical-centre constant, udp1_4_parser.cc:41
+    #   optical_center.setNoFlag(LidarOpticalCenter{-0.0076, 0.01363, 0.01271});
+    # (Manual sec 1.4 prints -7.6, 13.67, 12.74 mm; SDK differs by <0.4 mm. Use the SDK's,
+    # since the SDK is what produces the cloud.) Equivalent alternative, NOT applied here:
+    # distance_correction_flag:true + extrinsic_T [0,0,0]; left off so the driver is not
+    # changed mid-investigation.
+    #
+    # OPEN: the manual says the optical centre moves with rotation, but the SDK adds it as a
+    # CONSTANT vector (udp1_4_parser.cc:557, no azimuth rotation). If it really is azimuth-
+    # dependent, no constant extrinsic_T can absorb it -- which would explain a ~20 mm
+    # scatter, exactly the magnitude seen. Resolve before trusting this to better than ~2 cm.
+    extrinsic_T: [ -0.0076, 0.01363, 0.01271 ]   # LiDAR->IMU translation (m); |T| = 20.1 mm
+    extrinsic_R: [ 0.999973, -0.001809, -0.007187,
+                   0.001792,  0.999995, -0.002408,
+                   0.007192,  0.002395,  0.999971 ]   # LiDAR->IMU rotation (row-major, 0.446 deg)
+
+publish:
+    path_en:  true              # true: publish path
+    scan_publish_en:  true       # false: close all the point cloud output
+    dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
+    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+
+pcd_save:
+    pcd_save_en: false           # OFF for live flight: was writing multi-GB PCDs + periodic blocking disk I/O that stalls the SLAM loop
+    interval: -1                 # how many LiDAR frames saved in each pcd file;
+                                # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+    time_interval: 30.0         # Save PCD every 30 seconds

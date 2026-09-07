@@ -162,19 +162,22 @@
 
          Response is staged: >=warn -> banner only; >=crit for lat_k_crit scans -> lane-change to
          OF (SRC2) ONLY; still >=crit after lat_drain_sec on OF -> escalate to the node restart.
-         FIRST DEPLOYMENT: set enable_latency_critical=false for a few flights and just watch. -->
+         Deployment history: shipped false 2026-09-02, enabled 2026-09-07 (see below). -->
     <param name="enable_latency_check"    type="bool"   value="true" />
-    <!-- STAGED ROLLOUT, set false 2026-09-02. The whole chain is PROVEN on the bench (T3, see
-         docs/LATENCY_BENCH_RESULTS.md): CRITICAL -> OF failover with the FC confirming "Using EKF
-         Source Set 2", drain escalation at exactly 5.0 s, recovery to SRC1. What is NOT yet proven
-         is that no real flight produces a false CRITICAL, and the cost of being wrong is an
-         uncommanded in-flight source switch - the same class of event as the crash this exists to
-         prevent. So the automatic switch is withheld while the evidence is gathered.
-         STILL ACTIVE while false: latency measurement, WARN banners, the arming interlock, and the
-         SLAMLAT feed driving the FC prearm gate. Only the in-flight source switch is suppressed.
-         FLIP BACK TO TRUE after 3-5 sorties whose bags show zero spurious WARNs and a latency
-         distribution matching the 67-78 ms fleet baseline. -->
-    <param name="enable_latency_critical" type="bool"   value="false" />
+    <!-- ENABLED 2026-09-07 by operator decision, on one flight rather than the 3-5 sorties the
+         staged rollout called for. Read that as a deliberate acceptance of risk, not as the
+         evidence bar having been met.
+         What IS proven: the chain end to end on the bench (T3, docs/LATENCY_BENCH_RESULTS.md) -
+         CRITICAL to OF failover with the FC confirming "Using EKF Source Set 2", drain escalation
+         at exactly 5.0 s, recovery to SRC1; the observe-only gate holding at 1002 ms with zero
+         source switches (2026-09-07); the arming interlock working in flight (2026-09-03); and
+         the thresholds calibrated on 28,761 samples from 20 healthy flights.
+         What is NOT proven: that no real flight produces a false CRITICAL. One flight is not a
+         distribution. The cost of being wrong is an uncommanded in-flight source switch onto
+         EK3_SRC2_POSXY=0, which is velocity hold and not position hold - the same class of event
+         as the crash this exists to prevent.
+         Set back to false for a sortie if a bag ever shows a WARN that cannot be explained. -->
+    <param name="enable_latency_critical" type="bool"   value="true" />
     <param name="odom_topic"              type="str"    value="/Odometry" />
     <param name="lat_warn_ms"             type="double" value="150" />
     <param name="lat_crit_ms"             type="double" value="250" />

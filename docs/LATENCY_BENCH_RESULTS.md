@@ -174,3 +174,44 @@ wrong the aircraft would have been left unable to arm with no indication why.
   sortie; nothing else sets it.
 - That a genuine stuck-SLAM case never needs two restarts inside 45 s. If one does, the
   cooldown blocks the second and the OF failover carries it.
+
+---
+
+# Observe-only gate — bench result
+
+Hardware bench, 2026-09-07. Disarmed, props off, `enable_latency_critical=false`.
+Stimulus: `scripts/bench/latency_overrun.sh 30 400 100` — laserMapping duty-cycled with
+SIGSTOP/SIGCONT, 400 ms stopped / 100 ms running for 30 s, the T3 method. Stop intervals
+stay under the 1.0 s health watchdog so the latency path is exercised and not health-loss.
+
+| t | Event |
+|---|---|
+| 21:29:01 | load on |
+| 21:29:04.473 | `latency interlock LOCKED (>=150 ms)` — 3.5 s |
+| 21:29:05.015 | `OK -> WARN (lat=1002ms(obs))` eig=476466 matched=1802 |
+| 21:29:33 | load off |
+| 21:29:40.508 | `WARN -> OK (ok)` — 7.5 s drain |
+| 21:29:41.512 | `latency interlock released` |
+
+**The gate held at 1002 ms.** Four times the CRITICAL threshold, and the `(obs)` marker on
+the WARN is CRITICAL being detected and deliberately demoted. Zero source switches, zero
+restarts, zero FC commands for the whole run. That is the property the staged rollout
+depends on: with the flag false the detector measures and warns and blocks arming, and
+cannot touch the aircraft.
+
+**The 25 August signature, reproduced again.** `eig_min` 476466 and `matched` 1802 — both
+excellent — while the published pose was a full second stale. Every pre-latency metric read
+healthy throughout. This is the third independent reproduction of geometry-perfect,
+timing-catastrophic, and it is why the latency dimension exists.
+
+**Not captured this run:** the FC-side arming gate messages. `SLG`/`PreArm` statustexts go
+to the GCS and dataflash, not to the node log, and nothing was recording them. The gate
+itself is separately proven — bench T3 and fail-open on 2026-09-02, and in flight on
+2026-09-03 where the interlock blocked arming and cleared correctly.
+
+## enable_latency_critical set true, 2026-09-07
+
+Operator decision after one flight, not after the 3-5 sorties the staged rollout called
+for. Recorded as an accepted risk rather than a met bar: one flight is not a distribution,
+and the failure mode being accepted is an uncommanded in-flight switch onto
+`EK3_SRC2_POSXY=0`, which is velocity hold and not position hold.
