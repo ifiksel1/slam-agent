@@ -117,3 +117,60 @@ and neither should be runnable by accident. The mechanisms are: SIGSTOP/SIGCONT 
 arming state. **Never** use `MAV_CMD_COMPONENT_ARM_DISARM` (400) to check arming on this airframe:
 `MOT_SPIN_ARM = 0.10` with `DISARM_DELAY = 0` and `BRD_SAFETY_DEFLT = 0` means a successful arm
 spins all four motors indefinitely with no hardware interlock behind it.
+
+---
+
+# Restart cooldown — bench result
+
+Hardware bench, 2026-09-07. Vehicle disarmed, props off. Starvation induced the same
+way as the 2026-09-03 event that motivated the fix: an operator's hand held in front of
+the lidar, this time for ~90 s continuously.
+
+## The sequence
+
+| t | Event |
+|---|---|
+| 21:15:34.054 | `WARN -> CRITICAL (matched<150(starv))` eig=5861 **matched=45** |
+| 21:15:34.057 | `RESTART (of) triggered by drift:matched<150(starv)` — the one restart |
+| 21:15:34.060 | `commanding FC EKF source -> OF (SRC2) (aux 90 pos 1)` |
+| 21:15:37.468 | `/fastlio_health resumed after 3.0s gap -> re-warming` |
+| 21:15:37.470 | `latency interlock released` |
+| 21:15:39.177 | `OK -> CRITICAL (matched<150(starv))` eig=14113 **matched=139** |
+| 21:15:39.181 | **`came back 5.1s after the last restart (cooldown 45s) — holding on OF, not restarting again`** |
+| 21:15:39 → 21:17:03 | **84.7 s of continuous occlusion. Zero further restarts. One banner.** |
+| 21:17:03.928 | `CRITICAL -> OK (ok)` eig=450311 matched=2143 — hand removed |
+| 21:17:03.930 | `commanding FC EKF source -> SLAM (SRC1) (aux 90 pos 0)` |
+| after | `/slam/arm_interlock` **RELEASED**, `/slam/drift_risk` `OK ... lat=71ms` |
+
+The re-fire came at **5.1 s**, against the 5.2 s loop period measured on 2026-09-03. This
+is the same trigger that produced kill #2 that day. It produced none here.
+
+## Three findings
+
+**The cooldown breaks the loop more thoroughly than by declining one restart.** After the
+suppression the latch stays CRITICAL, so there is no further OK→CRITICAL *transition* — and
+`_execute_restart` only runs on a transition. On 2026-09-03 it was the restart itself that
+reset the latch: kill → health gap → re-warm → OK → CRITICAL → kill. Removing the kill
+removes the gap that re-armed the trigger. That is why the 45 s cooldown expiring at
+21:16:19 produced nothing: by then there was no edge left to fire on. The fix is
+self-reinforcing rather than a timer racing a fault.
+
+**`matched=139` on the second trigger, against 26–33 on 2026-09-03.** The restarted process
+was doing measurably better and still sat under the 150 floor. That is precisely the case
+where another restart buys nothing, and the clearest evidence that restarting is the wrong
+response to starvation even when the process is healthy.
+
+**The interlock released.** This was the specific risk in the suppressed path: skipping the
+restart means no health gap ever arrives, and the release logic waits on
+`_saw_gap_since_lock`. Setting `_lat_no_restart` covers it, and `latency interlock
+released` at 21:15:37.470 with `RELEASED` on the topic afterwards confirms it. Had this been
+wrong the aircraft would have been left unable to arm with no indication why.
+
+## What this does NOT establish
+
+- Anything armed. `failsafe_ekf_event()` returns immediately when disarmed, so the FC's own
+  EKF failsafe was inert here as in every other bench test.
+- That 45 s is the right number. It is longer than the observed 5.2 s loop and shorter than a
+  sortie; nothing else sets it.
+- That a genuine stuck-SLAM case never needs two restarts inside 45 s. If one does, the
+  cooldown blocks the second and the OF failover carries it.
