@@ -1,4 +1,30 @@
 /****************************************************************
+ * EXPERIMENT BUILD: identical to tof5x_mavlink_v4_4 except I2C_CLOCK_HZ is
+ * 400 kHz instead of 1 MHz FM+, and FW_VERSION says so, so the GCS boot
+ * STATUSTEXT reads "tof5x v4.4-400k: n/5 OK, m off" and you can tell at a
+ * glance which build is flying.
+ *
+ * WHY. RIGHT and LEFT drop out IN FLIGHT and come up healthy at BOOT
+ * (2026-09-07: both flights booted 4/4, then "ToF RIGHT LOST"; LEFT went in
+ * flight 1 and recovered in flight 2). A fault that appears only under
+ * vibration, on two sensors sharing adjacent mux ports 3 and 4, and clears
+ * over a power cycle, reads as signal integrity rather than software. 1 MHz
+ * FM+ across a mux and vehicle cabling has little margin for that.
+ *
+ * WHAT TO LOOK FOR. Fly the same profile and watch the STATUSTEXT stream. If
+ * "ToF RIGHT LOST" / "ToF LEFT LOST" stop appearing, the dropouts were bus
+ * marginality and this is the fix - fold I2C_CLOCK_HZ 400000UL into the main
+ * sketch and delete this directory. If they still appear, the bus speed is
+ * exonerated and the cause is the cabling or the modules themselves, which is
+ * what the v4.1 header already suspected for RIGHT.
+ *
+ * KEEP THIS A ONE-LINE DIFF. Any real change belongs in v4_4 first and then
+ * gets copied here, or the two will drift and the experiment stops being a
+ * controlled comparison.
+ *
+ * NOT COMPILED. No Arduino toolchain where this was written.
+ ****************************************************************/
+/****************************************************************
  * tof5x_mavlink_v4.1 — QT Py SAMD21 + TCA9548A + 5 x VL53L5CX (4x4 grid)
  *
  * v4.4 changes over v4.3:
@@ -101,14 +127,14 @@
 #include <MAVLink.h>
 #include <math.h>
 
-#define FW_VERSION "v4.4"
+#define FW_VERSION "v4.4-400k"
 
 /* I2C bus clock. 1 MHz FM+ is fast but unforgiving across a mux and vehicle
    cabling. The RIGHT/LEFT dropouts appear IN FLIGHT and not at boot, which
    reads as signal integrity rather than software, so 400 kHz is the direct
    experiment. Kept as a constant so the 400 kHz build differs by one line:
    see tof5x_mavlink_v4_4_400k/. */
-#define I2C_CLOCK_HZ    1000000UL
+#define I2C_CLOCK_HZ     400000UL   // EXPERIMENT: 400 kHz, see banner below
 
 /* ---------------- user settings ---------------- */
 #define NUM_SENS 5
