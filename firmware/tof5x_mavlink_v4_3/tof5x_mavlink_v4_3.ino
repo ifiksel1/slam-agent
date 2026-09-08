@@ -50,6 +50,11 @@
 #include <Wire.h>
 #include <SparkFun_I2C_Mux_Arduino_Library.h>
 #include <SparkFun_VL53L5CX_Library.h>
+/* The MAVLink helpers keep a static mavlink_message_t (~290 B) + status per
+   comm channel; the default is 4 channels. We only ever use MAVLINK_COMM_0,
+   so declare that up front and get ~900 B of SRAM back (32 KB total). Must
+   precede the include - mavlink_types.h only defaults it if unset. */
+#define MAVLINK_COMM_NUM_BUFFERS 1
 #include <MAVLink.h>
 #include <math.h>
 
@@ -69,10 +74,13 @@ enum { S_RIGHT, S_TOP, S_FRONT, S_LEFT, S_BACK };
    board (blacking out all healthy sensors). Re-enable after the module
    or its cable/connector is replaced and bench-verified solo. */
 static const bool sensorEnabled[NUM_SENS] = {
-  true,  // S_RIGHT — QUARANTINED: wedges I2C bus during begin()
-  false,   // S_TOP
+  true,   // S_RIGHT - kept enabled to match v4.2. NOTE the header above: its
+          //           begin() has been seen to wedge the shared I2C bus and
+          //           reboot the board, taking every healthy sensor with it.
+          //           It went LOST in both 2026-09-07 flights.
+  false,  // S_TOP   - not used for collision avoidance
   true,   // S_FRONT
-  false,   // S_LEFT
+  true,   // S_LEFT  - re-enabled to match v4.2 (reported OK in flight 2)
   true    // S_BACK
 };
 
@@ -181,7 +189,6 @@ static const float rowScenePitchDeg[ROWS] = { +16.875f, +5.625f, -5.625f, -16.87
 QWIICMUX              mux;
 SparkFun_VL53L5CX     tof[NUM_SENS];
 VL53L5CX_ResultsData  frame;
-uint16_t              ring[NUM_BUCKETS];
 uint16_t              sensorMin[NUM_SENS];
 bool                  sensorOk[NUM_SENS];
 
@@ -241,13 +248,11 @@ uint32_t rx_att_total     = 0;   // ATTITUDE (msgid 30) messages decoded
 uint32_t pub_count_total  = 0;   // OBSTACLE_DISTANCE publish cycles
 uint32_t loop_count_total = 0;   // main loop() iterations
 
-/* last computed row mask per sensor (for the debug print).
-   Index [r=0] = SPAD bottom row = SCENE TOP (high +pitch).
-   Initialised to all-pass so the print shows "1111" until first attitude. */
-bool lastRowOK[NUM_SENS][4] = {
-  {true,true,true,true},{true,true,true,true},{true,true,true,true},
-  {true,true,true,true},{true,true,true,true}
-};
+/* last computed row mask per sensor (for the debug print), one bit per
+   SPAD row: bit r set = row r used. Bit 0 = SPAD bottom row = SCENE TOP
+   (high +pitch). Initialised to all-pass so the print shows "1111" until
+   the first attitude arrives. */
+uint8_t lastRowMask[NUM_SENS] = { 0x0F, 0x0F, 0x0F, 0x0F, 0x0F };
 
 #if DEBUG_ZONES
 /* Latest per-zone distance/status per sensor — for the 3D visualizer.
@@ -255,6 +260,9 @@ bool lastRowOK[NUM_SENS][4] = {
 uint16_t lastZoneDist[NUM_SENS][GRID_RES];
 uint8_t  lastZoneStat[NUM_SENS][GRID_RES];
 uint32_t next_zone_dump_ms = 0;
+/* Copy of the 72-bin ring exactly as last sent to AP (the ring itself is
+   now built in place inside the outgoing OBSTACLE_DISTANCE packet). */
+uint16_t ring[NUM_BUCKETS];
 #endif
 
 /* publish pacing */
@@ -278,6 +286,15 @@ static const bool  horiz[NUM_SENS]  = { true, false, true, true, true };
    ring — front/back were unaffected, which is why only pitch avoidance
    worked. Must match SENSOR_YAW_DEG in the visualizers.) */
 static const float yawDeg[NUM_SENS] = { 90, 0, 0, 270, 180 };
+
+/* cos/sin of yawDeg[], used by the horizon row mask on every frame. The
+   sensor yaws are fixed multiples of 90 deg, so these are exact and spare
+   the M0+ (no FPU) a cosf()+sinf() pair per frame. MUST track yawDeg[]. */
+static const float yawCos[NUM_SENS] = {  0.0f, 1.0f, 1.0f,  0.0f, -1.0f };
+static const float yawSin[NUM_SENS] = {  1.0f, 0.0f, 0.0f, -1.0f,  0.0f };
+
+/* sensor names for STATUSTEXT / USB banner (const pointers -> lives in flash) */
+static const char* const sNames[NUM_SENS] = { "RIGHT","TOP","FRONT","LEFT","BACK" };
 
 static const uint8_t orient[NUM_SENS] = {
   MAV_SENSOR_ROTATION_YAW_90,    // right (mux 3)
@@ -406,6 +423,49 @@ static bool beginMux()
   return muxOk;
 }
 
+/* Single definition of "FC attitude is fresh": used by the STATUSTEXT edge
+   detector and the adaptive stream re-request, which previously each
+   computed it independently. */
+static inline bool attitudeHealthy(uint32_t now_ms)
+{
+  return (last_attitude_ms != 0) && (now_ms - last_attitude_ms < ATTITUDE_STALE_MS);
+}
+
+/* Serialise a finalised message straight out of the mavlink_message_t onto
+   Serial1, without staging it through a 280-byte mavlink_msg_to_send_buffer()
+   copy on the stack (that was repeated in five send paths). Byte-for-byte
+   what that helper produces: the finaliser has already trimmed msg.len (v2
+   zero-trim) and written the two CRC bytes immediately after the payload
+   inside payload64[] (mavlink_ck_a/b), so payload+CRC is one contiguous run.
+   We never sign, so there is no signature block. */
+static void mavlinkSend(const mavlink_message_t& msg)
+{
+  uint8_t hdr[MAVLINK_NUM_HEADER_BYTES];
+  uint8_t hdr_len;
+  hdr[0] = msg.magic;
+  hdr[1] = msg.len;
+  if (msg.magic == MAVLINK_STX_MAVLINK1) {
+    hdr[2] = msg.seq;
+    hdr[3] = msg.sysid;
+    hdr[4] = msg.compid;
+    hdr[5] = msg.msgid & 0xFF;
+    hdr_len = MAVLINK_CORE_HEADER_MAVLINK1_LEN + 1;
+  } else {
+    hdr[2] = msg.incompat_flags;
+    hdr[3] = msg.compat_flags;
+    hdr[4] = msg.seq;
+    hdr[5] = msg.sysid;
+    hdr[6] = msg.compid;
+    hdr[7] = msg.msgid & 0xFF;
+    hdr[8] = (msg.msgid >> 8) & 0xFF;
+    hdr[9] = (msg.msgid >> 16) & 0xFF;
+    hdr_len = MAVLINK_NUM_HEADER_BYTES;
+  }
+  Serial1.write(hdr, hdr_len);
+  Serial1.write((const uint8_t*)_MAV_PAYLOAD(&msg),
+                (size_t)msg.len + MAVLINK_NUM_CHECKSUM_BYTES);
+}
+
 static inline void sensor_ring_clear()
 {
   for (uint8_t s = 0; s < NUM_SENS; s++)
@@ -459,6 +519,9 @@ static inline void sendObstacleDistance()
      between adjacent columns within a sensor. The remaining 24 ND bins
      are in the genuine inter-sensor gaps (e.g., +22.5° to +67.5°
      between FRONT's right edge and LEFT's left edge). */
+  mavlink_obstacle_distance_t od = {};
+  uint16_t* const ring = od.distances;   // build the ring in the packet itself
+
   const uint32_t now_ms = millis();
   for (uint8_t i = 0; i < NUM_BUCKETS; i++) ring[i] = MAV_NO_DATA;
   for (uint8_t s = 0; s < NUM_SENS; s++) {
@@ -483,7 +546,6 @@ static inline void sendObstacleDistance()
     }
   }
 
-  mavlink_obstacle_distance_t od = {};
   od.time_usec    = micros();
   od.frame        = MAV_FRAME_BODY_FRD;
   od.sensor_type  = MAV_DISTANCE_SENSOR_LASER;
@@ -492,15 +554,13 @@ static inline void sendObstacleDistance()
   od.min_distance = MIN_CM;
   od.max_distance = MAX_CM;
 
-  for (uint8_t i = 0; i < NUM_BUCKETS; i++)
-    od.distances[i] = ring[i];
+#if DEBUG_ZONES
+  memcpy(::ring, od.distances, sizeof(::ring));   // snapshot for debug_zones_dump()
+#endif
 
   mavlink_message_t msg;
   mavlink_msg_obstacle_distance_encode(SYS_ID, COMP_ID, &msg, &od);
-
-  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-  Serial1.write(buf, len);
+  mavlinkSend(msg);
 }
 
 static inline void sendDistanceSensorTop()
@@ -522,21 +582,23 @@ static inline void sendDistanceSensorTop()
 
   mavlink_message_t msg;
   mavlink_msg_distance_sensor_encode(SYS_ID, COMP_ID, &msg, &ds);
-
-  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-  Serial1.write(buf, len);
+  mavlinkSend(msg);
 }
 
 /* Send a MAVLink STATUSTEXT (msgid 253). Visible in Mission Planner's
    Messages tab + dataflash log; perfect for transition-only status notes. */
 static inline void sendStatusText(uint8_t severity, const char* text)
 {
+  /* The pack helper copies a fixed 50 bytes from `text` regardless of its
+     real length, so a short literal used to drag whatever followed it in
+     flash into the packet. Stage it through a zero-filled 50-char buffer:
+     the decoded text is unchanged, the read overrun is gone, and MAVLink 2's
+     trailing-zero trim now actually shortens the packet on the wire. */
+  char padded[50] = { 0 };
+  strncpy(padded, text, sizeof(padded));
   mavlink_message_t msg;
-  mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &msg, severity, text, 0, 0);
-  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-  Serial1.write(buf, len);
+  mavlink_msg_statustext_pack(SYS_ID, COMP_ID, &msg, severity, padded, 0, 0);
+  mavlinkSend(msg);
 }
 
 /* Watch for state transitions and emit a STATUSTEXT on each edge only.
@@ -544,14 +606,12 @@ static inline void sendStatusText(uint8_t severity, const char* text)
    no boot-time spam — only real changes after that fire. */
 static void checkStatusTransitions()
 {
-  static const char* sNames[NUM_SENS] = { "RIGHT","TOP","FRONT","LEFT","BACK" };
   static bool initialised = false;
   static bool prev_mux  = false;
   static bool prev_sens[NUM_SENS] = { false, false, false, false, false };
   static bool prev_att  = false;
 
-  bool att_healthy = (last_attitude_ms != 0)
-                  && (millis() - last_attitude_ms < ATTITUDE_STALE_MS);
+  bool att_healthy = attitudeHealthy(millis());
 
   if (!initialised) {
     prev_mux = muxOk;
@@ -598,10 +658,7 @@ static inline void sendHeartbeat()
     mavlink_msg_heartbeat_pack(SYS_ID, COMP_ID, &msg,
       MAV_TYPE_ONBOARD_CONTROLLER, MAV_AUTOPILOT_INVALID,
       0, 0, MAV_STATE_ACTIVE);
-
-    uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-    uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-    Serial1.write(buf, len);
+    mavlinkSend(msg);
   }
 }
 
@@ -620,9 +677,7 @@ static inline void requestAttitudeStream()
   /* Adaptive re-request: hammer at 1 Hz while attitude is missing/stale so
      an FC reboot recovers fast; ease off to REQUEST_PERIOD_MS (5 s) once
      it's flowing again to avoid bus chatter. */
-  bool att_healthy = (last_attitude_ms != 0)
-                  && (now - last_attitude_ms < ATTITUDE_STALE_MS);
-  uint32_t period = att_healthy ? REQUEST_PERIOD_MS : 1000UL;
+  uint32_t period = attitudeHealthy(now) ? REQUEST_PERIOD_MS : 1000UL;
   if (now - last_request_ms < period) return;
   last_request_ms = now;
 
@@ -635,10 +690,42 @@ static inline void requestAttitudeStream()
     /* param1: msg id   */ (float)MAVLINK_MSG_ID_ATTITUDE,
     /* param2: interval */ (float)ATTITUDE_INTERVAL_US,
     0, 0, 0, 0, 0);
+  mavlinkSend(msg);
+}
 
-  uint8_t buf[MAVLINK_MAX_PACKET_LEN];
-  uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-  Serial1.write(buf, len);
+/* Full VL53L5CX bring-up: select its mux port, begin() (firmware upload,
+   ~1 s of blocking I2C), then the ranging configuration. ONE copy, shared by
+   boot-time init and mid-session reinit so the two sequences can't drift.
+   Sets sensorOk[s] from the result.
+
+   v4.3: blackbox armed across the ENTIRE I2C sequence, not just begin().
+   v4.1 disarmed right after begin() returned, but the bus can wedge in the
+   setResolution/startRanging calls that follow — those hangs escaped the
+   armed window, so the WDT reset booted with no sensor named and failed to
+   quarantine the culprit (seen in the v4.2 logs). Disarm only after the
+   whole config sequence completes.
+
+   Datasheet/UM2884 best-practice for obstacle avoidance:
+   - target order CLOSEST: when a zone has multiple returns (e.g., glass
+     in front of wall), report the nearest one, not strongest. Default is
+     strongest, which biases toward big background objects.
+   - sharpener ~20: edge enhancement so a near object in the FoV isn't
+     blurred into its far neighbours. Default is 5 (mild). */
+static bool bringUpSensor(uint8_t s)
+{
+  setMuxPort(muxPorts[s]);
+  wdtBlackboxArm(s);
+  bool ok = tof[s].begin();
+  if (ok) {
+    tof[s].setResolution(GRID_RES);
+    tof[s].setRangingFrequency(SENSOR_HZ);
+    tof[s].setTargetOrder(SF_VL53L5CX_TARGET_ORDER::CLOSEST);
+    tof[s].setSharpenerPercent(20);
+    tof[s].startRanging();
+  }
+  sensorOk[s] = ok;
+  wdtBlackboxDisarm();
+  return ok;
 }
 
 static void reinitSensor(uint8_t s)
@@ -654,27 +741,7 @@ static void reinitSensor(uint8_t s)
   Serial.print(s);
   Serial.print(F("... "));
 #endif
-  setMuxPort(muxPorts[s]);
-
-  /* v4.3: blackbox armed across the ENTIRE I2C sequence, not just begin().
-     v4.1 disarmed right after begin() returned, but the bus can wedge in the
-     setResolution/startRanging calls that follow — those hangs escaped the
-     armed window, so the WDT reset booted with no sensor named and failed to
-     quarantine the culprit (seen in the v4.2 logs). Disarm only after the
-     whole config sequence completes. */
-  wdtBlackboxArm(s);
-  bool ok = tof[s].begin();
-  if (ok) {
-    tof[s].setResolution(GRID_RES);
-    tof[s].setRangingFrequency(SENSOR_HZ);
-    tof[s].setTargetOrder(SF_VL53L5CX_TARGET_ORDER::CLOSEST);
-    tof[s].setSharpenerPercent(20);
-    tof[s].startRanging();
-    sensorOk[s] = true;
-  } else {
-    sensorOk[s] = false;
-  }
-  wdtBlackboxDisarm();
+  bool ok = bringUpSensor(s);
 #if DEBUG_USB
   Serial.println(ok ? F("OK") : F("FAIL"));
 #endif
@@ -740,6 +807,31 @@ static inline void debug_zones_dump()
 }
 #endif
 
+#if DEBUG_USB
+/* Debug-print helpers. The whole status line is formatted into one buffer
+   and handed to the USB CDC in a single write: with a host enumerated but
+   not draining the port, every CDC write can stall up to its TX timeout
+   (~70 ms on the SAMD core), and the old line was ~40 separate prints. */
+static void dbgSensorVal(uint8_t s, char* out)   /* out: >= 6 bytes */
+{
+  if (sensorExcluded(s)) { strcpy(out, "OFF"); return; }   // disabled/quarantined
+  uint16_t d = sensorMin[s];
+  if (d == MAV_NO_DATA)   strcpy(out, "ND");               // sensor failed / no info
+  else if (d > MAX_CM)    strcpy(out, "CLR");              // read OK, nothing in range
+  else                    snprintf(out, 6, "%u", (unsigned)d);   // actual cm reading
+}
+
+/* mask bits print as 4 chars: leftmost = SPAD row 0 = SCENE TOP (high +pitch),
+   rightmost = SPAD row 3 = SCENE BOTTOM (high -pitch). 1=row used, 0=masked. */
+static void dbgRowMask(uint8_t s, char* out)     /* out: >= ROWS+1 bytes */
+{
+  if (!horiz[s]) { strcpy(out, "----"); return; }
+  for (uint8_t r = 0; r < ROWS; r++)
+    out[r] = (lastRowMask[s] & (1u << r)) ? '1' : '0';
+  out[ROWS] = '\0';
+}
+#endif
+
 static inline void debug_print_line()
 {
 #if DEBUG_USB
@@ -747,17 +839,19 @@ static inline void debug_print_line()
   if ((int32_t)(now - next_dbg_ms) < 0) return;
 
   /* Compute throughput rates over the interval since the last debug print.
-     The first call has dt=0 so we just seed the counters. */
+     The first call has dt=0 so we just seed the counters. Integer math:
+     pub rate in tenths of Hz, loop rate in whole Hz (no float printf, which
+     newlib-nano doesn't link by default). */
   static uint32_t last_dbg_ms       = 0;
   static uint32_t last_pub_count    = 0;
   static uint32_t last_loop_count   = 0;
-  float pub_hz  = 0.0f;
-  float loop_hz = 0.0f;
+  uint32_t pub_hz10 = 0;
+  uint32_t loop_hz  = 0;
   if (last_dbg_ms != 0) {
     uint32_t dt_ms = now - last_dbg_ms;
     if (dt_ms > 0) {
-      pub_hz  = (pub_count_total  - last_pub_count)  * 1000.0f / dt_ms;
-      loop_hz = (loop_count_total - last_loop_count) * 1000.0f / dt_ms;
+      pub_hz10 = (pub_count_total  - last_pub_count)  * 10000UL / dt_ms;
+      loop_hz  = (loop_count_total - last_loop_count) * 1000UL  / dt_ms;
     }
   }
   last_dbg_ms      = now;
@@ -767,61 +861,43 @@ static inline void debug_print_line()
   next_dbg_ms = now + (1000U / DEBUG_USB_HZ);
 
   /* --- attitude prefix --- */
+  char att[32];
   if (last_attitude_ms == 0) {
-    Serial.print(F("ATT:NONE "));                // never received from FC
+    strcpy(att, "ATT:NONE");                     // never received from FC
   } else {
     uint32_t age = now - last_attitude_ms;
     if (age > ATTITUDE_STALE_MS) {
-      Serial.print(F("ATT:STALE("));
-      Serial.print(age);
-      Serial.print(F("ms) "));
+      snprintf(att, sizeof(att), "ATT:STALE(%lums)", (unsigned long)age);
     } else {
-      Serial.print(F("r="));
-      Serial.print(int(drone_roll_rad * 180.0f / PI));
-      Serial.print(F(" p="));
-      Serial.print(int(drone_pitch_rad * 180.0f / PI));
-      Serial.print(F("("));
-      Serial.print(age);
-      Serial.print(F("ms) "));
+      snprintf(att, sizeof(att), "r=%d p=%d(%lums)",
+               int(drone_roll_rad  * (180.0f / PI)),
+               int(drone_pitch_rad * (180.0f / PI)),
+               (unsigned long)age);
     }
   }
 
   /* --- per-sensor min readings + row mask --- */
-  auto print_val = [](uint8_t s) {
-    if (sensorExcluded(s))               { Serial.print(F("OFF")); return; }  // disabled/quarantined
-    uint16_t d = sensorMin[s];
-    if (d == MAV_NO_DATA)   Serial.print(F("ND"));    // sensor failed / no info
-    else if (d > MAX_CM)    Serial.print(F("CLR"));   // read OK, nothing in range
-    else                    Serial.print(d);          // actual cm reading
-  };
+  char vF[6], vR[6], vB[6], vL[6], vT[6];
+  char mF[ROWS + 1], mR[ROWS + 1], mB[ROWS + 1], mL[ROWS + 1];
+  dbgSensorVal(S_FRONT, vF); dbgRowMask(S_FRONT, mF);
+  dbgSensorVal(S_RIGHT, vR); dbgRowMask(S_RIGHT, mR);
+  dbgSensorVal(S_BACK,  vB); dbgRowMask(S_BACK,  mB);
+  dbgSensorVal(S_LEFT,  vL); dbgRowMask(S_LEFT,  mL);
+  dbgSensorVal(S_TOP,   vT);
 
-  /* mask bits print as 4 chars: leftmost = SPAD row 0 = SCENE TOP (high +pitch),
-     rightmost = SPAD row 3 = SCENE BOTTOM (high -pitch). 1=row used, 0=masked. */
-  auto print_mask = [](uint8_t s) {
-    if (!horiz[s]) { Serial.print(F("----")); return; }
-    for (uint8_t r = 0; r < 4; r++) Serial.print(lastRowOK[s][r] ? '1' : '0');
-  };
-
-  Serial.print(F("F:"));  print_val(S_FRONT);
-  Serial.print(F("/"));   print_mask(S_FRONT);
-  Serial.print(F(" R:")); print_val(S_RIGHT);
-  Serial.print(F("/"));   print_mask(S_RIGHT);
-  Serial.print(F(" B:")); print_val(S_BACK);
-  Serial.print(F("/"));   print_mask(S_BACK);
-  Serial.print(F(" L:")); print_val(S_LEFT);
-  Serial.print(F("/"));   print_mask(S_LEFT);
-  Serial.print(F(" T:")); print_val(S_TOP);
-  Serial.print(F(" cm  [pub="));
-  Serial.print(pub_hz, 1);
-  Serial.print(F("Hz loop="));
-  Serial.print(uint32_t(loop_hz));
-  Serial.print(F("Hz | RX b="));
-  Serial.print(rx_bytes_total);
-  Serial.print(F(" m="));
-  Serial.print(rx_msgs_total);
-  Serial.print(F(" att="));
-  Serial.print(rx_att_total);
-  Serial.println(F("]"));
+  char line[192];
+  int n = snprintf(line, sizeof(line),
+    "%s F:%s/%s R:%s/%s B:%s/%s L:%s/%s T:%s cm  [pub=%lu.%luHz loop=%luHz"
+    " | RX b=%lu m=%lu att=%lu]\r\n",
+    att, vF, mF, vR, mR, vB, mB, vL, mL, vT,
+    (unsigned long)(pub_hz10 / 10), (unsigned long)(pub_hz10 % 10),
+    (unsigned long)loop_hz,
+    (unsigned long)rx_bytes_total, (unsigned long)rx_msgs_total,
+    (unsigned long)rx_att_total);
+  if (n > 0) {
+    if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;   // truncated: send what fits
+    Serial.write((const uint8_t*)line, (size_t)n);
+  }
 #endif
 }
 
@@ -840,11 +916,19 @@ void setup()
   }
   wdt_bb_magic = 0;   // consume the blackbox either way
 
-  static const char* sNames[NUM_SENS] = {"RIGHT","TOP","FRONT","LEFT","BACK"};
-
 #if DEBUG_USB
   Serial.begin(115200);
-  delay(3000);   // give USB CDC time to enumerate
+  /* Give USB CDC time to enumerate so the boot banner is visible - but only
+     on a cold/external reset. After a WATCHDOG reset every sensor is already
+     dark and AP is flying blind until loop() publishes again; a fixed 3 s
+     wait for a monitor that may not be attached just stretched that
+     blackout (it ran on every one of the in-flight reboots). A monitor that
+     is already open (DTR asserted) needs no wait at all, so the banner still
+     shows on the bench. */
+  if (!wdtReset) {
+    const uint32_t t0 = millis();
+    while (!Serial && (millis() - t0) < 3000) { }
+  }
   Serial.println(F("QT Py 5x VL53L5CX booting (" FW_VERSION ")"));
   if (wdtReset) Serial.println(F("*** reset cause: WATCHDOG ***"));
   if (quarantinedNow != 0xFF) {
@@ -869,8 +953,8 @@ void setup()
 
   /* Enable the watchdog now, before any I2C activity. From here on, a hung
      Wire transaction (stuck bus) auto-resets the chip instead of freezing
-     forever. The 3 s USB delay above ran unguarded on purpose (it's a fixed
-     delay, can't hang). */
+     forever. The bounded USB wait above ran unguarded on purpose (it's a
+     fixed-ceiling delay, can't hang). */
   wdtEnable();
 
   Serial1.begin(UART_BAUD);
@@ -905,7 +989,6 @@ void setup()
 #endif
       continue;
     }
-    setMuxPort(muxPorts[i]);
 #if DEBUG_USB
     Serial.print(F("Init "));
     Serial.print(sNames[i]);
@@ -913,30 +996,16 @@ void setup()
     Serial.print(muxPorts[i]);
     Serial.print(F(")... "));
 #endif
-    /* v4.3: blackbox armed across the WHOLE boot-time I2C sequence (begin +
-       config), not just begin(). If any call wedges the bus here, the reboot
-       quarantines the culprit and boot completes next time instead of
-       looping. Datasheet/UM2884 best-practice for obstacle avoidance:
-       - target order CLOSEST: when a zone has multiple returns (e.g., glass
-         in front of wall), report the nearest one, not strongest. Default is
-         strongest, which biases toward big background objects.
-       - sharpener ~20: edge enhancement so a near object in the FoV isn't
-         blurred into its far neighbours. Default is 5 (mild). */
-    wdtBlackboxArm(i);
-    bool ok = tof[i].begin();
-    if (ok) {
-      tof[i].setResolution(GRID_RES);
-      tof[i].setRangingFrequency(SENSOR_HZ);
-      tof[i].setTargetOrder(SF_VL53L5CX_TARGET_ORDER::CLOSEST);
-      tof[i].setSharpenerPercent(20);
-      tof[i].startRanging();
-      sensorOk[i] = true;
-    }
-    wdtBlackboxDisarm();
+    /* Blackbox armed across the WHOLE boot-time I2C sequence (begin +
+       config) inside bringUpSensor(). If any call wedges the bus here, the
+       reboot quarantines the culprit and boot completes next time instead
+       of looping. */
+    bool ok = bringUpSensor(i);
 #if DEBUG_USB
     Serial.println(ok ? F("OK") : F("FAIL"));
+#else
+    (void)ok;
 #endif
-    if (!ok) continue;
   }
 
   /* precompute bucket indices for horizontal sensors only */
@@ -1056,7 +1125,10 @@ void loop()
           Serial.print(failCount[idx]);
           Serial.println(F(")"));
 #endif
-          if (failCount[idx] >= FAIL_REINIT_THRESHOLD) maybeReinit(idx);
+          if (failCount[idx] >= FAIL_REINIT_THRESHOLD) {
+            maybeReinit(idx);
+            break;   // at most ONE reinit (~1 s of blocking I2C) per iteration
+          }
         }
         continue;
       }
@@ -1072,7 +1144,10 @@ void loop()
         Serial.print(failCount[idx]);
         Serial.println(F(")"));
 #endif
-        if (failCount[idx] >= FAIL_REINIT_THRESHOLD) maybeReinit(idx);
+        if (failCount[idx] >= FAIL_REINIT_THRESHOLD) {
+          maybeReinit(idx);
+          break;   // at most ONE reinit (~1 s of blocking I2C) per iteration
+        }
         continue;
       }
 
@@ -1104,17 +1179,17 @@ void loop()
             pitch_eff = drone_pitch * cos(yaw_s) - drone_roll * sin(yaw_s)
          Then each row's world pitch = pitch_eff + row's body-frame pitch.
          If attitude is stale or this is the top sensor, all rows pass. */
-      bool rowOK[ROWS] = { true, true, true, true };
+      uint8_t rowMask = 0x0F;   // bit r set = SPAD row r passes
       if (horiz[idx] && (millis() - last_attitude_ms) < ATTITUDE_STALE_MS) {
-        float yaw_s_rad = yawDeg[idx] * (PI / 180.0f);
-        float pitch_eff_deg = (drone_pitch_rad * cosf(yaw_s_rad)
-                             - drone_roll_rad  * sinf(yaw_s_rad)) * (180.0f / PI);
+        float pitch_eff_deg = (drone_pitch_rad * yawCos[idx]
+                             - drone_roll_rad  * yawSin[idx]) * (180.0f / PI);
+        rowMask = 0;
         for (uint8_t r = 0; r < ROWS; r++) {
           float world_pitch = pitch_eff_deg + rowScenePitchDeg[r];
-          rowOK[r] = (fabsf(world_pitch) <= HORIZON_MASK_DEG);
+          if (fabsf(world_pitch) <= HORIZON_MASK_DEG) rowMask |= (uint8_t)(1u << r);
         }
       }
-      for (uint8_t r = 0; r < ROWS; r++) lastRowOK[idx][r] = rowOK[r];
+      lastRowMask[idx] = rowMask;
 
       uint16_t colMin[COLS] = { MAV_NO_DATA, MAV_NO_DATA, MAV_NO_DATA, MAV_NO_DATA };
       uint8_t  colCnt[COLS] = {0};
@@ -1129,7 +1204,7 @@ void loop()
         if (st != 5 && st != 9) continue;
 
         /* horizon row mask (no-op when sensor is top or attitude is stale) */
-        if (!rowOK[p / COLS]) continue;
+        if (!(rowMask & (1u << (p / COLS)))) continue;
 
         uint16_t d_cm = frame.distance_mm[p] / 10;
         if (d_cm > MAX_CM) continue;            // beyond range: drop
