@@ -1,6 +1,49 @@
 /****************************************************************
  * tof5x_mavlink_v4.1 — QT Py SAMD21 + TCA9548A + 5 x VL53L5CX (4x4 grid)
  *
+ * v4.4 changes over v4.3:
+ *   - SENSOR MASK back to the v4.2 set: TOP off (not used for collision
+ *     avoidance), everything else on. v4.3 shipped with LEFT disabled and
+ *     RIGHT enabled, which is backwards from the 2026-09-07 flight evidence:
+ *     both boots came up 4/4 healthy, then RIGHT went LOST in both flights
+ *     while LEFT went LOST in the first and recovered by the second.
+ *     RIGHT remains enabled by operator decision, against the warning below.
+ *   - BLOCKING TIME, which is what turns a sick sensor into a board reboot:
+ *       * one reinit per loop iteration is now actually enforced. Two paths
+ *         used continue rather than break, so two sensors could each run a
+ *         ~1 s begin() in a single iteration with no watchdog feed between.
+ *       * the 3 s USB boot delay is skipped after a WDT reset and ends early
+ *         on DTR. In flight there is no host, so that delay was pure added
+ *         blackout on every in-flight reboot.
+ *       * the debug line is one Serial.write instead of ~40 prints, each of
+ *         which can stall ~70 ms on a host that is enumerated but not reading.
+ *       * per-frame cosf/sinf replaced with exact tables (yaws are fixed
+ *         multiples of 90 deg; the part has no FPU).
+ *   - RAM, ~1.3 KB of 32 KB: MAVLINK_COMM_NUM_BUFFERS 1 drops ~900 B of unused
+ *     per-channel statics; a shared send helper removes a 280-byte stack
+ *     buffer and a copy from all five send paths; the ring is built in place;
+ *     a bool[5][4] becomes a bitmask; duplicate name tables move to flash.
+ *   - BUG FIX: STATUSTEXT is staged through a zero-filled buffer. The pack
+ *     helper copies 50 bytes regardless of string length, so short literals
+ *     were reading adjacent flash into the packet.
+ *
+ * NOT FIXED in v4.4, found while doing the above - decide these deliberately:
+ *   - A sensor that produced data and was THEN latched off keeps
+ *     lastGoodMs != 0, so the stale-data guard forces its whole FoV to MIN_CM
+ *     for the rest of the session. The guard's comment only exempts sensors
+ *     that NEVER produced data. RIGHT and LEFT both did exactly this on
+ *     2026-09-07: with PRX1_TYPE enabled, AP would have seen permanent
+ *     obstacles on both sides at once. Is that the intended fail-safe?
+ *   - The latch is defeatable when one active sensor remains: mux-recovery
+ *     clears reinitCycles, so begin() retries unbounded every ~500 ms - the
+ *     bus-wedge exposure the latch exists to cap.
+ *   - Wire.setClock is 1 MHz FM+. The dropouts appear in flight and not at
+ *     boot, which reads as signal integrity. 400 kHz is a one-line experiment
+ *     and a more direct test of the RIGHT/LEFT failures than anything above.
+ *
+ * v4.4 HAS NOT BEEN COMPILED. No Arduino toolchain was available where it was
+ * edited. Build it before flashing.
+ *
  * v4.1 changes over v4:
  *   - SENSOR ENABLE MASK: per-sensor compile-time disable. RIGHT is
  *     disabled by default — logs proved its begin() can wedge the shared
@@ -58,7 +101,7 @@
 #include <MAVLink.h>
 #include <math.h>
 
-#define FW_VERSION "v4.3"
+#define FW_VERSION "v4.4"
 
 /* ---------------- user settings ---------------- */
 #define NUM_SENS 5
