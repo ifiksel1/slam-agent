@@ -27,11 +27,16 @@
  *     helper copies 50 bytes regardless of string length, so short literals
  *     were reading adjacent flash into the packet.
  *
- *   - FIXED, the v4.3 phantom-wall defect: the stale-data guard now also
- *     exempts sensorExcluded() sensors, not just those that never produced
- *     data. A sensor latched off mid-session used to report MIN_CM across its
- *     12 bins permanently, which AP reads as a real obstacle. It now reports
- *     MAV_NO_DATA. Transient silence on a live sensor still forces MIN_CM.
+ *   - FIXED: NO OBSTACLE IS EVER SYNTHESISED. A sensor that is not providing
+ *     data contributes nothing and its bearings stay MAV_NO_DATA. Previously a
+ *     silent sensor had its whole FoV forced to MIN_CM, on the reasoning that
+ *     an unseen quadrant should read as blocked - but AP treats 2 cm as a real
+ *     obstacle and manoeuvres away from it, so that invented a wall and pushed
+ *     the aircraft. Worse, for a sensor latched off mid-session it was
+ *     PERMANENT: RIGHT and LEFT both did this on 2026-09-07 and would have
+ *     shown AP walls on both sides at once with PRX1_TYPE enabled.
+ *     Stale readings are still never published; only the invented obstacle is
+ *     gone. An invented wall is an active hazard; "unknown" is passive.
  *
  * NOT FIXED in v4.4, found while doing the above - decide these deliberately:
  *   - The latch is defeatable when one active sensor remains: mux-recovery
@@ -212,8 +217,9 @@ static const bool sensorEnabled[NUM_SENS] = {
 #define WDT_BB_MAGIC    0xB1ACB0C5UL
 
 /* safety hardening */
-#define SENSOR_STALE_MS         250   // a horizontal sensor silent longer than this is
-                                      // forced to MIN_CM (assume obstacle) — fail safe
+#define SENSOR_STALE_MS         250   // a horizontal sensor silent longer than this
+                                      // stops contributing; its bearings go
+                                      // MAV_NO_DATA. We never invent an obstacle.
 #define LONE_NEAR_CM            50    // a single valid zone closer than this is trusted as
                                       // a real obstacle instead of being suppressed
 #define MUX_RETRY_MS            500   // how often loop() re-attempts mux recovery when down
@@ -576,26 +582,31 @@ static inline void sendObstacleDistance()
   for (uint8_t i = 0; i < NUM_BUCKETS; i++) ring[i] = MAV_NO_DATA;
   for (uint8_t s = 0; s < NUM_SENS; s++) {
     if (!horiz[s]) continue;
-    /* Stale-data guard: if a LIVE sensor goes silent longer than
-       SENSOR_STALE_MS, force its whole FoV to MIN_CM (assume obstacle) rather
-       than letting AP act on the last stale reading. Losing sight of a
-       quadrant for a moment should read as blocked, not as clear.
-         Two cases are deliberately NOT forced, because for them MIN_CM would
-       be a PERMANENT phantom wall rather than a transient caution, and AP
-       treats it as a real obstacle either way:
+    /* A sensor that is not currently providing data contributes NOTHING. Its
+       bearings keep MAV_NO_DATA (unknown) and we move on.
+         We never synthesise an obstacle. Earlier versions forced a silent
+       sensor's whole FoV to MIN_CM on the reasoning that a quadrant you cannot
+       see should read as blocked. AP does not treat that as caution - it reads
+       2 cm as a real obstacle and manoeuvres away from it, so the effect is an
+       invented wall that pushes the aircraft. That is an ACTIVE hazard, where
+       "unknown" is merely passive: avoidance simply does not act on a bearing
+       with no data.
+         It was also permanent, not momentary, for a sensor latched off
+       mid-session by REINIT_GIVEUP_CYCLES: lastGoodMs stayed non-zero, so its
+       12 bins reported a 2 cm wall for the rest of the session. RIGHT and LEFT
+       both did exactly this on 2026-09-07, which would have shown AP obstacles
+       on both sides at once had PRX1_TYPE been enabled.
+         Three ways a sensor contributes nothing, all the same to AP:
          - never produced data (lastGoodMs == 0): failed init.
-         - sensorExcluded(): compile-time disabled, quarantined at boot by the
-           WDT blackbox, or LATCHED off mid-session by REINIT_GIVEUP_CYCLES.
-       The last of those is the v4.3 defect. A sensor that worked and was then
-       latched kept lastGoodMs != 0, so it reported a 2 cm obstacle across its
-       12 bins for the rest of the session. RIGHT and LEFT both did this on
-       2026-09-07; with PRX1_TYPE enabled AP would have seen permanent walls on
-       both sides at once. Excluded sensors now report MAV_NO_DATA = unknown,
-       which is the honest answer: that bearing is not being watched. */
-    bool stale = (lastGoodMs[s] != 0) && !sensorExcluded(s)
-                 && (now_ms - lastGoodMs[s] > SENSOR_STALE_MS);
+         - sensorExcluded(): disabled, boot-quarantined, or latched.
+         - gone quiet for longer than SENSOR_STALE_MS: the LAST READING IS NOT
+           PUBLISHED EITHER. Not acting on stale data was the original point of
+           this guard and it still holds; only the invented obstacle is gone. */
+    if (sensorExcluded(s)) continue;
+    if (lastGoodMs[s] == 0) continue;
+    if (now_ms - lastGoodMs[s] > SENSOR_STALE_MS) continue;
     for (uint8_t c = 0; c < COLS; c++) {
-      uint16_t v = stale ? (uint16_t)MIN_CM : sensorRing[s][c];
+      uint16_t v = sensorRing[s][c];
       if (v == MAV_NO_DATA) continue;
       uint8_t center = bucketIdx[s][c];
       for (int8_t off = -1; off <= 1; off++) {
