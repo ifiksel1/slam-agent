@@ -1,9 +1,7 @@
 # Claude Code Memory - SLAM Agent
 
-## Code Work Model Policy
-- **Use Sonnet 4.5** for code writing/debugging/refactoring (via Task tool delegation)
-- **Only use Haiku** for trivial tasks or code reading
-- This is automatic, no need to request each time
+## Model Routing
+- [Model routing policy](model_routing_policy.md) — Fable 5.1 orchestrates; Opus 5 codes (`slam-coder`), Fable 5.1 checks (`code-checker`), Sonnet does small tasks (`slam-helper`); wired in `.claude/agents/` + `settings.local.json`
 
 ---
 
