@@ -1,6 +1,6 @@
 ---
 name: slam_integration_agent
-model: claude-4.5-sonnet-thinking
+model: inherit
 description: "Build GPS-denied drone navigation systems with SLAM + ArduPilot/PX4. Multi-phase guidance from hardware assessment to flight-ready integration."
 ---
 

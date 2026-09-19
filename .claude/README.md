@@ -20,13 +20,39 @@ client = anthropic.Anthropic()
 with open('.claude/slam_integration_agent.md', 'r') as f:
     system_prompt = f.read()
 
-response = client.messages.create(
-    model="claude-sonnet-4-5-20250929",
-    max_tokens=4096,
+# Fable 5.1 is the orchestrator tier (see "Model Routing" below).
+# Reasoning depth is set by output_config.effort (low|medium|high|xhigh|max),
+# not by a thinking budget: `budget_tokens` and an explicit `thinking` param
+# both return 400 on this model. Use xhigh for coding and agentic work.
+response = client.beta.messages.create(
+    model="claude-fable-5-1",
+    max_tokens=16000,
+    output_config={"effort": "xhigh"},
+    betas=["server-side-fallback-2026-07-01"],
+    fallbacks="default",          # on a policy decline, retry on a fallback model in-call
     system=system_prompt,
     messages=[{"role": "user", "content": "I want to integrate SLAM with my drone"}]
 )
+
+if response.stop_reason == "refusal":
+    raise RuntimeError(f"declined: {response.stop_details}")
+print(response.content[0].text)
 ```
+
+## Model Routing
+
+Claude Code reads this from `.claude/agents/` + `.claude/settings.local.json`:
+
+| Role | Model | Defined in |
+|---|---|---|
+| Orchestrator (main session) | Fable 5.1 (`claude-fable-5-1`) | `.claude/settings.local.json` -> `"model": "fable"` |
+| Coding | Opus 5 (`claude-opus-5`) | `.claude/agents/slam-coder.md` |
+| Code review | Fable 5.1 | `.claude/agents/code-checker.md` |
+| Small / bounded tasks | Sonnet 5 (`claude-sonnet-5`) | `.claude/agents/slam-helper.md` |
+
+The orchestrator delegates implementation to `slam-coder`, then has `code-checker`
+review the diff before it is run on hardware or committed. `settings.local.json` is
+gitignored, so the model choice is per-machine; the agent definitions are committed.
 
 ## How It Works
 

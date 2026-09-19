@@ -14,3 +14,6 @@ docker_src_fastlivo2/
 .catkin_tools/
 .claude/projects/
 superodom_integration/**/*.db3
+
+# Claude Code personal overrides (model choice, permission allowlist)
+.claude/settings.local.json
