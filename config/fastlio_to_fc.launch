@@ -235,7 +235,8 @@
        (/mnt/usb/MM_DD_YYYY_HH_mm_ss/ with <ts>.bag of /lidar_points+/lidar_imu and <ts>.las of
        /Laser_map overwritten every 30s); CH9 LOW(<=1300) or a LAND/restart -> stop. CH9 middle is the
        LAND trigger (drift_monitor, hold-dwell) so transit LOW<->HIGH won't fire LAND. Read-only/recording. -->
-  <node pkg="fast_lio" type="ch9_logger.py" name="ch9_logger" output="screen" launch-prefix="python3">
+  <node pkg="fast_lio" type="ch9_logger.py" name="ch9_logger" output="screen" launch-prefix="python3"
+        respawn="true" respawn_delay="2">  <!-- respawn: staging a job (revolute-gui) kills this node to re-read out_root; without it the node stayed dead until the next launch and flights went unrecorded (2026-09-26) -->
     <param name="ch9_channel" type="int"    value="9" />
     <param name="high_thresh" type="int"    value="1700" />
     <param name="low_thresh"  type="int"    value="1300" />
@@ -252,7 +253,8 @@
        altitude, estimator_status, statustext, rc in/out, imu/vibe, setpoints) -> diagnoses the
        vision->FC->EKF->controller chain (e.g. the Loiter climb). READ-ONLY: never arms/commands
        the FC; trigger 'always' is for bench tests only. -->
-  <node pkg="fast_lio" type="flight_recorder.py" name="flight_recorder" output="screen" launch-prefix="python3">
+  <node pkg="fast_lio" type="flight_recorder.py" name="flight_recorder" output="screen" launch-prefix="python3"
+        respawn="true" respawn_delay="2">  <!-- respawn: see ch9_logger above -->
     <param name="trigger"        type="str"    value="arm" />
     <param name="out_root"       type="str"    value="/mnt/usb" />
     <param name="split_minutes"  type="double" value="2.0" />
