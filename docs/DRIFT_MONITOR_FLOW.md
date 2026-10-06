@@ -52,9 +52,10 @@
                                  (of)              (land)
                                   |                  |
                                   v                  v
-                    [EKF source -> OF (SRC2)   [set_mode LAND]
-                     DO_AUX_FUNCTION 90]       [MSG 2/4: "LANDING"]
-                    [MSG 2/4: "Switched OF"]           |
+                    [EKF source -> OF (SRC2)   [EKF source -> OF (SRC2)]
+                     DO_AUX_FUNCTION 90]       [set_mode LAND (even if
+                    [MSG 2/4: "Switched OF"]    the switch was refused)]
+                                  |            [MSG 2/4: "LANDING"]
                                   \                   /
                                    \                 /
                                     v               v
@@ -67,7 +68,8 @@
               [health gap seen  AND  n_ok >= k_release]
                                           |
                                           v
-                          [ restart_mode == of  AND  failover_active ? ]
+                [ restart_mode == of  AND  failover_active ? ]
+                [ land: stays on SRC2, banner "SLAM back, staying on SRC2" ]
                                     /                       \
                                  (yes)                      (no)
                                   |                          |
@@ -91,7 +93,7 @@
 - **Hysteresis (K-scan):** requires `k_crit`/`k_warn` consecutive scans to latch, `k_release` OK scans to clear — prevents single-scan chatter.
 - **Re-warm on restart:** a `/fastlio_health` gap > `reset_gap` means laserMapping restarted; baseline + counters reset and OK is latched so the fresh (transiently degenerate) SLAM doesn't instantly re-fire.
 - **CH9 is edge-triggered with dwell:** must enter the ~1500 band and HOLD `ch9_dwell` seconds; transit through the band does not fire. Never fires if booted already in-band.
-- **`restart_mode` selects the FC action:** `of` = EKF source failover SLAM(SRC1)->OF(SRC2), switch back on recovery — NO flight-mode change; `land` = `set_mode LAND`, no switch-back. Toggle via `switch_restart_mode.sh` or the web UI.
+- **`restart_mode` selects the FC action:** `of` = EKF source failover SLAM(SRC1)->OF(SRC2), switch back on recovery — NO flight-mode change; `land` = the same SRC2 switch, THEN `set_mode LAND`, so LAND descends on rangefinder height (EK3_SRC2_POSZ=2) rather than on the SLAM that just failed; `land` never switches back to SRC1: the vehicle stays on SRC2 until the FC is rebooted (the source selection is not saved) or the tank script re-selects `TANK_NAV_SRC`. A latency CRITICAL, and the health watchdog (laserMapping died on its own), switch to SRC2 in both modes; the watchdog never LANDs. (Before 2026-10-06 `land` mode did no switch at all and flew on SLAM height: FC log 233, 2026-09-29, frozen SLAM height -> 4 m/s climb on full throttle.) Toggle via `switch_restart_mode.sh` or the web UI.
 - **RC-stream keepalive:** on each `/mavros/state` connect the node re-requests RC_CHANNELS so `/mavros/rc/in` stays populated and CH9 survives reboots / mavros restarts (FC `SR0_RC_CHAN` alone is not enough).
 - **Four GCS banners per event:** (1) restart triggered, (2) mode action (OF/LAND), (3) restart in progress, (4) recovery.
 - **Order in `of` mode:** source switches to OF *before* SLAM is killed, so the EKF never loses its position feed.

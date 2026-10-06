@@ -109,7 +109,8 @@
   <node pkg="fast_lio" type="drift_monitor.py" name="drift_monitor" output="screen" launch-prefix="python3"
         respawn="true" respawn_delay="2">
     <!-- restart_mode: "of" = EKF source failover to Optical Flow (default; no flight-mode change),
-         "land" = command FC into LAND. Toggle persistently with ~/Documents/switch_restart_mode.sh. -->
+         "land" = switch EKF to SRC2 (rangefinder height) FIRST, then command FC into LAND; never
+         switched back to SRC1 (reboot the FC to return to SLAM). Toggle persistently with ~/Documents/switch_restart_mode.sh. -->
     <param name="restart_mode"        type="str"  value="of" />
     <!-- RC stream keepalive: re-request RC_CHANNELS from the FC on every mavros connect so
          /mavros/rc/in stays populated and the CH9 trigger survives reboots/mavros restarts

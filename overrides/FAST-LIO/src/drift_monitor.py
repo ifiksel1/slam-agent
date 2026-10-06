@@ -262,8 +262,18 @@ class DriftMonitor:
         # restart_mode selects the FC response run on trigger (drift CRITICAL, latency CRITICAL, CH9):
         #   "of"   -> EKF source failover SLAM(SRC1)->OF(SRC2), switch back on recovery (DEFAULT;
         #             no flight-mode change, benign disarmed, vehicle keeps flying on OF)
-        #   "land" -> command the FC into LAND (set_mode); no source switch-back on recovery
+        #   "land" -> the same SRC2 failover FIRST, then command the FC into LAND (set_mode). NEVER
+        #             switched back to SRC1: the vehicle stays on SRC2 until the FC is rebooted
+        #             (the selection is not saved) or the tank script re-selects TANK_NAV_SRC.
         # Both modes then restart laserMapping. Toggle persistently via switch_restart_mode.sh.
+        #
+        # Why "land" switches to SRC2 too (2026-10-06). It used to LAND on SRC1, i.e. on SLAM height
+        # (EK3_SRC1_POSZ=6, EK3_RNG_USE_HGT=-1), and to skip the source switch on a latency CRITICAL
+        # entirely. FC log 233 (2026-09-29, t=1402-1407): latency CRITICAL in Loiter, no switch, SLAM
+        # height froze (moved ~0.25 m while the rangefinder read 2.0 -> 4.5 m), the EKF followed it and
+        # the vehicle climbed at 4 m/s on full throttle with the pilot's stick at minimum. On SRC2 the
+        # EKF height is the rangefinder (EK3_SRC2_POSZ=2), so LAND's control loop and its speed
+        # schedule (fc_scripts/land_speed_schedule.lua) then read the same sensor.
         self.restart_mode = str(g("~restart_mode", "of")).lower()
         if self.restart_mode not in ("of", "land"):
             rospy.logwarn("drift_monitor: unknown restart_mode=%r -> defaulting to 'of'", self.restart_mode)
@@ -547,14 +557,16 @@ class DriftMonitor:
 
         # One-shot lane-change to OF. Deliberately does NOT restart anything: roslaunch
         # respawn="true" already owns bringing laserMapping back, and a rosnode kill against a
-        # dead node achieves nothing.
+        # dead node achieves nothing. Both modes: in "land" a dead laserMapping otherwise leaves
+        # the EKF on SRC1 with no vision at all. No LAND here; the watchdog has never commanded
+        # a flight mode. Recovery runs as usual ("land" stays on SRC2).
         if (not self._health_wd_fired and self.enable_latency_critical
                 and now >= self._lat_blank_until):
             self._health_wd_fired = True
             rospy.logwarn("drift_monitor: health lost -> OF (SRC2); respawn owns the restart")
             self._restart_lock = True
             self._refresh_interlock()
-            if self.restart_mode == "of" and self.enable_source_failover and not self.failover_active:
+            if self.enable_source_failover and not self.failover_active:
                 self.failover_active = True
                 self._spawn(self._failover_worker)
 
@@ -683,14 +695,20 @@ class DriftMonitor:
         if (self._restart_lock and self.n_ok >= self.k_release
                 and (self._saw_gap_since_lock or self._lat_no_restart or not self.enable_auto_restart)
                 and (not self.lat_gates_recovery or self.n_lat_ok >= self.lat_k_release)):
-            # fresh SLAM confirmed healthy. In "of" mode, lane-change back OF(SRC2)->SLAM(SRC1);
-            # in "land" mode there is no source to restore (FC stays in LAND, pilot resumes).
+            # fresh SLAM confirmed healthy -> in "of" mode lane-change back OF(SRC2)->SLAM(SRC1).
+            # In "land" mode stay on SRC2 for good (operator decision 2026-10-06): getting back onto
+            # SLAM height is a deliberate act - an FC reboot - not something to do automatically.
+            # The flag is still cleared, so the next fault re-sends SRC2 rather than assuming it,
+            # in case the FC was rebooted onto SRC1 meanwhile (re-sending is harmless).
             # lat_gates_recovery above: handing the EKF back to a SLAM that is geometrically
             # perfect but still publishing stale poses is exactly the 25 Aug failure.
             if self.restart_mode == "of" and self.enable_source_failover and self.failover_active:
                 self.failover_active = False       # clear first so this cannot re-enter
                 self._spawn(self._set_ekf_source, self.src1_switch_pos, "SLAM (SRC1)")
                 recovery_msg = "Restart finished, back to SRC1"
+            elif self.failover_active:
+                self.failover_active = False
+                recovery_msg = "SLAM back, staying on SRC2"
             else:
                 recovery_msg = "Restarted, ready to arm"
             self._restart_lock = False
@@ -797,11 +815,13 @@ class DriftMonitor:
         self._lat_escalated = False
         self._lat_failover_at = time.time()
         self._send_statustext(_SEV_CRITICAL, "SLAM latency high, switching to OF", force=True)
-        if self.restart_mode == "of" and self.enable_source_failover:
+        # Both modes. "land" used to skip this, and the 5 s drain was then flown on stale SLAM
+        # height: that is the FC log 233 climb (see restart_mode in __init__).
+        if self.enable_source_failover and not self.failover_active:
             self.failover_active = True     # optimistic; the worker clears it if the FC refuses
             self._spawn(self._failover_worker)
-        else:
-            rospy.logwarn("drift_monitor: restart_mode=%s -> no source switch for latency", self.restart_mode)
+        elif not self.enable_source_failover:
+            rospy.logwarn("drift_monitor: source failover disabled -> no source switch for latency")
 
     def _failover_worker(self):
         ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
@@ -858,7 +878,14 @@ class DriftMonitor:
     def _restart_worker(self):
         # MSG 2/4: mode-specific FC action.
         if self.restart_mode == "land":
-            # Command the FC into LAND, then restart SLAM. No source switch-back on recovery.
+            # SRC2 FIRST, so LAND descends on rangefinder height rather than on the SLAM that just
+            # failed, then LAND, then restart SLAM. If the switch is refused, LAND anyway: that is
+            # the old behaviour, and still better than not landing. Never switched back to SRC1.
+            if self.enable_source_failover and not self.failover_active:
+                ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
+                self.failover_active = ok
+                self._send_statustext(_SEV_CRITICAL,
+                                      "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
             ok = self._command_land()
             self._send_statustext(_SEV_CRITICAL, "LANDING" if ok else "LAND cmd FAILED", force=True)
         else:
