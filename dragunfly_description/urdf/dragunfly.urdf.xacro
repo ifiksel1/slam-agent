@@ -1,0 +1,529 @@
+<?xml version="1.0"?>
+<!--
+  Dragunfly-family drone description — single source of truth for REAL and SIM.
+
+  Usage
+  =====
+  Real hardware (TF tree only, no inertia/collision/plugins):
+      xacro dragunfly.urdf.xacro sim:=false > dragunfly.urdf
+
+  Gazebo Harmonic SITL (adds inertials, collision, rotors, gz sensors, ArduPilotPlugin):
+      xacro dragunfly.urdf.xacro sim:=true > dragunfly_sim.urdf
+
+  Per-variant changes live ONLY in the PARAMETERS block below. Do not edit the
+  structure for a new airframe — change the numbers.
+
+  Frame ownership (IMPORTANT)
+  ===========================
+  This URDF owns every static frame, including os_lidar and os_imu. The Ouster
+  driver MUST therefore run with `pub_static_tf: false` (as in the known-good
+  ROS 2 config) or you get duplicate/conflicting static TFs on /tf_static.
+
+  Runtime chain:  map -> odom -> base_link   (published by SLAM)
+                  base_link -> os_sensor -> {os_lidar, os_imu}   (this file)
+
+  Conventions: ROS REP-103 — X forward, Y left, Z up.
+-->
+<robot name="dragunfly" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- sim:=true  -> Gazebo-ready model (dynamics + sensors + ArduPilot SITL)
+       sim:=false -> bare TF tree for the real aircraft -->
+  <xacro:arg name="sim" default="false"/>
+  <xacro:property name="sim" value="$(arg sim)"/>
+
+  <!-- ==================================================================== -->
+  <!-- PARAMETERS — the only block to edit for a new Dragunfly variant       -->
+  <!-- ==================================================================== -->
+
+  <!-- ==== Airframe geometry ==== -->
+  <!-- Motor arm length: centre of base_link to a single rotor axis, metres.
+       For a quad-X this is the motor-to-motor DIAGONAL / 2. -->
+  <xacro:property name="prop_diameter_in" value="18.5"/>
+  <xacro:property name="prop_radius"  value="${prop_diameter_in * 0.0254 / 2.0}"/>
+
+  <!-- MEASURED: 800 mm motor-to-motor diagonal, so arm_length = 0.400 m.
+
+       PROP CLEARANCE CONSTRAINT (quad-X):
+         adjacent rotor spacing = arm_length * sqrt(2)
+         props overlap when that spacing < 2 * prop_radius
+       At 0.400 m the spacing is 0.5657 m against a 0.4699 m prop diameter,
+       leaving a 96 mm tip gap (20.4%) - comfortable. 18.5 in props would only
+       begin to touch at arm_length 0.3323 m. -->
+  <xacro:property name="arm_length"   value="0.400"/>
+
+  <!-- !! body_x/y are placeholders. An 800 mm-diagonal airframe almost certainly
+       !! has a larger centre section than 0.30 m. Affects the inertia box
+       !! approximation and the collision hull. -->
+  <xacro:property name="body_x"       value="0.30"/>
+  <xacro:property name="body_y"       value="0.30"/>
+  <xacro:property name="body_z"       value="0.15"/>
+
+  <!-- Landing gear height. HARD MINIMUM: the inverted Ouster housing reaches
+       z = -0.0956 m (os_sensor at -0.060 minus half of the 0.071 m housing),
+       so anything at or below ~0.10 m buries the LiDAR in the ground plane.
+       !! 0.25 is a plausible heavy-lift value, not a measured one. -->
+  <xacro:property name="landing_gear_h" value="0.25"/>
+
+  <!-- ==== Mass ====
+       all_up_mass is the measured all-up weight of the aircraft, battery and
+       payload included. body_mass is DERIVED so the model total matches it
+       exactly: set all_up_mass and leave body_mass alone. -->
+  <xacro:property name="all_up_mass"  value="7.0"/>
+  <xacro:property name="rotor_mass"   value="0.065"/>  <!-- 18.5in CF prop ~65 g -->
+  <xacro:property name="body_mass"
+                  value="${all_up_mass - lidar_mass - 4*rotor_mass}"/>
+
+  <!-- ==== Body inertia ====
+       Defaults are a solid-box approximation of body_x/y/z. For a 7 kg airframe
+       that is KNOWN TO BE LOW, roughly 2x: a 7 kg quad does not carry its mass
+       inside a 30 cm box. Battery, arms, motors and the Jetson/carrier sit out
+       at radius, and inertia scales with distance squared. The box model gives
+       Ixx ~= 0.07 kg m^2 about base_link where a real airframe of this class
+       measures nearer 0.10-0.20.
+
+       This matters for the ATTITUDE LOOP. If you intend to carry SITL-tuned
+       ATC_RAT_* gains onto the aircraft, measure the real values first
+       (bifilar/trifilar pendulum: suspend on two threads, time the torsional
+       oscillation, I = m*g*d^2*T^2/(4*pi^2*L)). If you are using SITL to
+       exercise the SLAM -> vision_position_estimate -> EKF3 path and to catch
+       frame errors, which is the primary goal here, inertia fidelity is
+       second order and these defaults are fine.
+
+       Override by replacing the formulas with measured numbers. -->
+  <xacro:property name="body_ixx"
+                  value="${body_mass*(body_y*body_y + body_z*body_z)/12.0}"/>
+  <xacro:property name="body_iyy"
+                  value="${body_mass*(body_x*body_x + body_z*body_z)/12.0}"/>
+  <xacro:property name="body_izz"
+                  value="${body_mass*(body_x*body_x + body_y*body_y)/12.0}"/>
+
+  <!-- ==== Propulsion ====
+       motor_constant is DERIVED from thrust_to_weight so the sim cannot silently
+       become unflyable when all_up_mass changes. The relation Gazebo's
+       MulticopterMotorModel uses is:
+
+           thrust_per_rotor = motor_constant * rotor_velocity^2
+
+       so at full throttle:
+
+           motor_constant = (T/W * all_up_mass * g / 4) / max_rot_velocity^2
+
+       A multirotor needs T/W >= 2.0 to be controllable (1.5 is the bare floor).
+       NOTE: the upstream ArduPilot Iris constants, which this file previously
+       carried, give T/W = 1.12 at 7 kg - the model would not lift off.
+
+       max_rot_velocity must match the real prop/motor combination. 700 rad/s
+       (~6700 RPM) suits the 14 in class; 10 in props run nearer 1500 rad/s. -->
+  <xacro:property name="gravity"          value="9.81"/>
+  <xacro:property name="thrust_to_weight" value="2.0"/>
+  <!-- Bounded by prop tip speed, not by the motor. At r = 0.235 m, 520 rad/s
+       (4966 RPM) gives a 122 m/s tip speed - the usual efficient range for
+       large props. Mach 0.5 (~170 m/s) would be 724 rad/s, the aero ceiling. -->
+  <xacro:property name="max_rot_velocity" value="520.0"/>
+  <xacro:property name="motor_constant"
+                  value="${thrust_to_weight * all_up_mass * gravity / 4.0
+                           / (max_rot_velocity * max_rot_velocity)}"/>
+  <!-- Yaw-torque arm: drag torque = moment_constant * thrust. Scales with prop
+       diameter, so it is derived rather than fixed - the upstream Iris value of
+       0.016 m on a 10 in prop is a ratio of 0.063 diameters, which on 18.5 in
+       gives ~0.0296 m. A fixed 0.016 would badly understate yaw authority here. -->
+  <xacro:property name="moment_arm_ratio" value="0.063"/>
+  <xacro:property name="moment_constant"
+                  value="${moment_arm_ratio * 2.0 * prop_radius}"/>
+
+  <!-- Spin-up/down time constants. Large props carry far more rotational
+       inertia than the 10 in Iris defaults (0.0125 / 0.025 s) assume. -->
+  <xacro:property name="time_constant_up"   value="0.05"/>
+  <xacro:property name="time_constant_down" value="0.08"/>
+
+  <!-- ==== Ouster OS1-64 mounting (base_link -> os_sensor) ====
+       Dragunfly baseline: inverted, 60 mm below the FCU, connector forward. -->
+  <xacro:property name="lidar_xyz"    value="0.0 0.0 -0.060"/>
+  <xacro:property name="lidar_rpy"    value="0 ${pi} 0"/>
+  <xacro:property name="lidar_mass"   value="0.43"/>      <!-- OS1-64 = 430 g -->
+  <xacro:property name="lidar_radius" value="0.0425"/>    <!-- 85 mm dia -->
+  <xacro:property name="lidar_height" value="0.0710"/>
+
+  <!-- ==== Ouster internal extrinsics — from sensor metadata, DO NOT GUESS ====
+       Sensor SN 122224003549, fw 2.4.0:
+         lidar_to_sensor: R = Rz(pi) = [[-1,0,0],[0,-1,0],[0,0,1]], T = [0, 0, 36.18 mm]
+         imu_to_sensor:   R = I,                                    T = [6.253, -11.775, 7.645 mm]
+       A different OS1 unit has slightly different values: read them from that
+       sensor's own metadata JSON rather than copying these. -->
+  <xacro:property name="os_lidar_xyz" value="0 0 0.03618"/>
+  <xacro:property name="os_lidar_rpy" value="0 0 ${pi}"/>
+  <xacro:property name="os_imu_xyz"   value="0.006253 -0.011775 0.007645"/>
+  <xacro:property name="os_imu_rpy"   value="0 0 0"/>
+
+  <!-- ==== LiDAR simulation (ignored when sim:=false) ====
+       Matches the real driver's '1024x10' lidar_mode and 0.3-120 m range so the
+       simulated cloud has the same shape as the hardware one. -->
+  <xacro:property name="lidar_hz"          value="10"/>
+  <xacro:property name="lidar_h_samples"   value="1024"/>
+  <xacro:property name="lidar_v_samples"   value="64"/>
+  <xacro:property name="lidar_v_min_deg"   value="-16.6"/>  <!-- OS1-64: 33.2 deg FoV -->
+  <xacro:property name="lidar_v_max_deg"   value="16.6"/>
+  <xacro:property name="lidar_min_range"   value="0.3"/>
+  <xacro:property name="lidar_max_range"   value="120.0"/>
+  <xacro:property name="lidar_noise_std"   value="0.015"/>  <!-- OS1 ~1.5-3 cm 1-sigma -->
+
+  <!-- ==================================================================== -->
+  <!-- MATERIALS                                                            -->
+  <!-- ==================================================================== -->
+  <material name="black"><color rgba="0.1 0.1 0.1 1.0"/></material>
+  <material name="blue"><color rgba="0.2 0.4 0.8 1.0"/></material>
+  <material name="red"><color rgba="0.8 0.2 0.2 1.0"/></material>
+  <material name="grey"><color rgba="0.5 0.5 0.5 1.0"/></material>
+
+  <!-- ==================================================================== -->
+  <!-- MACROS                                                               -->
+  <!-- ==================================================================== -->
+
+  <!-- Solid-box inertia tensor -->
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12.0}" ixy="0.0" ixz="0.0"
+               iyy="${m*(x*x+z*z)/12.0}" iyz="0.0"
+               izz="${m*(x*x+y*y)/12.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!--
+    Frame-only links carry no mass, but sdformat's URDF=>SDF converter MERGES a
+    massless fixed-joint child into its parent. That would collapse os_lidar /
+    os_imu into os_sensor and delete the very frame names FAST-LIO2 and the
+    ros_gz bridge expect. A negligible but non-zero inertia keeps the link alive
+    without perturbing the dynamics (1 mg, 1e-9 kg m^2).
+  -->
+  <xacro:macro name="frame_inertia">
+    <xacro:if value="${sim}">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="1e-6"/>
+        <inertia ixx="1e-9" ixy="0.0" ixz="0.0" iyy="1e-9" iyz="0.0" izz="1e-9"/>
+      </inertial>
+    </xacro:if>
+  </xacro:macro>
+
+  <!-- Solid-cylinder inertia tensor (z = symmetry axis) -->
+  <xacro:macro name="cylinder_inertia" params="m r h">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="${m}"/>
+      <inertia ixx="${m*(3*r*r+h*h)/12.0}" ixy="0.0" ixz="0.0"
+               iyy="${m*(3*r*r+h*h)/12.0}" iyz="0.0"
+               izz="${m*r*r/2.0}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!--
+    One rotor: link + revolute joint + (sim) MulticopterMotorModel plugin.
+    ArduPilot quad-X numbering, with SITL servo channel mapping:
+      motor 1 = front-right, CCW -> channel 0
+      motor 2 = rear-left,   CCW -> channel 1
+      motor 3 = front-left,  CW  -> channel 2
+      motor 4 = rear-right,  CW  -> channel 3
+    'dir' is  1 for CCW, -1 for CW.
+  -->
+  <!--
+    One ArduPilotPlugin servo channel. 'multiplier' is the rotor velocity
+    (rad/s) commanded at full throttle, so it MUST equal max_rot_velocity or
+    the plugin and the motor model disagree about what full throttle means.
+    Its sign carries the turn direction, matching the rotor macro's 'dir'.
+  -->
+  <xacro:macro name="ap_control" params="channel rotor dir">
+    <control channel="${channel}">
+      <jointName>${rotor}_joint</jointName>
+      <useForce>1</useForce>
+      <multiplier>${dir * max_rot_velocity}</multiplier>
+      <offset>0</offset>
+      <servo_min>1100</servo_min>
+      <servo_max>1900</servo_max>
+      <type>VELOCITY</type>
+      <p_gain>0.20</p_gain>
+      <i_gain>0</i_gain>
+      <d_gain>0</d_gain>
+      <cmd_max>2.5</cmd_max>
+      <cmd_min>-2.5</cmd_min>
+    </control>
+  </xacro:macro>
+
+  <xacro:macro name="rotor" params="name channel x y dir">
+    <link name="${name}">
+      <!-- Visual is present in BOTH modes on purpose: a recognisable quad
+           silhouette in RViz/Foxglove is the fastest way to eyeball a wrong
+           LiDAR mounting rotation against the airframe. -->
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><cylinder radius="${prop_radius}" length="0.005"/></geometry>
+        <material name="grey"/>
+      </visual>
+      <xacro:if value="${sim}">
+        <xacro:cylinder_inertia m="${rotor_mass}" r="${prop_radius}" h="0.005"/>
+      </xacro:if>
+    </link>
+
+    <joint name="${name}_joint" type="${'continuous' if sim else 'fixed'}">
+      <parent link="base_link"/>
+      <child  link="${name}"/>
+      <origin xyz="${x} ${y} ${body_z/2.0}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <xacro:if value="${sim}">
+        <limit effort="100.0" velocity="2000.0"/>
+        <dynamics damping="0.0" friction="0.0"/>
+      </xacro:if>
+    </joint>
+
+    <xacro:if value="${sim}">
+      <gazebo>
+        <plugin filename="gz-sim-multicopter-motor-model-system"
+                name="gz::sim::systems::MulticopterMotorModel">
+          <robotNamespace>dragunfly</robotNamespace>
+          <jointName>${name}_joint</jointName>
+          <linkName>${name}</linkName>
+          <turningDirection>${'ccw' if dir == 1 else 'cw'}</turningDirection>
+          <timeConstantUp>${time_constant_up}</timeConstantUp>
+          <timeConstantDown>${time_constant_down}</timeConstantDown>
+          <maxRotVelocity>${max_rot_velocity}</maxRotVelocity>
+          <motorConstant>${motor_constant}</motorConstant>
+          <momentConstant>${moment_constant}</momentConstant>
+          <commandSubTopic>command/motor_speed</commandSubTopic>
+          <actuator_number>${channel}</actuator_number>
+          <rotorDragCoefficient>8.06428e-05</rotorDragCoefficient>
+          <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
+          <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+          <motorType>velocity</motorType>
+        </plugin>
+      </gazebo>
+    </xacro:if>
+  </xacro:macro>
+
+  <!-- ==================================================================== -->
+  <!-- LINKS                                                                -->
+  <!-- ==================================================================== -->
+
+  <!--
+    Ground projection, for RViz/Foxglove on the real aircraft. Omitted in sim:
+    a massless root link is an invalid canonical link in Gazebo, and a
+    floating-base vehicle gets its world pose from the physics engine anyway.
+    In sim, base_link is the root.
+  -->
+  <xacro:unless value="${sim}">
+    <link name="base_footprint"/>
+    <joint name="base_footprint_to_base_link" type="fixed">
+      <parent link="base_footprint"/>
+      <child  link="base_link"/>
+      <origin xyz="0 0 ${landing_gear_h}" rpy="0 0 0"/>
+    </joint>
+  </xacro:unless>
+
+  <!-- Body origin. Coincident with the CubeOrange FCU on this airframe. -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <xacro:if value="${sim}">
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+      </collision>
+      <!-- Uses the explicit body_i** properties so measured values can be
+           dropped in without touching the box approximation macro. -->
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="${body_mass}"/>
+        <inertia ixx="${body_ixx}" ixy="0.0" ixz="0.0"
+                 iyy="${body_iyy}" iyz="0.0"
+                 izz="${body_izz}"/>
+      </inertial>
+    </xacro:if>
+  </link>
+
+  <!-- FCU frame, kept as a named frame even though it is coincident with
+       base_link, so MAVROS/vision-bridge debugging has something to echo. -->
+  <link name="fcu">
+    <xacro:frame_inertia/>
+  </link>
+  <joint name="fcu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="fcu"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Ouster OS1-64 housing -->
+  <link name="os_sensor">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="${lidar_radius}" length="${lidar_height}"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <xacro:if value="${sim}">
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><cylinder radius="${lidar_radius}" length="${lidar_height}"/></geometry>
+      </collision>
+      <xacro:cylinder_inertia m="${lidar_mass}" r="${lidar_radius}" h="${lidar_height}"/>
+    </xacro:if>
+  </link>
+  <joint name="base_link_to_os_sensor" type="fixed">
+    <parent link="base_link"/>
+    <child  link="os_sensor"/>
+    <origin xyz="${lidar_xyz}" rpy="${lidar_rpy}"/>
+  </joint>
+
+  <!-- LiDAR optical origin. Point clouds are published in this frame. -->
+  <link name="os_lidar">
+    <xacro:frame_inertia/>
+  </link>
+  <joint name="os_sensor_to_os_lidar" type="fixed">
+    <parent link="os_sensor"/>
+    <child  link="os_lidar"/>
+    <origin xyz="${os_lidar_xyz}" rpy="${os_lidar_rpy}"/>
+  </joint>
+
+  <!-- Ouster integrated IMU (ICM-20948). This is the IMU FAST-LIO2 consumes. -->
+  <link name="os_imu">
+    <xacro:frame_inertia/>
+  </link>
+  <joint name="os_sensor_to_os_imu" type="fixed">
+    <parent link="os_sensor"/>
+    <child  link="os_imu"/>
+    <origin xyz="${os_imu_xyz}" rpy="${os_imu_rpy}"/>
+  </joint>
+
+  <!-- Rotors: quad-X. Arms at 45 deg, so each offset is arm_length/sqrt(2). -->
+  <xacro:property name="d" value="${arm_length/sqrt(2)}"/>
+  <xacro:rotor name="rotor_0" channel="0" x="${ d}" y="${-d}" dir="1"/>   <!-- front-right CCW -->
+  <xacro:rotor name="rotor_1" channel="1" x="${-d}" y="${ d}" dir="1"/>   <!-- rear-left   CCW -->
+  <xacro:rotor name="rotor_2" channel="2" x="${ d}" y="${ d}" dir="-1"/>  <!-- front-left  CW  -->
+  <xacro:rotor name="rotor_3" channel="3" x="${-d}" y="${-d}" dir="-1"/>  <!-- rear-right  CW  -->
+
+  <!-- ==================================================================== -->
+  <!-- SIMULATION-ONLY: sensors + ArduPilot SITL                            -->
+  <!-- ==================================================================== -->
+  <xacro:if value="${sim}">
+
+    <!-- Simulated Ouster. Mounted on os_lidar so the simulated cloud lands in
+         exactly the frame the real driver publishes. gz_frame_id must match the
+         link name or the ros_gz bridge will emit clouds the TF tree can't place. -->
+    <gazebo reference="os_lidar">
+      <sensor name="os_lidar_sensor" type="gpu_lidar">
+        <topic>/dragunfly/points</topic>
+        <gz_frame_id>os_lidar</gz_frame_id>
+        <update_rate>${lidar_hz}</update_rate>
+        <always_on>1</always_on>
+        <visualize>true</visualize>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>${lidar_h_samples}</samples>
+              <resolution>1</resolution>
+              <min_angle>${-pi}</min_angle>
+              <max_angle>${pi}</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>${lidar_v_samples}</samples>
+              <resolution>1</resolution>
+              <min_angle>${radians(lidar_v_min_deg)}</min_angle>
+              <max_angle>${radians(lidar_v_max_deg)}</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>${lidar_min_range}</min>
+            <max>${lidar_max_range}</max>
+            <resolution>0.001</resolution>
+          </range>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>${lidar_noise_std}</stddev>
+          </noise>
+        </lidar>
+      </sensor>
+    </gazebo>
+
+    <!-- Simulated Ouster IMU, on os_imu. Noise densities are ICM-20948 datasheet
+         figures, chosen so FAST-LIO2's IMU noise parameters do not need a
+         separate sim-vs-real tuning pass. -->
+    <gazebo reference="os_imu">
+      <sensor name="os_imu_sensor" type="imu">
+        <topic>/dragunfly/imu</topic>
+        <gz_frame_id>os_imu</gz_frame_id>
+        <update_rate>100</update_rate>
+        <always_on>1</always_on>
+        <imu>
+          <angular_velocity>
+            <x><noise type="gaussian"><mean>0.0</mean><stddev>0.00027</stddev>
+               <bias_mean>0.0000075</bias_mean><bias_stddev>0.0000008</bias_stddev></noise></x>
+            <y><noise type="gaussian"><mean>0.0</mean><stddev>0.00027</stddev>
+               <bias_mean>0.0000075</bias_mean><bias_stddev>0.0000008</bias_stddev></noise></y>
+            <z><noise type="gaussian"><mean>0.0</mean><stddev>0.00027</stddev>
+               <bias_mean>0.0000075</bias_mean><bias_stddev>0.0000008</bias_stddev></noise></z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x><noise type="gaussian"><mean>0.0</mean><stddev>0.0023</stddev>
+               <bias_mean>0.0001</bias_mean><bias_stddev>0.000015</bias_stddev></noise></x>
+            <y><noise type="gaussian"><mean>0.0</mean><stddev>0.0023</stddev>
+               <bias_mean>0.0001</bias_mean><bias_stddev>0.000015</bias_stddev></noise></y>
+            <z><noise type="gaussian"><mean>0.0</mean><stddev>0.0023</stddev>
+               <bias_mean>0.0001</bias_mean><bias_stddev>0.000015</bias_stddev></noise></z>
+          </linear_acceleration>
+        </imu>
+      </sensor>
+    </gazebo>
+
+    <!-- Separate IMU on base_link: this is the FCU's own IMU, which ArduPilot
+         SITL consumes. It must NOT be the same sensor as os_imu — SLAM and the
+         autopilot read different IMUs on the real aircraft too. -->
+    <gazebo reference="base_link">
+      <sensor name="fcu_imu_sensor" type="imu">
+        <topic>/dragunfly/fcu_imu</topic>
+        <gz_frame_id>base_link</gz_frame_id>
+        <update_rate>1000</update_rate>
+        <always_on>1</always_on>
+      </sensor>
+    </gazebo>
+
+    <gazebo>
+      <!-- Required for the MulticopterMotorModel plugins above to receive commands -->
+      <plugin filename="gz-sim-multicopter-control-system"
+              name="gz::sim::systems::MulticopterVelocityControl">
+        <robotNamespace>dragunfly</robotNamespace>
+        <commandSubTopic>cmd_vel</commandSubTopic>
+        <enableSubTopic>enable</enableSubTopic>
+      </plugin>
+
+      <!--
+        ArduPilot SITL bridge. Talks to a locally running
+            sim_vehicle.py -v ArduCopter -f gazebo-iris (JSON model)
+        over UDP 9002/9003.
+
+        gazeboXYZToNED and modelXYZToAirplaneXForwardZDown both apply a 180 deg
+        roll, converting Gazebo's ENU/X-forward-Z-up to ArduPilot's NED. Getting
+        either wrong is the #1 cause of SITL models that fly inverted or yaw the
+        wrong way — see docs/troubleshooting/coordinate_frames.md.
+      -->
+      <plugin name="ArduPilotPlugin" filename="ArduPilotPlugin">
+        <fdm_addr>127.0.0.1</fdm_addr>
+        <fdm_port_in>9002</fdm_port_in>
+        <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
+        <lock_step>1</lock_step>
+        <have_32_channels>0</have_32_channels>
+        <gazeboXYZToNED>0 0 0 ${pi} 0 0</gazeboXYZToNED>
+        <modelXYZToAirplaneXForwardZDown>0 0 0 ${pi} 0 0</modelXYZToAirplaneXForwardZDown>
+        <imuName>fcu_imu_sensor</imuName>
+
+        <xacro:ap_control channel="0" rotor="rotor_0" dir="1"/>
+        <xacro:ap_control channel="1" rotor="rotor_1" dir="1"/>
+        <xacro:ap_control channel="2" rotor="rotor_2" dir="-1"/>
+        <xacro:ap_control channel="3" rotor="rotor_3" dir="-1"/>
+      </plugin>
+    </gazebo>
+
+  </xacro:if>
+
+</robot>

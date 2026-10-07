@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>dragunfly_description</name>
+  <version>0.1.0</version>
+  <description>
+    Dragunfly-family UAV description. One xacro serves both the real aircraft
+    (TF tree only) and Gazebo Harmonic SITL (dynamics, simulated Ouster OS1-64,
+    ArduPilot plugin), selected by the sim:= argument.
+  </description>
+  <maintainer email="idan@ultraview.io">Idan Fiksel</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <!-- Simulation only. Not needed on the Jetson; keep them out of the
+       airborne Docker image to avoid pulling Gazebo onto ARM64. -->
+  <exec_depend condition="$GZ_VERSION != ''">ros_gz_sim</exec_depend>
+  <exec_depend condition="$GZ_VERSION != ''">ros_gz_bridge</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

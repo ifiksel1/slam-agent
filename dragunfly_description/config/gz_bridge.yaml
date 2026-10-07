@@ -1,0 +1,32 @@
+# ros_gz_bridge topic map for Dragunfly SITL.
+#
+# DESIGN INTENT: the ROS-side names here are the REAL driver's topic names
+# (/ouster/points, /ouster/imu). The simulator therefore looks identical to the
+# hardware from FAST-LIO2's point of view, so slam config, launch files and
+# ArduPilot params are byte-identical between sim and flight. If you find
+# yourself adding a sim-only topic name, remap it here instead of forking config.
+#
+# Usage:
+#   ros2 run ros_gz_bridge parameter_bridge --ros-args -p config_file:=gz_bridge.yaml
+
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+
+# Simulated Ouster OS1-64 point cloud. Published in frame os_lidar, matching
+# the real driver's point_cloud_frame: os_lidar.
+- ros_topic_name: "/ouster/points"
+  gz_topic_name: "/dragunfly/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+
+# Simulated Ouster integrated IMU (ICM-20948), frame os_imu.
+# This is the IMU FAST-LIO2 consumes - NOT the FCU IMU.
+- ros_topic_name: "/ouster/imu"
+  gz_topic_name: "/dragunfly/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
