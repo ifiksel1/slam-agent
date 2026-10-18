@@ -35,8 +35,13 @@
        respawn=true: roslaunch auto-restarts ONLY this node if it exits (drift_monitor's
        CRITICAL auto-restart kills it; roslaunch brings it back with the same params).
        Siblings (mavros/hesai/bridge) are untouched. -->
+  <!-- Threading (docs/FASTLIO_THREADING.md): pinned to one thread per fast physical core and
+       idle OpenMP workers sleep instead of spinning. Pairs with MP_PROC_NUM=4 in
+       overrides/FAST-LIO/CMakeLists.txt. The prefix and env survive the respawn above. -->
   <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"
-        respawn="true" respawn_delay="2" />
+        respawn="true" respawn_delay="2" launch-prefix="taskset -c 0,2,4,6">
+    <env name="OMP_WAIT_POLICY" value="passive"/>
+  </node>
 
   <!-- 3. MAVROS to the flight controller -->
   <node pkg="mavros" type="mavros_node" name="mavros" required="false" clear_params="true" output="screen">
