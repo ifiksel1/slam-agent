@@ -11,8 +11,21 @@
   <arg name="tgt_system" default="1" />
   <arg name="tgt_component" default="1" />
 
+  <!-- LIO backend. "fastlio" (default) = the validated, flown configuration below, unchanged.
+       "bievr" = BIEVR-LIO (ethz-asl/bievr-lio, patched: overrides/BIEVR-LIO) replaces laserMapping.
+       It publishes /bievr_lio/odom; bievr_health.py turns its health topics into /bievr_health in the
+       /fastlio_health layout; the vision bridge and drift_monitor switch topics, frame matrices and
+       thresholds below (PROGRESS P23).
+       *** bievr has been validated ONLY by offline replay of recorded flights. It has never run live
+       and never flown. It needs an image that contains BIEVR (slam-system:bievr; :latest does not). *** -->
+  <arg name="slam_backend" default="fastlio" />
+  <arg name="use_fastlio" value="$(eval arg('slam_backend') == 'fastlio')" />
+  <arg name="use_bievr"   value="$(eval arg('slam_backend') == 'bievr')" />
+
   <!-- FAST-LIO params (same as mapping_hesai_jt128.launch) -->
   <rosparam command="load" file="$(find fast_lio)/config/hesai_jt128.yaml" />
+  <param name="preprocess/blind" type="double" value="0.4" />  <!-- added by revolute-gui: overrides hesai_jt128.yaml so that file is never rewritten -->
+  <param name="mapping/det_range" type="double" value="100" />  <!-- added by revolute-gui: overrides hesai_jt128.yaml so that file is never rewritten -->
   <param name="feature_extract_enable" type="bool" value="0"/>
   <param name="point_filter_num" type="int" value="2"/>   <!-- 2->3 (2026-07-02): =2 still 17Hz/ekf 83ms peak in DENSE facility (13.4k ds_pts); =3 cuts input points -->
   <param name="max_iteration" type="int" value="4" />     <!-- 4->3 (2026-07-02): cut IEKF iterations to reduce per-scan cost in dense facility -->
@@ -20,6 +33,44 @@
   <param name="filter_size_map" type="double" value="0.22" />   <!-- 0.25->0.35 (2026-07-02): coarser map voxel -> less EKF cost -->
   <!-- NOTE: confined tuning kept cube_side_length=300 + det_range=100 unchanged (Tier 2 excluded).
        Real-time cost validated offline (uncontended): ekf_update_ms max 33 ms < 50 ms (20 Hz budget). -->
+
+  <!-- IMU NOISE (2026-09-28), NOT APPLIED: a recommendation only. hesai_jt128.yaml still sets
+       mapping/acc_cov 0.1, gyr_cov 0.1, b_acc_cov 1e-4, b_gyr_cov 1e-4.
+       Measured on /lidar_imu (JT128 internal IMU), bench unit static and disarmed, lidar spinning:
+         * Allan variance from a 3 HOUR static recording, 2026-09-28 22:37 to 01:37 UTC, started 3 min after
+           a cold boot. The data is in logs/allan_20260928_223657 (analyze.cpp, analysis_skip{0,30}.txt).
+           4.75M samples at 439.5 Hz. 5 gaps over 20 ms (70 ms max), all in the first 30 min. The table uses
+           the last 2.5 h, after warm-up; the full 3 h run gives the same white noise.
+         * Warm-up: the gyro bias moves for the first ~60 min (gz -0.0021 to -0.0074 rad/s by 20 min, settling
+           at -0.0054; gx -0.0017 to -0.0033). Accel bias moves 5 to 10 mm/s^2. Including the warm-up raises the
+           bias random walk to b_gyr_cov 1.1e-7 and b_acc_cov 1.3e-6.
+         * Per axis x/y/z, after warm-up:
+             gyro  N 2.9e-4 / 2.3e-4 / 1.1e-4 rad/s/rtHz   bias instability 5.1e-5 / 3.0e-5 / 4.6e-5 rad/s
+                   K 4.6e-6 / 1.4e-6 / 1.1e-5 rad/s^2/rtHz
+             accel N 1.3e-3 / 1.1e-3 / 9.7e-4 m/s^2/rtHz   bias instability 6.2e-4 / 1.0e-3 / 7.9e-4 m/s^2
+                   K 2.7e-5 / under 5.3e-5 / 4.1e-5 m/s^3/rtHz (y has not reached the +1/2 slope by tau 1000 s)
+           Accel ADEV falls faster than tau^-1/2 below 1 s, because of the lidar's own 20 Hz rotation, so accel N
+           is read near tau 1 s. The 09-25 30 min run gave accel N 2.4e-3/1.9e-3/1.3e-3 and gyro N close to these.
+         * In-flight noise from the 09_19 and 09_21 flight bags (motion under 5 Hz removed).
+       FAST-LIO scales its process noise by dt squared per IMU step, and /lidar_imu is timestamped in bursts
+       (2 to 3 samples ~10 us apart, then ~5 ms), so the effective step dt_eff = sum(dt^2)/sum(dt) = 4.86 ms,
+       and the matching setting is density^2 / 0.00486 (axis mean). Same for the bias terms, from K^2.
+                      static floor   incl. warm-up   in flight          current   recommendation
+         acc_cov      2.6e-4         2.6e-4          0.08 to 0.12       0.1       keep (already matches flight vibration)
+         gyr_cov      1.0e-5         1.1e-5          1.7e-4 to 2.9e-4   0.1       lower in steps: 0.01, then 0.001
+         b_acc_cov    3.6e-7         1.3e-6          n/a                1e-4      keep; if tightened, not below 1e-5
+         b_gyr_cov    9.2e-9         1.1e-7          n/a                1e-4      keep; if tightened, not below 1e-6
+       gyr_cov 0.1 is ~400x the measured in-flight gyro noise, so FAST-LIO under-trusts the gyro and leans on
+       lidar matching for rotation, which is weakest in poor geometry. The bias terms are 100x to 10000x looser
+       than measured. Loose is the safe side: flight adds temperature change and vibration the bench does not
+       have, so keep them at least 10x above the warm-up values.
+       Replay 2026-09-29 (09_21 flight, logs/imu_replay_20260929): all four terms at the static floor made rotation
+       3 to 5x worse than the current values, against FC attitude (5 s window error 1.39 vs 0.25 deg; up to 9 deg
+       off from the start). So do NOT use the raw static floor. gyr_cov 0.01 and 0.001 (other terms unchanged)
+       matched the current values: 5 s error 0.26 / 0.25 deg, position within 1.6 cm of the current values, same
+       ekf time. So they are safe in replay, but on this 56 s bag they show no measurable gain either. Change one
+       term per flight and watch /fastlio_health and drift_monitor. To apply, add a param override for
+       mapping/<name> here, after the rosparam load above. -->
 
   <param name="cube_side_length" type="double" value="300" />   <!-- bounded local map (was 1000=never trims); trims map outside 300m to cap ikd-tree growth -->
   <param name="runtime_pos_log_enable" type="bool" value="0" />
@@ -35,8 +86,19 @@
        respawn=true: roslaunch auto-restarts ONLY this node if it exits (drift_monitor's
        CRITICAL auto-restart kills it; roslaunch brings it back with the same params).
        Siblings (mavros/hesai/bridge) are untouched. -->
-  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"
+  <node if="$(arg use_fastlio)" pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen"
         respawn="true" respawn_delay="2" />
+
+  <!-- 2b. BIEVR-LIO (slam_backend:=bievr only). Reads its two YAML files from argv, not the
+       param server. Publishes /bievr_lio/odom (bievr_odom -> bievr_imu, twist in BODY frame),
+       /bievr_lio/points/registered, /bievr_lio/bias/{acc,gyro} and /bievr_lio/health/*. -->
+  <node if="$(arg use_bievr)" pkg="bievr_lio_ros" type="process_topics" name="bievr_lio" output="screen"
+        respawn="true" respawn_delay="2"
+        args="--sensor_config_file $(find fast_lio)/config/bievr_jt128.yaml --params_file $(find fast_lio)/config/bievr_params.yaml" />
+  <!-- 2c. BIEVR health -> /bievr_health (same 8-slot layout as /fastlio_health, for drift_monitor).
+       Publishes nothing if BIEVR's health stops, so drift_monitor's watchdog fires as for laserMapping. -->
+  <node if="$(arg use_bievr)" pkg="fast_lio" type="bievr_health.py" name="bievr_health" output="screen"
+        launch-prefix="python3" respawn="true" respawn_delay="2" />
 
   <!-- 3. MAVROS to the flight controller -->
   <node pkg="mavros" type="mavros_node" name="mavros" required="false" clear_params="true" output="screen">
@@ -58,8 +120,29 @@
     <!-- respawn=true: drift_monitor restarts BOTH laserMapping + this bridge together so the
          SLAM->FC chain reboots fully (clears the bridge yaw-datum too). roslaunch respawns it. -->
     <param name="remap_axes" type="bool" value="true" />
-    <rosparam param="position_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
-    <rosparam param="orientation_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <rosparam if="$(arg use_fastlio)" param="position_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <rosparam if="$(arg use_fastlio)" param="orientation_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <!-- BIEVR: its world frame is gravity-levelled at start (z up), NOT its IMU frame, so world -> ENU
+         is a 90 deg yaw while the IMU body -> FLU keeps FAST-LIO's permutation. Orientation becomes
+         P * R * M^T (orientation_matrix = P on the world side, orientation_body_matrix = M on the body
+         side). Fitted from 4 flight replays: within 0.6-1.3 deg of P. Its twist is in the BODY frame.
+         End-to-end replay of this bridge vs what the FC received from FAST-LIO in flight (09_21):
+         position 3.7 cm mean, yaw 0.03 deg mean, velocity 3-5 cm/s rms (logs/bievr_replay_20261007). -->
+    <param if="$(arg use_bievr)" name="odom_topic" type="str" value="/bievr_lio/odom" />
+    <param if="$(arg use_bievr)" name="twist_frame" type="str" value="body" />
+    <rosparam if="$(arg use_bievr)" param="position_matrix">[0,-1,0, 1,0,0, 0,0,1]</rosparam>
+    <rosparam if="$(arg use_bievr)" param="orientation_matrix">[0,-1,0, 1,0,0, 0,0,1]</rosparam>
+    <rosparam if="$(arg use_bievr)" param="orientation_body_matrix">[0,0,1, 1,0,0, 0,1,0]</rosparam>
+    <!-- LiDAR-to-FC MOUNT YAW (2026-09-29): body-side yaw correction on vision ORIENTATION only.
+         Measured by fitting the /lidar_imu gyro against the FC gyro (logs/mount_yaw_20260929/mount_yaw.cpp):
+           09_19 -0.93, 09_21 -0.91 (flights before the lidar cable replacement)
+           09_28 -0.68 (flight after it; windows sd 0.21)
+           bench hand-tilt 2026-09-29 -0.45 (windows sd 0.08; best data on current hardware; used here)
+         Sign checked by running the bridge chain on the 09_21 replay: the correct sign cut the residual yaw,
+         and the opposite sign doubled it.
+         PREVIOUS VALUES / TO REVERT: -0.68 (2026-09-29, from the 09_28 flight); 0.0 (original: no mount
+         correction, same as leaving this param out). -->
+    <param name="fc_mount_yaw_deg" type="double" value="-0.45" />
     <!-- Forward FAST-LIO's own (host-clock) stamp instead of restamping with now().
          Valid because the Hesai driver now uses use_timestamp_type:1 (receive/host time),
          so /lidar_points -> /lidar_imu -> /Odometry already carry host time captured at
@@ -111,7 +194,7 @@
     <!-- restart_mode: "of" = EKF source failover to Optical Flow (default; no flight-mode change),
          "land" = switch EKF to SRC2 (rangefinder height) FIRST, then command FC into LAND; never
          switched back to SRC1 (reboot the FC to return to SLAM). Toggle persistently with ~/Documents/switch_restart_mode.sh. -->
-    <param name="restart_mode"        type="str"  value="of" />
+    <param name="restart_mode"        type="str"  value="land" />
     <!-- RC stream keepalive: re-request RC_CHANNELS from the FC on every mavros connect so
          /mavros/rc/in stays populated and the CH9 trigger survives reboots/mavros restarts
          (ArduPilot won't stream RC to the companion link on its own; SR0_RC_CHAN alone is not enough). -->
@@ -135,18 +218,45 @@
     <param name="ekf_src_auxfn"    type="int"    value="90" />
     <param name="src2_switch_pos"  type="int"    value="1" />
     <param name="src1_switch_pos"  type="int"    value="0" />
-    <param name="restart_nodes"    type="str"    value="/laserMapping /fastlio_mavros_bridge" />
+    <param unless="$(arg use_bievr)" name="restart_nodes" type="str" value="/laserMapping /fastlio_mavros_bridge" />
+    <param if="$(arg use_bievr)"     name="restart_nodes" type="str" value="/bievr_lio /fastlio_mavros_bridge" />
     <param name="ch9_channel"      type="int"    value="9" />
     <param name="ch9_low"          type="int"    value="1400" />
     <param name="ch9_high"         type="int"    value="1600" />
     <param name="eig_warn_rel"     type="double" value="0.2" />
-    <param name="eig_warn_abs"     type="double" value="40000" />
-    <param name="eig_crit_abs"     type="double" value="5000" />
+    <param unless="$(arg use_bievr)" name="eig_warn_abs" type="double" value="40000" />
+    <param unless="$(arg use_bievr)" name="eig_crit_abs" type="double" value="5000" />
     <param name="matched_warn_rel" type="double" value="0.2" />
-    <param name="matched_warn_abs" type="double" value="300" />
-    <param name="matched_crit_abs" type="double" value="150" />
-    <param name="k_warn" type="int" value="5" />
-    <param name="k_crit" type="int" value="5" />
+    <param unless="$(arg use_bievr)" name="matched_warn_abs" type="double" value="300" />
+    <param unless="$(arg use_bievr)" name="matched_crit_abs" type="double" value="150" />
+    <param unless="$(arg use_bievr)" name="k_warn" type="int" value="5" />
+    <param unless="$(arg use_bievr)" name="k_crit" type="int" value="5" />
+    <!-- slam_backend:=bievr thresholds. BIEVR's Hessian (height-image residuals) and point count are
+         on a different scale from FAST-LIO's, so none of the numbers above apply. Calibrated
+         2026-10-07 on 9220 healthy scans (real-time replays of 09_19, 09_21, 09_28 + log-218 before
+         84 s) and the log-218 failure (logs/bievr_replay_20261007/calibration.txt, cost_tradeoff.txt):
+           eig_min healthy min 202 / p50 1839;  matched healthy min 1218 / p50 5487.
+           Log 218 failure: eig_min fell to 277 and matched to 967 (0.5 s means), NO LOWER than healthy
+           confined flight at 39 s on the same sortie. So the floors below sit under the healthy minimum
+           (zero healthy scans below them) and are a backstop only; they do not catch log 218.
+           What does: the mean registration residual (health data[1]). Healthy worst run above 0.0025 is
+           5 scans; on log 218 it held above 0.0025 for 10 scans by bag 87.49 s, 0.07 s AFTER the FC
+           rejected vision (87.42) and ~2 s before the upset (89.5). It detects the failure; it does not
+           predict it. k_crit=10 (not 5) because healthy flight already reaches 5 consecutive scans.
+         NOT validated live or in flight. One failure case is not a distribution. -->
+    <param if="$(arg use_bievr)" name="health_topic"     type="str"    value="/bievr_health" />
+    <param if="$(arg use_bievr)" name="eig_warn_abs"     type="double" value="200" />
+    <param if="$(arg use_bievr)" name="eig_crit_abs"     type="double" value="150" />
+    <param if="$(arg use_bievr)" name="matched_warn_abs" type="double" value="1200" />
+    <param if="$(arg use_bievr)" name="matched_crit_abs" type="double" value="1000" />
+    <param if="$(arg use_bievr)" name="enable_residual_check" type="bool" value="true" />
+    <!-- The FAST-LIO residual check (fl_res_*) reads the same data[1] but is tuned for FAST-LIO's
+         residual; on BIEVR's it raised 3 spurious relative WARNs in healthy log-218 flight. Off here. -->
+    <param if="$(arg use_bievr)" name="enable_fl_residual_check" type="bool" value="false" />
+    <param if="$(arg use_bievr)" name="res_warn_abs"     type="double" value="0.0022" />
+    <param if="$(arg use_bievr)" name="res_crit_abs"     type="double" value="0.0025" />
+    <param if="$(arg use_bievr)" name="k_warn" type="int" value="10" />
+    <param if="$(arg use_bievr)" name="k_crit" type="int" value="10" />
     <param name="k_release" type="int" value="10" />
 
     <!-- LATENCY detector (added 2026-09-01 after the 25 Aug hard landing). FAST-LIO publish
@@ -179,7 +289,8 @@
          as the crash this exists to prevent.
          Set back to false for a sortie if a bag ever shows a WARN that cannot be explained. -->
     <param name="enable_latency_critical" type="bool"   value="true" />
-    <param name="odom_topic"              type="str"    value="/Odometry" />
+    <param unless="$(arg use_bievr)" name="odom_topic" type="str" value="/Odometry" />
+    <param if="$(arg use_bievr)"     name="odom_topic" type="str" value="/bievr_lio/odom" />
     <param name="lat_warn_ms"             type="double" value="150" />
     <param name="lat_crit_ms"             type="double" value="250" />
     <param name="lat_arm_ms"              type="double" value="150" />
@@ -241,7 +352,7 @@
     <param name="ch9_channel" type="int"    value="9" />
     <param name="high_thresh" type="int"    value="1700" />
     <param name="low_thresh"  type="int"    value="1300" />
-    <param name="out_root"    type="str"    value="/mnt/usb" />
+    <param name="out_root"    type="str"    value="/mnt/usb/hensel-phelps" />
     <param name="las_topic"   type="str"    value="/Laser_map" />
     <param name="bag_topics"  type="str"    value="/lidar_points /lidar_imu" />
     <param name="las_period"  type="double" value="30.0" />
@@ -257,7 +368,7 @@
   <node pkg="fast_lio" type="flight_recorder.py" name="flight_recorder" output="screen" launch-prefix="python3"
         respawn="true" respawn_delay="2">  <!-- respawn: see ch9_logger above -->
     <param name="trigger"        type="str"    value="arm" />
-    <param name="out_root"       type="str"    value="/mnt/usb" />
+    <param name="out_root"       type="str"    value="/mnt/usb/hensel-phelps" />
     <param name="split_minutes"  type="double" value="2.0" />
   </node>
 </launch>

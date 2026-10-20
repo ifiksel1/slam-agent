@@ -1,0 +1,33 @@
+# BIEVR-LIO sensor config for the Hesai JT128 (alternative LIO backend, slam_backend:=bievr).
+# Loaded by bievr_lio_ros/process_topics (plain YAML file passed on argv, NOT the ROS param
+# server). Tuning knobs live in bievr_params.yaml.
+#
+# STATUS 2026-10-07: replay-validated on 4 JT128 flights (PROGRESS P23); never flown.
+
+topics:
+  # Same inputs FAST-LIO uses. The ROS1 Hesai driver publishes x/y/z/intensity(float32)/ring/
+  # time(float32, seconds from the first point); BIEVR reads that "time" field natively.
+  pointcloud: "/lidar_points"
+  imu: "/lidar_imu"
+
+# T_I_L: LiDAR -> IMU, p_imu = R * p_lidar + t. Same direction as FAST-LIO's extrinsic_R/T
+# (IMU_Processing.hpp:324), so the values are copied verbatim from hesai_jt128.yaml, which
+# documents their provenance (LI-Init rotation on the 2026-08-12 unit, 0.417 deg; geometric
+# translation = SDK optical-centre constant). Keep the two files in step.
+calibration:
+  translation: [ -0.0076, 0.01363, 0.01271 ]
+  rotation: [ 0.999976,  0.003838, -0.005696,
+             -0.003852,  0.999990, -0.002412,
+              0.005687,  0.002433,  0.999981 ]
+  # Lidar/IMU time offset, SAME value, meaning and sign as hesai_jt128.yaml
+  # common/time_offset_lidar_to_imu (provenance there): IMU stamp -> stamp - offset.
+  # Upstream BIEVR has no such key; it is our patch (overrides/BIEVR-LIO, config_loader.h +
+  # process_topics/process_bag). Replay 2026-10-07: 0 vs this value made no measurable
+  # difference on 09_21 (4.6 cm / 0.16 deg either way); set for consistency with FAST-LIO.
+  time_offset_lidar_to_imu_s: -0.014996
+
+lidar:
+  # Effective live FAST-LIO values (fastlio_to_fc.launch overrides from revolute-gui:
+  # preprocess/blind 0.102263, mapping/det_range 96.1609), so both backends see the same points.
+  min_range_m: 0.102263
+  max_range_m: 96.1609

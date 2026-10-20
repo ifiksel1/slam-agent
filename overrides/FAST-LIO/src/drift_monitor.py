@@ -7,6 +7,22 @@ dimensions:
   (1) observability   eig_min = data[4]      lower bound
   (2) feature count   matched_pts = data[0]  lower bound
   (3) LATENCY         age-of-measurement     UPPER bound   [added 2026-09-01]
+plus three added 2026-10-07 after the 26 Sep crash (FC log 218), each OBSERVE-ONLY by default
+(WARN + GCS banner; its CRITICAL is reported as "(obs)" until its enable_*_critical gate is set):
+  (4) RESIDUAL        mean point-to-plane residual = data[1], UPPER bound, abs OR x baseline
+  (5) EKF INNOVATION  the FC's own position test ratio (EKF_STATUS_REPORT.pos_horiz_variance,
+                      = XKF4.SP in the dataflash log) off the raw /mavlink/from stream
+  (6) MOTION vs RC    the vehicle moving in a way the sticks did not ask for (velocity error
+                      vs the Loiter stick command, vertical motion against the throttle stick,
+                      tilt beyond the Loiter lean limit)
+  ~bench_mode (runtime rosparam, default false) runs (5)/(6) DISARMED for hand-carried bench
+  tests and forces (4)-(6) observe-only; ignored once armed. /slam/drift_risk shows "BENCH".
+WHY (4)-(6) EXIST. On 26 Sep 2026 (FC log 218, bag 09_27_2026_00_28_47) FAST-LIO's residual rose
+0.019 -> 0.04 -> 0.136 from t=337.8 while the airframe was level, the EKF's SP crossed 1.0 at
+339.66 and it stopped fusing vision, Loiter chased an IMU-only position to 25 deg pitch / 40 deg
+roll on full throttle, and the vehicle hit at ~341.8. This node said OK throughout: eig_min never
+fell below 97k and matched below 703 - both far above their floors. Residual and SP were the two
+signals that moved ~2 s before the EKF let go.
 
 FAILOVER + node-restart is triggered by ANY of:
   (A) drift CRITICAL   (eig_min/matched cross the hard floors, K-scan hysteresis), or
@@ -62,6 +78,8 @@ SAFETY: this node NEVER arms and NEVER changes flight mode. An EKF source switch
 disarmed/grounded is benign (no motion). It replaces the previous LAND response entirely.
 """
 import collections
+import math
+import struct
 import subprocess
 import threading
 import time
@@ -75,13 +93,22 @@ except Exception:
     _HAVE_ODOM = False
 
 try:
-    from mavros_msgs.msg import StatusText, RCIn, State, DebugValue
+    from mavros_msgs.msg import StatusText, RCIn, State, DebugValue, Mavlink, VFR_HUD
     from mavros_msgs.srv import SetMode, CommandLong, StreamRate
     _HAVE_MAVROS = True
 except Exception:
     _HAVE_MAVROS = False
 
+try:
+    from geometry_msgs.msg import TwistStamped, Vector3Stamped
+    from sensor_msgs.msg import Imu
+    _HAVE_MOTION_MSGS = True
+except Exception:
+    _HAVE_MOTION_MSGS = False
+
 OK, WARN, CRITICAL = "OK", "WARN", "CRITICAL"
+_LEVEL = {OK: 0, WARN: 1, CRITICAL: 2}
+_EKF_STATUS_REPORT_MSGID = 193
 # Reported to the FC when latency is enabled but no number can be produced (no /Odometry, no
 # health, rejected samples). Large enough to trip any sane gate: unmeasurable is treated as bad,
 # matching _lat_arm_bad(), which also calls lat_ms=None bad. Note this is NOT how the FC-side gate
@@ -179,6 +206,288 @@ class LatencyTracker:
         return (eff, note)
 
 
+class HoldTimer:
+    """Seconds a condition has held without a break. Pure, like LatencyTracker: takes now."""
+
+    def __init__(self):
+        self._since = None
+
+    def update(self, now_sec, cond):
+        if not cond:
+            self._since = None
+            return 0.0
+        if self._since is None:
+            self._since = now_sec
+        return now_sec - self._since
+
+    def reset(self):
+        self._since = None
+
+
+class ResidualCheck:
+    """Upper bound on FAST-LIO's mean point-to-plane residual, /fastlio_health data[1].
+
+    Absolute OR relative to a rolling baseline, because the healthy level depends on the room:
+    across 28 flight sessions (25-30 Sep) the median ran 0.018 in the 4th-floor rooms and 0.046
+    on the open floor, so no single absolute bar fits both. Relative alone is not enough either:
+    on 30 Sep 16:10 (LAND, SLAM height went 1.7 -> -0.95 m) the open-floor baseline was 0.040, so
+    2.5x is 0.10 and the 0.09-0.11 excursion only crossed it for 0.26 s, while 0.06 abs held 1.24 s.
+
+    Calibration (per-scan, 20 Hz, longest run while armed, 28 sessions):
+      warn  >0.055 or >2.0x avg   healthy worst 0.25 s | crash 3.27 s, 30 Sep LAND 1.34 s
+      crit  >0.06  or >2.5x avg   healthy worst 0.10 s | crash 3.00 s, 30 Sep LAND 1.24 s
+    k = 10 scans (0.5 s) for both: 2x margin for WARN, 5x for CRITICAL.
+
+    The baseline takes only scans that are themselves under the warn bar, so a slow degradation
+    cannot drag its own reference up behind it. Pure: no clock, no ROS.
+    """
+
+    def __init__(self, warn_abs=0.055, warn_rel=2.0, crit_abs=0.06, crit_rel=2.5,
+                 k_warn=10, k_crit=10, win_n=150, warmup_n=30):
+        self.warn_abs, self.warn_rel = float(warn_abs), float(warn_rel)
+        self.crit_abs, self.crit_rel = float(crit_abs), float(crit_rel)
+        self.k_warn, self.k_crit = int(k_warn), int(k_crit)
+        self.warmup_n = int(warmup_n)
+        self.base = collections.deque(maxlen=int(win_n))
+        self.n_warn = self.n_crit = 0
+        self.last = 0.0
+
+    def reset(self):
+        self.base.clear()
+        self.n_warn = self.n_crit = 0
+
+    def avg(self):
+        return mean(self.base)
+
+    def update(self, res):
+        """-> (crit, warn, raw_bad, reason). crit/warn are hysteresis-latched (k scans);
+        raw_bad is this scan alone, for the caller's release counter."""
+        self.last = res = float(res)
+        if len(self.base) < self.warmup_n:
+            self.base.append(res)
+            return (False, False, False, "")
+        avg = self.avg()
+        crit_raw = res > self.crit_abs or res > self.crit_rel * avg
+        warn_raw = res > self.warn_abs or res > self.warn_rel * avg
+        self.n_crit = self.n_crit + 1 if crit_raw else 0
+        self.n_warn = self.n_warn + 1 if warn_raw else 0
+        if not warn_raw:
+            self.base.append(res)
+        crit = self.n_crit >= self.k_crit
+        warn = self.n_warn >= self.k_warn
+        reason = ("res=%.3f(%.1fxavg)" % (res, res / avg if avg > 0 else 0.0)) if (crit or warn) else ""
+        return (crit, warn, warn_raw, reason)
+
+
+class EkfInnovationCheck:
+    """The FC's own verdict on our pose: EKF_STATUS_REPORT.pos_horiz_variance.
+
+    Despite the name ArduPilot fills that field with sqrt(posTestRatio) (NavEKF3 getVariances),
+    the same number the dataflash log records as XKF4.SP. >= 1.0 means the EKF is REJECTING the
+    vision position and dead-reckoning on its IMU - what it did for 5 s before the 26 Sep crash.
+
+    Calibration (XKF4.SP, primary core, armed, 30 FC logs):
+      healthy flights peak at 0.67; benign one-sample spikes reach 1.0-1.45 but hold <= 0.12 s
+      (logs 209, 210). Faults: log 218 (26 Sep crash) held >= 1.0 for 5.1 s from 339.66;
+      log 211 (25 Sep, 200 deg vision yaw jump) held 0.48 s.
+      warn >= 0.8 for 0.4 s, crit >= 1.0 for 0.4 s: 3.3x the benign spikes, catches both.
+    Only meaningful while the EKF is fusing vision (SRC1), i.e. armed and not failed over, and
+    outside our own restart blank - the caller decides that and passes active.
+    """
+
+    def __init__(self, warn=0.8, crit=1.0, warn_hold=0.4, crit_hold=0.4, stale_sec=1.0):
+        self.warn, self.crit = float(warn), float(crit)
+        self.warn_hold, self.crit_hold = float(warn_hold), float(crit_hold)
+        self.stale_sec = float(stale_sec)
+        self._warn_t, self._crit_t = HoldTimer(), HoldTimer()
+        self.last = None
+        self.last_rx = None
+
+    def add_sample(self, now_sec, sp):
+        self.last = float(sp)
+        self.last_rx = now_sec
+        self._warn_t.update(now_sec, self.last >= self.warn)
+        self._crit_t.update(now_sec, self.last >= self.crit)
+
+    def evaluate(self, now_sec, active):
+        """-> (level, reason)"""
+        if not active or self.last_rx is None or (now_sec - self.last_rx) > self.stale_sec:
+            self._warn_t.reset(); self._crit_t.reset()
+            return (OK, "")
+        # held = time since the run started, measured against now: a run that is still going
+        # keeps growing between samples, and the stale guard above catches a stream that stops.
+        crit_held = self._crit_t.update(now_sec, self.last >= self.crit)
+        warn_held = self._warn_t.update(now_sec, self.last >= self.warn)
+        if crit_held >= self.crit_hold:
+            return (CRITICAL, "sp=%.2f" % self.last)
+        if warn_held >= self.warn_hold:
+            return (WARN, "sp=%.2f" % self.last)
+        return (OK, "")
+
+
+def stick_frac(pwm, trim, dz, lo, hi):
+    """ArduPilot pwm_to_angle_dz, normalised to -1..1: zero inside trim+-dz, linear outside."""
+    if pwm > trim + dz:
+        return min(1.0, (pwm - trim - dz) / float(max(1, hi - trim - dz)))
+    if pwm < trim - dz:
+        return max(-1.0, (pwm - trim + dz) / float(max(1, trim - dz - lo)))
+    return 0.0
+
+
+class MotionCheck:
+    """Is the vehicle moving in a way the sticks did not ask for? Three tests, all armed+airborne:
+
+      HORIZONTAL (LOITER, LAND): Loiter turns a steady stick into a steady velocity, about
+        stick_fraction x LOIT_SPEED x 0.85 in the body frame (fitted on 13k samples, logs 209-233:
+        forward -3.5 m/s per unit pitch, right +3.3 per unit roll; pitch PWM high = backwards).
+        Error = |actual - commanded| once the sticks have been steady for settle_sec, and only
+        with the YAW stick centred: SLAM's velocity is the lidar's, not the CG's, so a pilot spin
+        sweeps it in a circle (log 218 t=100-102: 330 deg/s spin, SLAM read 1.4 m/s, EKF 0.3).
+        Healthy worst over 1.0 m/s: EKF 0.4 s, SLAM 1.0 s (a landing). warn 0.75 s, crit 1.5 s.
+      VERTICAL (LOITER, ALT_HOLD, POSHOLD, LAND): only the DIRECTION is tested, which needs no
+        model of the climb-rate curve: throttle centred -> |vz| <= v_err; throttle low (and LAND)
+        -> not climbing; throttle high -> not sinking. Healthy flights: zero runs. Found one real
+        event: log 216 t=1050 (26 Sep), sticks centred, sank 0.76 m/s on 100% throttle for 1.8 s.
+      TILT (LOITER, LAND): Loiter caps lean at LOIT_ANG_MAX (20). Healthy max 24 deg for 0.28 s;
+        the 26 Sep crash held >25 for 2 s and >30 for 0.6 s.
+
+    Velocity comes from up to two sources (the FC's EKF and SLAM's own velocity); either one
+    disagreeing with the sticks counts, and the reason names which. Neither catches the 29 Sep
+    climb (log 233): there EKF and SLAM height were BOTH stale and only the rangefinder saw it.
+
+    Pure: callers feed timestamped inputs, evaluate(now) decides. Frames: velocities ENU, yaw ENU
+    (from East, CCW, radians), attitude degrees.
+    """
+
+    H_MODES = ("LOITER", "LAND")
+    V_MODES = ("LOITER", "ALT_HOLD", "POSHOLD", "LAND")
+
+    def __init__(self, loit_speed=4.0, speed_gain=0.85,
+                 rc_trim=1500, rc_dz=20, rc_min=1050, rc_max=1950,
+                 thr_trim=1495, thr_dz=20,
+                 settle_sec=1.0, min_throttle_out=0.15, input_stale_sec=0.5,
+                 h_err=1.0, h_warn_hold=0.75, h_crit_hold=1.5,
+                 v_err=0.5, v_warn_hold=0.5, v_crit_hold=1.0,
+                 tilt_warn=25.0, tilt_crit=30.0, tilt_hold=0.3):
+        self.loit_speed, self.speed_gain = float(loit_speed), float(speed_gain)
+        self.rc = (int(rc_trim), int(rc_dz), int(rc_min), int(rc_max))
+        self.thr_trim, self.thr_dz = int(thr_trim), int(thr_dz)
+        self.settle_sec, self.min_thr = float(settle_sec), float(min_throttle_out)
+        self.stale = float(input_stale_sec)
+        self.h_err, self.h_warn_hold, self.h_crit_hold = float(h_err), float(h_warn_hold), float(h_crit_hold)
+        self.v_err, self.v_warn_hold, self.v_crit_hold = float(v_err), float(v_warn_hold), float(v_crit_hold)
+        self.tilt_warn, self.tilt_crit, self.tilt_hold = float(tilt_warn), float(tilt_crit), float(tilt_hold)
+        self.mode, self.armed = "", False
+        self.bench = False         # bench_mode: run disarmed (see DriftMonitor._poll_bench_mode)
+        self._rc = None            # (t, roll_frac, pitch_frac, thr_zone, yaw_centred)
+        self._stick_ref = None     # (roll_frac, pitch_frac) at the last stick change
+        self._stick_t = None       # when the sticks last moved (or the mode changed)
+        self._zone_ref = None
+        self._zone_t = None
+        self._thr_out = (None, 0.0)
+        self._att = None           # (t, roll_deg, pitch_deg, yaw_rad_enu)
+        self._vel = {}             # source -> (t, vE, vN, vU)
+        self._h_t, self._v_t = HoldTimer(), HoldTimer()
+        self._tw_t, self._tc_t = HoldTimer(), HoldTimer()
+
+    # ---- inputs ----
+    def set_state(self, now_sec, mode, armed):
+        if mode != self.mode:
+            self._stick_t = self._zone_t = now_sec   # entering a mode is itself a transient
+        self.mode, self.armed = mode, bool(armed)
+
+    def set_rc(self, now_sec, roll_pwm, pitch_pwm, thr_pwm, yaw_pwm):
+        trim, dz, lo, hi = self.rc
+        rf, pf = stick_frac(roll_pwm, trim, dz, lo, hi), stick_frac(pitch_pwm, trim, dz, lo, hi)
+        yaw_c = stick_frac(yaw_pwm, trim, dz, lo, hi) == 0.0
+        zone = 1 if thr_pwm > self.thr_trim + self.thr_dz else (-1 if thr_pwm < self.thr_trim - self.thr_dz else 0)
+        if (self._stick_ref is None or abs(rf - self._stick_ref[0]) > 0.04
+                or abs(pf - self._stick_ref[1]) > 0.04 or not yaw_c):
+            self._stick_ref, self._stick_t = (rf, pf), now_sec   # a yawing pilot restarts the settle
+        if zone != self._zone_ref:
+            self._zone_ref, self._zone_t = zone, now_sec
+        self._rc = (now_sec, rf, pf, zone, yaw_c)
+
+    def set_throttle_out(self, now_sec, thr):
+        self._thr_out = (now_sec, float(thr))
+
+    def set_attitude(self, now_sec, roll_deg, pitch_deg, yaw_enu_rad):
+        self._att = (now_sec, roll_deg, pitch_deg, yaw_enu_rad)
+
+    def set_velocity(self, now_sec, source, v_e, v_n, v_u):
+        self._vel[source] = (now_sec, v_e, v_n, v_u)
+
+    def _reset(self):
+        for t in (self._h_t, self._v_t, self._tw_t, self._tc_t):
+            t.reset()
+
+    def _fresh(self, sample, now_sec):
+        return sample is not None and sample[0] is not None and (now_sec - sample[0]) <= self.stale
+
+    def evaluate(self, now_sec):
+        """-> (level, reason)"""
+        # bench: disarmed, carried by hand. Drop the armed and throttle-out gates and read any
+        # non-Loiter mode as LOITER, so walking it with the sticks centred is "uncommanded motion".
+        # Only while disarmed: once armed the normal gates apply whatever the flag says.
+        bench = self.bench and not self.armed
+        mode = self.mode if (not bench or self.mode in self.V_MODES) else "LOITER"
+        if (not (self.armed or bench) or not self._fresh(self._rc, now_sec)
+                or not self._fresh(self._att, now_sec)
+                or (not bench and (not self._fresh(self._thr_out, now_sec)
+                                   or self._thr_out[1] < self.min_thr))):
+            self._reset()
+            return (OK, "")
+        _, rf, pf, zone, _ = self._rc
+        _, roll, pitch, yaw = self._att
+        vels = [(s, v) for s, v in self._vel.items() if self._fresh(v, now_sec)]
+
+        # horizontal: actual body-frame velocity against the Loiter stick command
+        h_bad, h_why = False, ""
+        if (mode in self.H_MODES and self._stick_t is not None
+                and now_sec - self._stick_t >= self.settle_sec):
+            k = self.loit_speed * self.speed_gain
+            fwd_cmd, right_cmd = -pf * k, rf * k      # pitch PWM high = nose up = backwards
+            c, s = math.cos(yaw), math.sin(yaw)
+            for src, (_, ve, vn, _) in vels:
+                fwd, right = ve * c + vn * s, ve * s - vn * c
+                err = math.hypot(fwd - fwd_cmd, right - right_cmd)
+                if err > self.h_err:
+                    h_bad, h_why = True, "mot:h%.1f(%s)" % (err, src)
+                    break
+        h_held = self._h_t.update(now_sec, h_bad)
+
+        # vertical: direction against the throttle stick
+        v_bad, v_why = False, ""
+        if (mode in self.V_MODES and self._zone_t is not None
+                and now_sec - self._zone_t >= self.settle_sec):
+            want = -1 if mode == "LAND" else zone
+            for src, (_, _, _, vu) in vels:
+                if ((want == 0 and abs(vu) > self.v_err) or (want < 0 and vu > self.v_err)
+                        or (want > 0 and vu < -self.v_err)):
+                    v_bad, v_why = True, "mot:vz%+.1f(%s)" % (vu, src)
+                    break
+        v_held = self._v_t.update(now_sec, v_bad)
+
+        tilt = max(abs(roll), abs(pitch)) if mode in self.H_MODES else 0.0
+        tw_held = self._tw_t.update(now_sec, tilt > self.tilt_warn)
+        tc_held = self._tc_t.update(now_sec, tilt > self.tilt_crit)
+        t_why = "mot:tilt%.0f" % tilt
+
+        if tc_held >= self.tilt_hold:
+            return (CRITICAL, t_why)
+        if h_held >= self.h_crit_hold:
+            return (CRITICAL, h_why)
+        if v_held >= self.v_crit_hold:
+            return (CRITICAL, v_why)
+        if tw_held >= self.tilt_hold:
+            return (WARN, t_why)
+        if h_held >= self.h_warn_hold:
+            return (WARN, h_why)
+        if v_held >= self.v_warn_hold:
+            return (WARN, v_why)
+        return (OK, "")
+
+
 class DriftMonitor:
     def __init__(self):
         rospy.init_node("drift_monitor", anonymous=False)
@@ -198,6 +507,67 @@ class DriftMonitor:
         self.k_crit = int(g("~k_crit", 5))
         self.k_release = int(g("~k_release", 10))
         self.reset_gap = float(g("~reset_gap_sec", 1.5))   # /fastlio_health gap => SLAM restarted => re-warm
+        # Registration-residual upper bound on health data[1] (OFF by default; FAST-LIO unchanged).
+        # Added for slam_backend:=bievr (PROGRESS P23). On the Sept 26 log-218 replay BIEVR's
+        # eig_min/matched dipped no lower than they did in healthy confined flight earlier on the
+        # same sortie, so no floor separates the failure; the mean residual did (healthy worst run
+        # above 0.0025 = 5 scans, failure held from bag 87.49 s). Units are backend-specific.
+        self.enable_residual_check = bool(g("~enable_residual_check", False))
+        self.res_warn_abs = float(g("~res_warn_abs", float("inf")))
+        self.res_crit_abs = float(g("~res_crit_abs", float("inf")))
+
+        # ---- (4)-(6): FAST-LIO residual trend, EKF innovation, motion vs RC (2026-10-07) ----
+        # Separate from the backend-agnostic res_*_abs test above: this one is calibrated on
+        # FAST-LIO's units and is abs OR x-baseline (see ResidualCheck). Every one of the three is
+        # OBSERVE-ONLY until its enable_*_critical is set: its CRITICAL shows as WARN "(obs)" and a
+        # GCS banner, and commands nothing. Set a gate only after flights confirm it stays quiet.
+        self.enable_fl_residual_check = bool(g("~enable_fl_residual_check", True))
+        self.enable_fl_residual_critical = bool(g("~enable_fl_residual_critical", False))
+        self._fl_res = ResidualCheck(
+            warn_abs=float(g("~fl_res_warn_abs", 0.055)), warn_rel=float(g("~fl_res_warn_rel", 2.0)),
+            crit_abs=float(g("~fl_res_crit_abs", 0.06)), crit_rel=float(g("~fl_res_crit_rel", 2.5)),
+            k_warn=int(g("~fl_res_k_warn", 10)), k_crit=int(g("~fl_res_k_crit", 10)),
+            win_n=self.win_n, warmup_n=self.warmup_n)
+        self.enable_sp_check = bool(g("~enable_sp_check", True))
+        self.enable_sp_critical = bool(g("~enable_sp_critical", False))
+        self.mavlink_from_topic = g("~mavlink_from_topic", "/mavlink/from")
+        self._ekf = EkfInnovationCheck(
+            warn=float(g("~sp_warn", 0.8)), crit=float(g("~sp_crit", 1.0)),
+            warn_hold=float(g("~sp_warn_hold_sec", 0.4)), crit_hold=float(g("~sp_crit_hold_sec", 0.4)),
+            stale_sec=float(g("~sp_stale_sec", 1.0)))
+        self._warned_no_sp = False
+        # bench_mode: lets (5)/(6) run DISARMED so they can be exercised by carrying the vehicle
+        # (motors never armed). While on, all three of (4)-(6) are forced observe-only whatever
+        # their enable_*_critical says. It does not touch checks (1)-(3), CH9 or the restart path.
+        # Re-read every second, so `rosparam set /drift_monitor/bench_mode true|false` takes
+        # effect live. Ignored while armed: in the air (5)/(6) use their normal gates.
+        self._bench = False
+        self._bench_poll_at = 0.0
+        self._bench_armed_noted = False
+        self.enable_motion_check = bool(g("~enable_motion_check", True))
+        self.enable_motion_critical = bool(g("~enable_motion_critical", False))
+        # RC channels are what the FC obeys, i.e. RCMAP_*: in drone mode the tank Lua routes the
+        # pilot's roll/pitch/yaw onto 11/15/16 (trim 1500, DZ 20); throttle stays on 3 (trim 1495,
+        # THR_DZ 20). /mavros/rc/in carries the routed values (checked across 28 sessions).
+        self.motion_roll_ch = int(g("~motion_roll_ch", 11))
+        self.motion_pitch_ch = int(g("~motion_pitch_ch", 15))
+        self.motion_yaw_ch = int(g("~motion_yaw_ch", 16))
+        self.motion_thr_ch = int(g("~motion_thr_ch", 3))
+        self.motion_slam_vel_topic = g("~motion_slam_vel_topic", "/mavros/vision_speed/speed_vector")
+        self._motion = MotionCheck(
+            loit_speed=float(g("~motion_loit_speed", 4.0)), speed_gain=float(g("~motion_speed_gain", 0.85)),
+            rc_trim=int(g("~motion_rc_trim", 1500)), rc_dz=int(g("~motion_rc_dz", 20)),
+            rc_min=int(g("~motion_rc_min", 1050)), rc_max=int(g("~motion_rc_max", 1950)),
+            thr_trim=int(g("~motion_thr_trim", 1495)), thr_dz=int(g("~motion_thr_dz", 20)),
+            settle_sec=float(g("~motion_settle_sec", 1.0)),
+            min_throttle_out=float(g("~motion_min_throttle_out", 0.15)),
+            h_err=float(g("~motion_h_err", 1.0)), h_warn_hold=float(g("~motion_h_warn_hold_sec", 0.75)),
+            h_crit_hold=float(g("~motion_h_crit_hold_sec", 1.5)),
+            v_err=float(g("~motion_v_err", 0.5)), v_warn_hold=float(g("~motion_v_warn_hold_sec", 0.5)),
+            v_crit_hold=float(g("~motion_v_crit_hold_sec", 1.0)),
+            tilt_warn=float(g("~motion_tilt_warn_deg", 25.0)), tilt_crit=float(g("~motion_tilt_crit_deg", 30.0)),
+            tilt_hold=float(g("~motion_tilt_hold_sec", 0.3)))
+        self._new_banner_key = None   # which new-check causes the last GCS banner named
 
         # ---- latency dimension (added 2026-09-01; see module docstring) ----
         self.enable_latency_check = bool(g("~enable_latency_check", True))
@@ -249,6 +619,8 @@ class DriftMonitor:
         if rospy.get_param("/use_sim_time", False) and self.enable_latency_critical:
             rospy.logwarn("drift_monitor: use_sim_time=true -> forcing enable_latency_critical=false")
             self.enable_latency_critical = False
+        if rospy.get_param("/use_sim_time", False):
+            self.enable_fl_residual_critical = self.enable_sp_critical = self.enable_motion_critical = False
 
         # response gates
         self.enable_auto_restart = bool(g("~enable_auto_restart", False))  # kill->respawn laserMapping
@@ -383,10 +755,19 @@ class DriftMonitor:
             rospy.Subscriber(self.odom_topic, Odometry, self.odom_cb, queue_size=1)
         elif self.enable_latency_check:
             rospy.logerr("drift_monitor: nav_msgs unavailable -> latency only from health data[7]")
-        if _HAVE_MAVROS and self.enable_ch9_land:
-            rospy.Subscriber("/mavros/rc/in", RCIn, self.rc_cb, queue_size=10)
+        if _HAVE_MAVROS and (self.enable_ch9_land or self.enable_motion_check):
+            rospy.Subscriber("/mavros/rc/in", RCIn, self._rc_in_cb, queue_size=10)
         if _HAVE_MAVROS:
             rospy.Subscriber("/mavros/state", State, self.state_cb, queue_size=10)
+        if _HAVE_MAVROS and self.enable_sp_check:
+            rospy.Subscriber(self.mavlink_from_topic, Mavlink, self._mavlink_cb, queue_size=50)
+        if self.enable_motion_check and _HAVE_MAVROS and _HAVE_MOTION_MSGS:
+            rospy.Subscriber("/mavros/imu/data", Imu, self._imu_cb, queue_size=1)
+            rospy.Subscriber("/mavros/local_position/velocity_local", TwistStamped, self._ekf_vel_cb, queue_size=1)
+            rospy.Subscriber(self.motion_slam_vel_topic, Vector3Stamped, self._slam_vel_cb, queue_size=1)
+            rospy.Subscriber("/mavros/vfr_hud", VFR_HUD, self._vfr_cb, queue_size=1)
+        elif self.enable_motion_check:
+            rospy.logerr("drift_monitor: motion check enabled but mavros/geometry/sensor msgs unavailable")
 
         if self.enable_health_watchdog:
             rospy.Timer(rospy.Duration(0.25), self._watchdog_cb)
@@ -408,6 +789,98 @@ class DriftMonitor:
                       self.lat_drain_sec, self.lat_restart_blank_sec, self.odom_topic)
         if self.enable_latency_land:
             rospy.logwarn("drift_monitor: latency LAND stage ENABLED (terminal descent if a restart does not recover SLAM)")
+        rospy.loginfo("drift_monitor: fl_residual=%s(critical=%s) sp=%s(critical=%s, %s) motion=%s(critical=%s, rc %d/%d/%d/%d)",
+                      self.enable_fl_residual_check, self.enable_fl_residual_critical,
+                      self.enable_sp_check, self.enable_sp_critical, self.mavlink_from_topic,
+                      self.enable_motion_check, self.enable_motion_critical, self.motion_roll_ch,
+                      self.motion_pitch_ch, self.motion_thr_ch, self.motion_yaw_ch)
+
+    # ---- (5) EKF innovation and (6) motion intake. Clock is time.time(), as in health_cb ----
+    def _mavlink_cb(self, msg):
+        if msg.msgid != _EKF_STATUS_REPORT_MSGID:
+            return
+        try:
+            raw = b"".join(struct.pack("<Q", w) for w in msg.payload64).ljust(22, b"\0")  # MAVLink2 trims zeros
+            _vel, pos_horiz, _pos_vert, _compass, _terrain = struct.unpack_from("<5f", raw)
+            self._ekf.add_sample(time.time(), pos_horiz)
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, "drift_monitor: EKF_STATUS_REPORT decode: %s", e)
+
+    def _rc_in_cb(self, msg):
+        if self.enable_motion_check:
+            ch = msg.channels
+            idx = (self.motion_roll_ch, self.motion_pitch_ch, self.motion_thr_ch, self.motion_yaw_ch)
+            if all(0 < i <= len(ch) and ch[i - 1] for i in idx):
+                self._motion.set_rc(time.time(), *(ch[i - 1] for i in idx))
+        if self.enable_ch9_land:
+            self.rc_cb(msg)
+
+    def _imu_cb(self, msg):
+        q = msg.orientation
+        roll = math.degrees(math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y)))
+        pitch = math.degrees(math.asin(max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x)))))
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))   # ENU
+        self._motion.set_attitude(time.time(), roll, pitch, yaw)
+
+    def _ekf_vel_cb(self, msg):
+        v = msg.twist.linear
+        self._motion.set_velocity(time.time(), "ekf", v.x, v.y, v.z)
+
+    def _slam_vel_cb(self, msg):
+        v = msg.vector
+        self._motion.set_velocity(time.time(), "slam", v.x, v.y, v.z)
+
+    def _vfr_cb(self, msg):
+        self._motion.set_throttle_out(time.time(), msg.throttle)   # mavros scales to 0..1
+
+    def _fc_checks(self, now):
+        """(5) + (6) -> (level, reason), CRITICAL already downgraded to WARN "(obs)" where gated."""
+        out = []
+        self._poll_bench_mode(now)
+        bench = self._bench
+        if self.enable_sp_check:
+            # Only while the EKF is meant to be fusing our pose: on SRC2, or inside our own
+            # restart outage, SP describes a source we already know is gone.
+            active = ((self._armed or bench) and not self.failover_active and not self._health_lost
+                      and now >= self._lat_blank_until)
+            if (active and self._ekf.last_rx is None and not self._warned_no_sp
+                    and now - self._node_start > 10.0):
+                self._warned_no_sp = True
+                rospy.logwarn("drift_monitor: no EKF_STATUS_REPORT on %s -- SP check blind (SR0_EXTRA3?)",
+                              self.mavlink_from_topic)
+            out.append(self._ekf.evaluate(now, active) + (self.enable_sp_critical and not bench,))
+        if self.enable_motion_check:
+            out.append(self._motion.evaluate(now) + (self.enable_motion_critical and not bench,))
+        level, reasons = OK, []
+        for lvl, why, gate in out:
+            if lvl == CRITICAL and not gate:
+                lvl, why = WARN, why + "(obs)"
+            if lvl != OK:
+                reasons.append(why)
+                if _LEVEL[lvl] > _LEVEL[level]:
+                    level = lvl
+        return level, ",".join(reasons)
+
+    def _poll_bench_mode(self, now):
+        if now < self._bench_poll_at:
+            return
+        self._bench_poll_at = now + 1.0
+        try:
+            on = bool(rospy.get_param("~bench_mode", False))
+        except Exception:
+            return
+        if on and self._armed and not self._bench_armed_noted:
+            self._bench_armed_noted = True
+            rospy.logwarn("drift_monitor: bench_mode is on but the vehicle is ARMED -- "
+                          "motion/SP use their normal armed gates; set bench_mode false")
+        if not self._armed:
+            self._bench_armed_noted = False
+        if on != self._bench:
+            self._bench = on
+            self._motion.bench = on
+            rospy.logwarn("drift_monitor: bench_mode %s (checks 4-6 observe-only%s)",
+                          "ON" if on else "OFF", ", SP+motion run disarmed" if on else "")
+            self._send_statustext(_SEV_WARNING, "SLAM bench mode " + ("ON" if on else "OFF"), force=True)
 
     # ---- latency intake ----
     def odom_cb(self, msg):
@@ -574,7 +1047,7 @@ class DriftMonitor:
     def health_cb(self, msg):
         if len(msg.data) < 5:
             return
-        matched = float(msg.data[0]); eig = float(msg.data[4])
+        matched = float(msg.data[0]); eig = float(msg.data[4]); res = float(msg.data[1])
         now_ros = rospy.get_time()
 
         # Preferred latency source: laserMapping publishes age-of-measurement as data[7] in the
@@ -594,6 +1067,7 @@ class DriftMonitor:
             rospy.logwarn("drift_monitor: /fastlio_health resumed after %.1fs gap -> SLAM restarted; re-warming",
                           now - self._last_health_t)
             self.base_eig.clear(); self.base_matched.clear()
+            self._fl_res.reset()
             self.n_crit = self.n_warn = self.n_ok = 0
             self.latched = OK
             self._saw_gap_since_lock = True   # the restart actually happened
@@ -621,40 +1095,57 @@ class DriftMonitor:
         self.n_lat_armok = 0 if arm_bad else self.n_lat_armok + 1
         self._update_latency_interlock()
 
+        # ---- (4) residual trend + (5)/(6) FC-side checks, every scan (ResidualCheck owns its warmup) ----
+        res_crit, res_warn, res_raw, res_reason = (
+            self._fl_res.update(res) if self.enable_fl_residual_check else (False, False, False, ""))
+        if res_crit and (self._bench or not self.enable_fl_residual_critical):
+            res_crit, res_warn, res_reason = False, True, res_reason + "(obs)"
+        fc_lvl, fc_reason = self._fc_checks(now)
+        new_reason = ",".join(x for x in (res_reason, fc_reason) if x)
+        extra = self._new_checks_summary()
+
         if len(self.base_eig) < self.warmup_n:
             # Geometric baselines are not valid yet, but latency already is. Latency may raise
             # the displayed level to WARN here; it must never reach CRITICAL during warmup,
-            # and self.latched is deliberately not written.
+            # and self.latched is deliberately not written. The FC-side checks follow the same rule.
             self.base_eig.append(eig); self.base_matched.append(matched)
-            lvl = WARN if self.n_lat_warn >= self.lat_k_warn else OK
-            self._publish_risk(lvl, ",".join(x for x in ("warmup", lat_reason) if x),
-                               eig, matched, 0.0, 0.0, lat_ms, lat_note)
+            lvl = WARN if (self.n_lat_warn >= self.lat_k_warn or fc_lvl != OK) else OK
+            self._publish_risk(lvl, ",".join(x for x in ("warmup", lat_reason, fc_reason) if x),
+                               eig, matched, 0.0, 0.0, lat_ms, lat_note, extra)
             return
 
         avg_eig = mean(self.base_eig); avg_matched = mean(self.base_matched)
-        crit, warn, reason = self._evaluate(eig, matched, avg_eig, avg_matched)
+        crit, warn, reason = self._evaluate(eig, matched, avg_eig, avg_matched, res)
         # geom_raw keeps owning the baseline, so a sustained latency WARN does NOT freeze it.
         geom_raw = CRITICAL if crit else (WARN if warn else OK)
 
         self.n_crit = self.n_crit + 1 if crit else 0
         self.n_warn = self.n_warn + 1 if (warn or crit) else 0
-        self.n_ok = self.n_ok + 1 if geom_raw == OK else 0
+        # a high residual also holds off release, like any other geometric fault
+        self.n_ok = self.n_ok + 1 if (geom_raw == OK and not res_raw) else 0
 
         new = self.latched
-        if self.n_crit >= self.k_crit or self.n_lat_crit >= self.lat_k_crit:
+        if (self.n_crit >= self.k_crit or self.n_lat_crit >= self.lat_k_crit
+                or res_crit or fc_lvl == CRITICAL):
             new = CRITICAL
-        elif ((self.n_warn >= self.k_warn or self.n_lat_warn >= self.lat_k_warn)
-              and self.latched != CRITICAL):
+        elif ((self.n_warn >= self.k_warn or self.n_lat_warn >= self.lat_k_warn
+               or res_warn or fc_lvl != OK) and self.latched != CRITICAL):
             new = WARN
         # release is ANDed: never drop out of CRITICAL because the geometry recovered while
-        # latency is still bad.
-        if self.n_ok >= self.k_release and self.n_lat_ok >= self.lat_k_release:
+        # latency (or an FC-side check) is still bad.
+        if self.n_ok >= self.k_release and self.n_lat_ok >= self.lat_k_release and fc_lvl == OK:
             new = OK
         # lat_reason first so it survives the 49-char statustext truncation
-        merged = ",".join(x for x in (lat_reason, reason if reason != "ok" else "") if x) or "ok"
+        merged = ",".join(x for x in (lat_reason, new_reason, reason if reason != "ok" else "") if x) or "ok"
+        # Latency-only = nothing but latency is critical. Formerly tested as reason.startswith("lat=")
+        # and n_crit < k_crit, which is equivalent without (4)-(6) but would misroute e.g. an SP
+        # CRITICAL that happens to coincide with a latency WARN.
+        lat_only = (self.n_lat_crit >= self.lat_k_crit and self.n_crit < self.k_crit
+                    and not res_crit and fc_lvl != CRITICAL)
         if new != self.latched:
-            self._on_transition(self.latched, new, merged, eig, matched)
+            self._on_transition(self.latched, new, merged, eig, matched, lat_only)
             self.latched = new
+        self._announce_new_checks(new_reason)
 
         # Staged latency response: OF-only first, escalate to a full restart only if the
         # backlog does not drain. On 25 Aug it never drained - it sat at 450-670 ms for 13 s -
@@ -722,25 +1213,48 @@ class DriftMonitor:
         if geom_raw == OK:
             self.base_eig.append(eig); self.base_matched.append(matched)
         self._publish_risk(self.latched, merged if self.latched != OK else "ok",
-                           eig, matched, avg_eig, avg_matched, lat_ms, lat_note)
+                           eig, matched, avg_eig, avg_matched, lat_ms, lat_note, extra)
 
-    def _evaluate(self, eig, matched, avg_eig, avg_matched):
+    def _evaluate(self, eig, matched, avg_eig, avg_matched, res=None):
         c, w = [], []
         if eig < self.eig_crit_abs: c.append("eig_min<%.0f(crit)" % self.eig_crit_abs)
         if matched < self.matched_crit_abs: c.append("matched<%.0f(starv)" % self.matched_crit_abs)
+        if self.enable_residual_check and res is not None:
+            if res > self.res_crit_abs: c.append("res>%.4g(crit)" % self.res_crit_abs)
+            if res > self.res_warn_abs: w.append("res>%.4g" % self.res_warn_abs)
         if eig < self.eig_warn_rel * avg_eig: w.append("eig_min<%.2fxavg" % self.eig_warn_rel)
         if eig < self.eig_warn_abs: w.append("eig_min<%.0f" % self.eig_warn_abs)
         if matched < self.matched_warn_rel * avg_matched: w.append("matched<%.2fxavg" % self.matched_warn_rel)
         if matched < self.matched_warn_abs: w.append("matched<%.0f" % self.matched_warn_abs)
         return (len(c) > 0), (len(w) > 0), (",".join(c if c else w) or "ok")
 
-    def _on_transition(self, old, new, reason, eig, matched):
+    def _announce_new_checks(self, new_reason):
+        """GCS banner for (4)-(6). Once when a cause appears, again only when the SET of causes
+        changes - not every scan, and not on its value wobbling (sp=1.21 -> 1.34 is the same news)."""
+        key = tuple(sorted(set(tok.split("=")[0].split("(")[0].rstrip("0123456789.+-")
+                               for tok in new_reason.split(",")))) if new_reason else None
+        if key == self._new_banner_key:
+            return
+        self._new_banner_key = key
+        if key is None:
+            return
+        rospy.logwarn("drift_monitor: new-check WARN: %s", new_reason)
+        self._send_statustext(_SEV_WARNING, "SLAM chk: " + new_reason, force=True)
+
+    def _new_checks_summary(self):
+        """Fifth /slam/drift_risk segment (2026-10-07); segments 0-3 unchanged."""
+        sp = "n/a" if self._ekf.last is None else "%.2f" % self._ekf.last
+        return "res=%.3f(avg %.3f) sp=%s%s" % (self._fl_res.last, self._fl_res.avg(), sp,
+                                               " BENCH" if self._bench else "")
+
+    def _on_transition(self, old, new, reason, eig, matched, lat_only=False):
         rospy.logwarn("drift_monitor: %s -> %s (%s) eig=%.0f matched=%.0f", old, new, reason, eig, matched)
         # WARN is published to /slam/drift_risk only (no GCS banner -- banner is reserved for the
-        # restart messages). CRITICAL drives the response.
+        # restart messages), EXCEPT for checks (4)-(6): those are observe-only by default, so the
+        # banner from _announce_new_checks is the only thing the pilot gets. CRITICAL drives the response.
         if new != CRITICAL:
             return
-        if reason.startswith("lat=") and self.n_crit < self.k_crit:
+        if lat_only:
             # latency-only CRITICAL: lane-change to OF and let the backlog drain. Only escalate
             # to a node restart if it is still bad after lat_drain_sec (checked in health_cb).
             self._execute_latency_failover(reason)
@@ -777,6 +1291,7 @@ class DriftMonitor:
     # ---- RC stream keepalive: (re)request RC_CHANNELS from the FC on each mavros connect ----
     def state_cb(self, msg):
         self._armed = bool(msg.armed)
+        self._motion.set_state(time.time(), getattr(msg, "mode", ""), msg.armed)
         if msg.connected and not self._mav_connected:
             self._mav_connected = True
             if self.request_rc_stream:
@@ -947,17 +1462,18 @@ class DriftMonitor:
 
     # ---- pub helpers ----
     def _publish_risk(self, level, reason, eig, matched, avg_eig, avg_matched,
-                      lat_ms=None, lat_note=""):
-        # Fourth ' | ' segment appended 2026-09-01. Segments 0-2 are unchanged in form, so any
-        # consumer splitting on ' | ' and reading [0..2] is unaffected.
+                      lat_ms=None, lat_note="", extra=""):
+        # Fourth ' | ' segment appended 2026-09-01, fifth (extra) 2026-10-07. Segments 0-2 are
+        # unchanged in form, so any consumer splitting on ' | ' and reading [0..2] is unaffected.
         if not self.enable_latency_check:
             lat = "lat=off"
         elif lat_ms is None:
             lat = "lat=%s" % (lat_note or "n/a")
         else:
             lat = "lat=%.0fms%s" % (lat_ms, "(stale)" if lat_note == "stale" else "")
-        self.risk_pub.publish(String(data="%s | %s | eig=%.0f(avg %.0f) matched=%.0f(avg %.0f) | %s"
-                                          % (level, reason, eig, avg_eig, matched, avg_matched, lat)))
+        self.risk_pub.publish(String(data="%s | %s | eig=%.0f(avg %.0f) matched=%.0f(avg %.0f) | %s%s"
+                                          % (level, reason, eig, avg_eig, matched, avg_matched, lat,
+                                             (" | " + extra) if extra else "")))
 
     def _refresh_interlock(self):
         want = "LOCKED" if (self._restart_lock or self._lat_lock) else "RELEASED"

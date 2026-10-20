@@ -129,6 +129,18 @@ RUN FASTLIO_CML=/root/slam_ws/src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/CMakeList
     grep -q 'add_dependencies(fastlio_mapping fast_lio_generate_messages_cpp)' "$FASTLIO_CML" || \
     printf '\nadd_dependencies(fastlio_mapping fast_lio_generate_messages_cpp)\n' >> "$FASTLIO_CML"
 
+# BIEVR-LIO (alternative LIO backend, slam_backend:=bievr) ships ROS1 and ROS2 wrappers side
+# by side. The ROS2 one is ament_cmake and breaks a catkin build, so hide it. Its core library
+# (bievr_lio) and bievr_ros_common are plain-cmake packages that catkin_tools builds directly;
+# both need Ceres 2.2.0 (installed above), TBB and yaml-cpp. GCC 9 builds them with -fconcepts.
+RUN touch /root/slam_ws/src/BIEVR-LIO/interfaces/ros2/CATKIN_IGNORE
+# bievr_lio_ros needs tf_conversions, which ros-base lacks (upstream builds on desktop-full) and
+# which the rosdep step below does not reliably install (it trips over the optional
+# livox_ros_driver2 key). Installed here rather than in the apt block above so the Ceres/GTSAM
+# layers stay cached.
+RUN apt-get update && apt-get install -y ros-${ROS_DISTRO}-tf-conversions && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install GeographicLib datasets for MAVRos
 WORKDIR /tmp
 RUN wget https://raw.githubusercontent.com/mavlink/mavros/master/mavros/scripts/install_geographiclib_datasets.sh && \

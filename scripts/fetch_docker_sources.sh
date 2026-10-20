@@ -26,6 +26,7 @@ REPOS=(
     "FAST_LIO_SLAM|https://github.com/RevoluteRobotics/FAST_LIO_SLAM.git|0e5ffbd6e0b11b5882301c7fdde596488445ffe3"
     "livox_ros_driver|https://github.com/Livox-SDK/livox_ros_driver.git|3d240d5666129e1a3052e78ee8487a04b08fdda3"
     "vision_to_mavros|https://github.com/thien94/vision_to_mavros.git|139f199fcc82199e357279b11b94e651b07c284e"
+    "BIEVR-LIO|https://github.com/ethz-asl/bievr-lio.git|2306022e341e98ce84244f92ba7d26f047b41dbc"
 )
 
 mkdir -p "$DEST"

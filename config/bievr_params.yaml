@@ -1,0 +1,38 @@
+# BIEVR-LIO tuning params (alternative LIO backend, slam_backend:=bievr).
+# Starts from upstream config/params.yaml (ethz-asl/bievr-lio @ 2306022). Differences from
+# upstream are marked CHANGED. Sensor-specific values live in bievr_jt128.yaml.
+
+map:
+  pixel_size_m: 0.05          # Pixel side length [m]
+  voxel_size_m: 0.5           # Voxel side length [m]
+  normal_tolerance_deg: 3     # Normal change threshold to trigger reprojection of voxel image [deg]
+  smooth: True
+  weighted: True
+  max_size: 1500000           # Maximum number of voxels kept in the map
+  frame: "bievr_odom"         # CHANGED from "odom": keep BIEVR's TF tree apart from FAST-LIO's
+                              # (camera_init/body) and from viz_frames' "map"
+
+preprocess:
+  downsample_resolution_m: 0.1
+  informed_sampling: True
+
+optimization:
+  huber_delta: 0.1
+
+imu:
+  window_s: 10                # Inertial optimisation window [s]
+  t_init: 0.2                 # Bias + gravity init time [s]; vehicle must be still
+  frame: "bievr_imu"          # CHANGED from "imu": child frame of /bievr_lio/odom
+
+debug:
+  publish_all_clouds: False
+  timing: False
+  log: False
+  dashboard: False            # CHANGED from True: the live terminal dashboard would flood the
+                              # roslaunch/journal output
+  dashboard_ascii_path: ""
+  trajectory_path: ""
+
+# CHANGED from 0 (all cores): the container is capped at cpus: '4' (docker-compose.yml), and TBB
+# sizing itself to the NUC's 12 cores would be throttled by that quota.
+max_num_threads: 4

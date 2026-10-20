@@ -32,6 +32,20 @@ FILES=(
     "src/ch9_logger.py"
     "src/flight_recorder.py"
     "src/viz_frames.py"
+    "src/bievr_health.py"
+)
+
+# BIEVR-LIO (alternative backend, PROGRESS P23): health topics + lidar/IMU time offset.
+# Relative to docker_src/BIEVR-LIO/. Regenerate with: git -C docker_src/BIEVR-LIO status --porcelain
+BIEVR_SRC="$ROOT/docker_src/BIEVR-LIO"
+BIEVR_OVR="$ROOT/overrides/BIEVR-LIO"
+BIEVR_FILES=(
+    "BIEVR/include/bievr_lio/config_loader.h"
+    "BIEVR/include/bievr_lio/ls_optimizer.h"
+    "BIEVR/src/ls_optimizer.cpp"
+    "BIEVR/src/pipeline.cpp"
+    "interfaces/ros1/src/process_bag.cpp"
+    "interfaces/ros1/src/process_topics.cpp"
 )
 
 MODE="${1:-check}"
@@ -53,7 +67,10 @@ fi
 drift=0
 missing=0
 
-for f in "${FILES[@]}"; do
+sync_group() {   # <src dir> <override dir> <label> <files...>
+local SRC="$1" OVR="$2" label="$3"; shift 3
+local f s o
+for f in "$@"; do
     s="$SRC/$f"
     o="$OVR/$f"
     case "$MODE" in
@@ -89,6 +106,13 @@ for f in "${FILES[@]}"; do
         ;;
     esac
 done
+}
+
+sync_group "$SRC" "$OVR" "FAST-LIO" "${FILES[@]}"
+if [[ -d "$BIEVR_SRC" || -d "$BIEVR_OVR" ]]; then
+    echo "  -- BIEVR-LIO"
+    sync_group "$BIEVR_SRC" "$BIEVR_OVR" "BIEVR-LIO" "${BIEVR_FILES[@]}"
+fi
 
 if [[ "$MODE" == "check" ]]; then
     if (( drift || missing )); then
@@ -98,7 +122,7 @@ if [[ "$MODE" == "check" ]]; then
         exit 1
     fi
     echo
-    echo "[✓] overrides/ matches docker_src/ (${#FILES[@]} files)"
+    echo "[✓] overrides/ matches docker_src/ ($(( ${#FILES[@]} + ${#BIEVR_FILES[@]} )) files)"
 fi
 
 (( missing )) && exit 1

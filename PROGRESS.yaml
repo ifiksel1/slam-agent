@@ -1051,6 +1051,113 @@ pending:
       to the fork; (d) real confined-space drift fix is PHYSICAL (sensor FOV/orientation, flight profile), not params.
     priority: medium
 
+  - id: P23
+    title: "BIEVR-LIO as an alternative LIO backend (slam_backend:=bievr)"
+    status: in_progress   # steps 1-3 done 2026-10-07; image/bench pending user
+    started: "2026-10-07"
+    detail: >
+      BIEVR-LIO (ethz-asl/bievr-lio, BSD-3, RSS 2026): loosely coupled LIO on voxel-wise height-image map, CPU only,
+      Eigen + Ceres 2.2 + TBB, has a ROS1 Noetic wrapper (bievr_lio_ros/process_topics, also process_bag for offline).
+      Reads the ROS1 Hesai driver's float32 "time" per-point field natively; auto-detects g vs m/s^2 IMU accel.
+      STEP 1 DONE (files only, image NOT rebuilt): vendored docker_src/BIEVR-LIO @ 2306022 (pinned in
+      scripts/fetch_docker_sources.sh + overrides/UPSTREAM.yaml); Dockerfile CATKIN_IGNOREs interfaces/ros2;
+      config/bievr_jt128.yaml (topics, LI-Init T_I_L copied verbatim -- same LiDAR->IMU direction, live blind/det_range)
+      + config/bievr_params.yaml (frames bievr_odom/bievr_imu, dashboard off, 4 threads); fastlio_to_fc.launch arg
+      slam_backend (default fastlio; node set verified unchanged via roslaunch --nodes). bievr mode runs BIEVR in place of
+      laserMapping and does NOT start fastlio_mavros_bridge or drift_monitor -> FC gets NO vision in bievr mode.
+    gaps_before_fc: >
+      (a) no lidar/IMU time offset param (FAST-LIO uses -0.014996 s) -> needs IMU re-stamp; (b) world frame is
+      gravity-aligned at init, so the bridge's [0,0,1,1,0,0,0,1,0] must be re-derived from a bag, NOT copied;
+      (c) twist is BODY frame, bridge assumes FAST-LIO world-frame velocity; (d) no /fastlio_health equivalent ->
+      drift_monitor watchdog would lock arming + failover to SRC2; needs a health adapter + recalibrated thresholds.
+    step2_done: >
+      2026-10-07, live stack stopped by user. Image built as SEPARATE tag slam-system:bievr (slam-system:latest untouched;
+      Dockerfile also needed ros-noetic-tf-conversions). Offline replay via scripts/replay/bievr_run_one.sh (process_bag,
+      --network none container) + bievr_compare.py; outputs logs/bievr_replay_20261007/*_compare.txt. No ground truth:
+      reference = flown FAST-LIO /Odometry + FC /mavros/imu/data attitude.
+    step2_results: >
+      FRAME: BIEVR->ENU = [0,-1,0, 1,0,0, 0,0,1] (pure 90 deg yaw; BIEVR world is gravity-levelled, z up). Fitted
+      rotation within 0.63/0.64/1.31 deg of it on 09_21/09_19/09_28 (residual = FAST-LIO's own non-level start frame).
+      Orientation: R_enu_body = P * R_W_I * M^T with M = [0,0,1, 1,0,0, 0,1,0]. TWIST confirmed BODY frame (rms vs
+      d(pos)/dt 0.05-0.48 m/s rotated vs 0.57-0.90 as-is) -> bridge must rotate by pose.
+      AGREEMENT with flown FAST-LIO: mean 4.6 / 6.9 / 17.3 cm, max 11 / 20 / 29 cm (09_21 / 09_19 211 s merged / 09_28).
+      Landing height (both start at z=0): BIEVR +1.2 / +2.5 / +1.7 cm, FAST-LIO -2.0 / -4.5 / -15.5 cm.
+      ROTATION vs FC IMU, 5 s windows mean (p95): BIEVR 0.16 (0.41) / 0.47 (1.78) / 0.26 (1.02) deg vs FAST-LIO
+      0.20 (0.52) / 0.95 (4.10) / 0.62 (3.22) -> BIEVR ~2x tighter on the two longer flights.
+      Absolute roll/pitch vs FC within ~0.5-1 deg mean for both (BIEVR pitch +1.0 deg mean on 09_28 -- mount?).
+      COMPUTE (4 TBB threads, uncontended, offline): step mean 17.4-17.8 ms, max 26-45 ms per scan (< 50 ms budget).
+      IMU OFFSET +14.996 ms (FAST-LIO's value) changed nothing measurable on 09_21 (4.6 vs 4.6 cm, 0.17 vs 0.16 deg) ->
+      low priority, but keep consistent with FAST-LIO before any flight use.
+      CAVEATS: 3 flights, all with healthy FAST-LIO; none of the degraded-geometry cases BIEVR is designed for
+      (Sept 26 log 218 residual rise would be the obvious next bag). Agreement != accuracy.
+    step3_done: >
+      2026-10-07 (stack stopped by user). Replay-validated only; NOT live, NOT flown; slam-system:latest untouched.
+      (1) BRIDGE (fastlio_mavros_bridge.py): ~odom_topic, ~orientation_body_matrix (q_enu = q_world*q*q_body^-1;
+      defaults = old similarity form), ~twist_frame world|body. bievr mode: P=[0,-1,0,1,0,0,0,0,1] world side,
+      M body side, twist body. Real-time chain replay vs what the FC received from FAST-LIO in flight:
+      position 3.7/6.5/13.5 cm mean, yaw 0.03-0.28 deg mean, velocity 3-4 cm/s rms (09_21/09_19/09_28).
+      (2) HEALTH: BIEVR patch (overrides/BIEVR-LIO, 6 files) publishes /bievr_lio/health/{registration,eig_pos,
+      compute}; bievr_health.py -> /bievr_health in /fastlio_health layout. Plus calibration/time_offset_lidar_to_imu_s
+      (-0.014996, FAST-LIO semantics) in the ROS1 entry points.
+      (3) THRESHOLDS (logs/bievr_replay_20261007/calibration.txt, cost_tradeoff.txt, monitor_replay_final.txt):
+      eig_min/matched CANNOT separate log 218 from healthy confined flight (failure 277/967 vs healthy 202/1218 at
+      39 s same sortie) -> floors set below healthy min as backstop (eig 150/200, matched 1000/1200). Mean
+      registration RESIDUAL does: new opt-in drift_monitor rule enable_residual_check/res_{warn,crit}_abs (default
+      off, FAST-LIO unchanged); bievr: crit 0.0025, warn 0.0022, k_warn=k_crit=10 (healthy worst run 5).
+      Real drift_monitor replay: 7546 healthy scans all OK; log 218 CRITICAL at bag 87.49 s = 0.07 s AFTER the FC
+      rejected vision, ~2 s before the upset. Detects, does not predict. enable_fl_residual_check=false in bievr mode
+      (other session's FAST-LIO residual check gave 3 spurious relative WARNs on BIEVR data).
+      LOG 218 BIEVR vs IMU dead-reckoning: rotation held (yaw within 1-2 deg of FC; FAST-LIO off 8-12 deg), but
+      POSITION failed too from ~85 s (BIEVR 0.65 m vs FAST-LIO 0.91 m at +2.5 s; BIEVR worse after 88 s).
+      BIEVR would NOT have saved log 218.
+      Recorder: /bievr_lio/odom + /bievr_health added to flight_recorder defaults (no-op in fastlio mode).
+      Launch: fastlio-mode params verified identical via roslaunch --dump-params diff.
+    next: >
+      Not done (user excluded / user decision): include BIEVR in slam-system:latest (only :bievr has it; drift_monitor
+      is bind-mounted, but the bridge + bievr_health live in the image); static disarmed bench recording. Live
+      drift_monitor changes need `docker restart slam-hesai-fastlio` (single-file bind mount pins the inode).
+      More failure cases needed before trusting the residual threshold (one event is not a distribution).
+    priority: medium
+
+  - id: P24
+    title: "drift_monitor checks (4)-(6): FAST-LIO residual trend, EKF SP, motion vs RC -- LIVE (observe-only), bench_mode added"
+    status: in_progress
+    started: "2026-10-07"
+    detail: >
+      After the 26 Sep crash (FC log 218: residual 0.019->0.136 from t=337.8, SP>=1 from 339.66, impact ~341.8;
+      drift_monitor said OK throughout). Pure classes ResidualCheck / EkfInnovationCheck / MotionCheck in
+      drift_monitor.py, merged into the latched state machine. Params enable_fl_residual_check, enable_sp_check,
+      enable_motion_check (all true) and enable_*_critical (all FALSE = CRITICAL shown as WARN "(obs)" + GCS banner
+      "SLAM chk: ...", commands nothing). /slam/drift_risk gets a 5th segment "res=..(avg ..) sp=..".
+      Residual: >0.055 or >2.0x baseline (warn), >0.06 or >2.5x (crit), 10 scans; 28 bag sessions -> fires only on the
+      crash and the 30 Sep 16:10 LAND z-drop. SP = EKF_STATUS_REPORT.pos_horiz_variance (== XKF4.SP) decoded from raw
+      /mavlink/from: >=0.8/1.0 held 0.4 s; 30 FC logs -> no healthy false positives; fires 218 (crit 340.0), 211, 050.
+      Motion (RC 11/15/16 routed by tank Lua, thr 3): Loiter velocity error vs stick (yaw stick must be centred: lidar
+      lever arm), vertical direction vs throttle stick, tilt >25/30 in Loiter/LAND. Found an unknown real event: log 216
+      t=1050 sticks centred, sank 0.76 m/s on 100% throttle. Does NOT catch the 29 Sep climb (EKF+SLAM height both stale).
+      Verified: offline class replays; full node replay of the crash bag on an isolated roscore (port 11399, no mavros).
+      SP decode unit-tested with pymavlink-encoded EKF_STATUS_REPORT.
+      LIVE 2026-10-07 after container restart: startup line shows all three critical=False; drift_risk
+      "res=0.040(avg 0.039) sp=0.20" on the bench; EKF_STATUS_REPORT 4.0 Hz from sysid 1 (max gap 0.26 s), no blind warn.
+      bench_mode (runtime `rosparam set /drift_monitor/bench_mode true`, polled 1 Hz): runs SP+motion DISARMED for
+      hand-carried tests, reads non-V_MODES as LOITER, drops the throttle-out gate, forces (4)-(6) observe-only, banner
+      "SLAM bench mode ON/OFF", drift_risk suffix " BENCH"; ignored once armed. Does NOT touch checks (1)-(3)/CH9/restart.
+      Disarmed the FC streams imu/data + velocity_local at 4 Hz (in flight ~50 Hz), so bench trips lag up to ~0.25 s.
+      state_cb uses getattr(msg,"mode","") so test_land_src2's fake State passes. All 3 replay tests pass.
+      BENCH SESSION 2026-10-07 22:26-22:32Z (logs/bench_20261007_182634.bag, disarmed, props off, bench_mode on):
+      all motion tests fired as designed (h walk >1 m/s -> WARN then crit(obs) at 1.5 s; slow walk 0.5 m/s OK; lifts ->
+      vz WARN; tilt 44/68 -> crit(obs)); nothing commanded by checks 4-6. Residual: rest 0.043-0.048 in this room, normal
+      walking peaks 0.054-0.058, WARN (never crit) only on tilt 68 (0.121) and shaking (0.090) -> abs warn 0.055 has ~0.01
+      margin here; keep observe-only. SP NOT exercised: EKF was on SRC2 all session (failover_active). Before the
+      recording, while handling, the ORIGINAL check fired matched<150 x3 (22:22:23, 22:25:27, 22:25:46): EKF->SRC2 +
+      set_mode LAND + laserMapping restart; restart_mode=land never switches back to SRC1.
+    next: >
+      (1) Bench session (props off, disarmed) per the T1-T6 plan + bench_mode; never drive matched<150/eig<5000 (that
+      fires the real restart + LAND/SRC2 to the FC). Container restart needed to load bench_mode (bind-mount inode).
+      (3) Fly observe-only, then decide each enable_*_critical. (4) Persist to the FAST_LIO_SLAM fork (docker_src gitignored).
+    files: ["docker_src/.../FAST-LIO/src/drift_monitor.py"]
+    priority: high
+
 # -----------------------------------------------------------------------------
 # QUICK VERIFICATION COMMANDS
 # -----------------------------------------------------------------------------

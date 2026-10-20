@@ -71,7 +71,26 @@ class FastLioMavrosBridge:
         Mo = np.eye(4)
         Mo[:3, :3] = np.array(of, dtype=float).reshape(3, 3)
         self.q_perm = quaternion_from_matrix(Mo)   # [x,y,z,w]
+        # BODY side of the orientation transform: q_enu = q_world * q_odom * q_body^-1. The default
+        # (unset) is the same matrix as ~orientation_matrix, which is exactly the similarity form above
+        # and right for FAST-LIO, whose world frame IS its starting IMU frame. A backend whose world
+        # frame is NOT its IMU frame needs them different: BIEVR-LIO levels its world at start, so
+        # world -> ENU is [0,-1,0, 1,0,0, 0,0,1] while the IMU body -> FLU stays [0,0,1, 1,0,0, 0,1,0]
+        # (PROGRESS P23; verified on 4 flight replays against the FC attitude).
+        ob = rospy.get_param('~orientation_body_matrix', of)
+        Mb = np.eye(4)
+        Mb[:3, :3] = np.array(ob, dtype=float).reshape(3, 3)
+        self.q_body = quaternion_from_matrix(Mb)
         self.remap_axes = rospy.get_param('~remap_axes', True)
+
+        # LiDAR-to-FC MOUNT YAW. The permutation above is an exact 90-degree relabel, but the
+        # LiDAR is physically mounted slightly yawed relative to the FC board. Fitting the /lidar_imu
+        # gyro against the FC gyro (/mavros/imu/data_raw) gives w_fc = Rz(psi) * P * w_lidar, where psi
+        # is ~fc_mount_yaw_deg (logs/mount_yaw_20260929/mount_yaw.cpp). So the FC body attitude is
+        # R_world_lidar' * Rz(-psi), a BODY-side (right) multiply on orientation only. Position and
+        # velocity are world-frame and do not depend on how the body is mounted. 0.0 = no correction.
+        self.fc_mount_yaw_deg = float(rospy.get_param('~fc_mount_yaw_deg', 0.0))
+        self.mount_quat = quaternion_from_euler(0.0, 0.0, -math.radians(self.fc_mount_yaw_deg))
         self.yaw0 = None              # captured once, radians
         self.cos_y0 = 1.0             # cos(-yaw0)
         self.sin_y0 = 0.0             # sin(-yaw0)
@@ -86,14 +105,22 @@ class FastLioMavrosBridge:
         # NOTE: to actually fuse this, set EK3_SRC1_VELXY=6 and EK3_SRC1_VELZ=6 on the FC and
         # tune VISO_VEL_M_NSE. With those at 0 (None) the FC ignores it (safe no-op).
         self.publish_velocity = rospy.get_param('~publish_velocity', True)
+        # Frame of odom twist.linear: "world" (FAST-LIO: IEKF velocity in camera_init) or "body"
+        # (BIEVR-LIO: child/IMU frame, per nav_msgs convention). "body" is rotated into the backend's
+        # world frame by the odom orientation first, then follows the same chain as position.
+        self.twist_frame = rospy.get_param('~twist_frame', 'world')
+        if self.twist_frame not in ('world', 'body'):
+            raise ValueError("~twist_frame must be 'world' or 'body', got %r" % self.twist_frame)
+        self.odom_topic = rospy.get_param('~odom_topic', '/Odometry')
 
         # Publishers and Subscribers
         self.vision_pub = rospy.Publisher('/mavros/vision_pose/pose', PoseStamped, queue_size=50)
         self.vel_pub = rospy.Publisher('/mavros/vision_speed/speed_vector', Vector3Stamped, queue_size=50)
-        self.odom_sub = rospy.Subscriber('/Odometry', Odometry, self.odometry_callback)
+        self.odom_sub = rospy.Subscriber(self.odom_topic, Odometry, self.odometry_callback)
 
-        rospy.loginfo("FAST-LIO to MAVROS bridge started (position_matrix det=%.3f, remap_axes=%s, publish_velocity=%s)",
-                      np.linalg.det(self.Mpos), self.remap_axes, self.publish_velocity)
+        rospy.loginfo("FAST-LIO to MAVROS bridge started (odom_topic=%s, position_matrix det=%.3f, remap_axes=%s, publish_velocity=%s, twist_frame=%s, fc_mount_yaw_deg=%.3f)",
+                      self.odom_topic, np.linalg.det(self.Mpos), self.remap_axes, self.publish_velocity,
+                      self.twist_frame, self.fc_mount_yaw_deg)
         rospy.loginfo("Publishing vision pose to /mavros/vision_pose/pose")
         if self.publish_velocity:
             rospy.loginfo("Publishing vision speed to /mavros/vision_speed/speed_vector")
@@ -116,9 +143,12 @@ class FastLioMavrosBridge:
             qin = (q.x, q.y, q.z, q.w)
             if self.remap_axes:
                 tq = quaternion_multiply(quaternion_multiply(self.q_perm, qin),
-                                         quaternion_conjugate(self.q_perm))
+                                         quaternion_conjugate(self.q_body))
             else:
                 tq = qin
+            # Body-side mount correction, BEFORE the yaw-datum capture, so heading 0 is the FC's forward
+            if self.fc_mount_yaw_deg != 0.0:
+                tq = quaternion_multiply(tq, self.mount_quat)
 
             # Yaw-datum: capture yaw0 from the first pose, then rotate every pose by
             # -yaw0 about vertical so the FC frame starts at heading 0 (forward->+x).
@@ -151,7 +181,12 @@ class FastLioMavrosBridge:
             # then the same Rz(-yaw0) yaw-datum rotation (z component unchanged).
             if self.publish_velocity:
                 lv = odom_msg.twist.twist.linear
-                vx, vy, vz = self.Mpos.dot(np.array([lv.x, lv.y, lv.z]))
+                v = np.array([lv.x, lv.y, lv.z])
+                if self.twist_frame == 'body':
+                    vq = quaternion_multiply(quaternion_multiply(qin, (v[0], v[1], v[2], 0.0)),
+                                             quaternion_conjugate(qin))
+                    v = np.array(vq[:3])
+                vx, vy, vz = self.Mpos.dot(v)
                 if self.zero_initial_yaw and self.yaw0 is not None:
                     vx, vy = self.cos_y0 * vx - self.sin_y0 * vy, self.sin_y0 * vx + self.cos_y0 * vy
                 vel_msg = Vector3Stamped()

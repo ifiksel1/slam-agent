@@ -97,5 +97,6 @@ catkin_install_python(PROGRAMS
   src/drift_monitor.py
   src/ch9_logger.py
   src/flight_recorder.py
+  src/bievr_health.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

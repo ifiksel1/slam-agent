@@ -36,6 +36,7 @@ _DEFAULT_TOPICS = " ".join([
     # --- Tier 1: SLAM in/out + send/receive + FC core ---
     "/lidar_points", "/lidar_imu",                       # raw -> offline SLAM replay
     "/Odometry", "/fastlio_health",                      # FAST-LIO estimate + drift metrics
+    "/bievr_lio/odom", "/bievr_health",                  # slam_backend:=bievr equivalents (absent otherwise: no-op)
     "/mavros/vision_pose/pose", "/mavros/vision_speed/speed_vector",  # what we SEND the FC
     "/mavros/local_position/pose", "/mavros/local_position/velocity_local",  # FC fused pos/vel
     "/mavros/altitude",                                  # EKF vs baro vs rel alt (climb evidence)

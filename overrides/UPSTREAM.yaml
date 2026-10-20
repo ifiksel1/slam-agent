@@ -34,6 +34,16 @@ repos:
     private: false
     note: unmodified upstream
 
+  - name: BIEVR-LIO
+    url: https://github.com/ethz-asl/bievr-lio.git
+    sha: 2306022e341e98ce84244f92ba7d26f047b41dbc
+    date: 2026-08-17
+    private: false
+    note: >
+      unmodified upstream (BSD-3, ETH ASL, RSS 2026). Alternative LIO backend, selected with
+      slam_backend:=bievr in config/fastlio_to_fc.launch. The Dockerfile drops a CATKIN_IGNORE
+      into interfaces/ros2 so catkin builds only the ROS1 wrapper.
+
 # Everything we own, relative to docker_src/FAST_LIO_SLAM/FAST_LIO_SLAM/FAST-LIO/.
 # Sizes are our delta against the pinned FAST_LIO_SLAM sha.
 overrides:
