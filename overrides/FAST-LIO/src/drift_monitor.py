@@ -110,21 +110,36 @@ OK, WARN, CRITICAL = "OK", "WARN", "CRITICAL"
 _LEVEL = {OK: 0, WARN: 1, CRITICAL: 2}
 _EKF_STATUS_REPORT_MSGID = 193
 _HEARTBEAT_MSGID = 0
-_MAV_TYPE_GROUND_ROVER = 10     # MAV_TYPE of a Rover-based FC: QuadRover (copter flight on Rover)
+_MAV_TYPE_GROUND_ROVER = 10     # MAV_TYPE of a Rover-based FC: expected when ~quadrover is set
 
 
-def land_command(fc_mav_type, land_mode, land_mode_rover):
+def land_command(quadrover, land_mode, land_mode_rover):
     """the FC request restart_mode="land" makes: ('custom', n) = MAV_CMD_DO_SET_MODE with custom
-    mode n for a Rover-based FC (QuadRover: QRLand = 21; MAVROS has no names for the QR modes and
-    its set_mode refuses "CMODE(n)", and "LAND" does not exist on Rover); otherwise ('name',
-    land_mode) through /mavros/set_mode (Copter: "LAND"). An FC not yet seen (no HEARTBEAT) gets
-    the name, which a Rover-based FC simply rejects."""
-    if fc_mav_type == _MAV_TYPE_GROUND_ROVER and int(land_mode_rover) >= 0:
+    mode n on a QuadRover (~quadrover; QRLand = 21: QuadRover flies on the Rover firmware, which has
+    no "LAND", and MAVROS has no names for the QR modes and refuses "CMODE(n)"); otherwise ('name',
+    land_mode) through /mavros/set_mode (Copter: "LAND")."""
+    if quadrover and int(land_mode_rover) >= 0:
         return ('custom', int(land_mode_rover))
     return ('name', land_mode)
 
 
-def failover_allowed(fc_mav_type, rc_out, rc_out_age_s, motor_run_us, enabled=True):
+# Rover's autonomous drive modes (MAVROS name -> custom mode): they steer by the EKF position, so
+# a SLAM reset while driving holds them (drive_hold_mode). MANUAL / ACRO / STEERING are pilot-driven.
+ROVER_HOLD = 4
+ROVER_AUTONOMOUS_MODES = {"LOITER": 5, "FOLLOW": 6, "DOCK": 8, "CIRCLE": 9, "AUTO": 10, "RTL": 11,
+                          "SMART_RTL": 12, "GUIDED": 15}
+
+
+def drive_hold_mode(quadrover, armed, mode, enabled=True):
+    """the Rover custom mode to resume after holding for a SLAM reset while driving, or None to
+    leave the vehicle alone (owner 2026-10-20: hold the autonomous drive modes only, resume once
+    SLAM is healthy). Called only when failover_allowed() said "driving"."""
+    if not enabled or not quadrover or not armed:
+        return None
+    return ROVER_AUTONOMOUS_MODES.get(mode)
+
+
+def failover_allowed(quadrover, rc_out, rc_out_age_s, motor_run_us, enabled=True):
     """may the EKF fail over to optical flow (SRC2) now?
 
     Not while a QuadRover drives (owner 2026-10-20): flow cannot measure ground speed from 8 cm
@@ -132,9 +147,9 @@ def failover_allowed(fc_mav_type, rc_out, rc_out_age_s, motor_run_us, enabled=Tr
     and SITL (SourceSwitchHeadingFlip) turned 180 deg and drove away, or ran away at 4-7 m/s.
     QuadRover shuts its copter motors down (SHUT_DOWN) while driving and spins them in every
     flight mode and Auto flight leg, so "flying" = any of outputs 1-4 above motor_run_us.
-    A non-Rover FC (Copter) or an FC not yet seen always may; so may a Rover FC whose outputs
-    have not been seen for 1 s (no data: keep the old behaviour)."""
-    if not enabled or fc_mav_type != _MAV_TYPE_GROUND_ROVER:
+    Not a QuadRover (~quadrover false: Copter) always may; so may a QuadRover whose outputs have
+    not been seen for 1 s (no data: keep the old behaviour)."""
+    if not enabled or not quadrover:
         return True
     if rc_out is None or rc_out_age_s > 1.0 or len(rc_out) < 4:
         return True
@@ -659,14 +674,22 @@ class DriftMonitor:
         self.enable_ch9_land = bool(g("~enable_ch9_land", False))          # CH9 switch drives the action
         self.restart_nodes = g("~restart_nodes", "/laserMapping /fastlio_mavros_bridge")
         self.land_mode = g("~land_mode", "LAND")   # FC flight mode used by restart_mode="land"
-        # ...and the custom mode number used instead when the FC is Rover-based (QuadRover):
-        # 21 = QRLand (owner 2026-10-20). -1 = always use land_mode. See land_command().
+        # QuadRover (copter flight on the Rover firmware; set by fastlio_to_fc_quadrover.launch).
+        # Everything below that is QuadRover-only is gated on this flag, never auto-detected; the
+        # FC's HEARTBEAT type is only cross-checked against it (a warning on a mismatch).
+        self.quadrover = bool(g("~quadrover", False))
+        # QuadRover: the custom mode used instead of land_mode, 21 = QRLand (owner 2026-10-20).
+        # -1 = always use land_mode. See land_command().
         self.land_mode_rover = int(g("~land_mode_rover", 21))
         # no optical-flow failover while a QuadRover drives (failover_allowed())
         self.no_failover_driving = bool(g("~no_failover_driving", True))
         self.motor_run_us = float(g("~motor_run_us", 1050.0))
         self._rc_out = None
         self._rc_out_t = 0.0
+        # ...and HOLD an autonomous drive mode through the reset, resuming it on recovery
+        self.hold_driving_on_reset = bool(g("~hold_driving_on_reset", True))
+        self._mode = ""
+        self._drive_hold = None     # (mode name, custom mode) to resume, while holding
         self._fc_mav_type = None    # HEARTBEAT.type of the FC (sysid fc_sysid, compid 1)
         self.fc_sysid = int(g("~fc_sysid", 1))
         self.statustext_period = float(g("~statustext_period", 2.0))
@@ -799,7 +822,7 @@ class DriftMonitor:
             rospy.Subscriber("/mavros/rc/in", RCIn, self._rc_in_cb, queue_size=10)
         if _HAVE_MAVROS:
             rospy.Subscriber("/mavros/state", State, self.state_cb, queue_size=10)
-        if _HAVE_MAVROS:
+        if _HAVE_MAVROS and self.quadrover:
             # copter motor outputs for failover_allowed()
             rospy.Subscriber("/mavros/rc/out", RCOut, self._rc_out_cb, queue_size=5)
         if _HAVE_MAVROS:
@@ -845,8 +868,12 @@ class DriftMonitor:
             # HEARTBEAT: custom_mode u32, then type u8 (MAV_TYPE); MAVLink2 trims zeros, so pad
             raw = b"".join(struct.pack("<Q", w) for w in msg.payload64).ljust(9, b"\0")
             if self._fc_mav_type != raw[4]:
-                rospy.loginfo("drift_monitor: FC HEARTBEAT type %d -> restart_mode=land sends %s",
-                              raw[4], land_command(raw[4], self.land_mode, self.land_mode_rover))
+                rover_fc = raw[4] == _MAV_TYPE_GROUND_ROVER
+                log = rospy.loginfo if rover_fc == self.quadrover else rospy.logwarn
+                log("drift_monitor: FC HEARTBEAT type %d, ~quadrover %s%s -> restart_mode=land sends %s",
+                    raw[4], self.quadrover,
+                    "" if rover_fc == self.quadrover else " (MISMATCH: check the launch file)",
+                    land_command(self.quadrover, self.land_mode, self.land_mode_rover))
             self._fc_mav_type = raw[4]
             return
         if msg.msgid != _EKF_STATUS_REPORT_MSGID or not self.enable_sp_check:
@@ -1254,6 +1281,8 @@ class DriftMonitor:
                 recovery_msg = "SLAM back, staying on SRC2"
             else:
                 recovery_msg = "Restarted, ready to arm"
+            if self._drive_hold is not None:
+                self._spawn(self._resume_after_reset)
             self._restart_lock = False
             self._lat_no_restart = False
             self._lat_escalated = False
@@ -1343,6 +1372,7 @@ class DriftMonitor:
     # ---- RC stream keepalive: (re)request RC_CHANNELS from the FC on each mavros connect ----
     def state_cb(self, msg):
         self._armed = bool(msg.armed)
+        self._mode = getattr(msg, "mode", "")
         self._motion.set_state(time.time(), getattr(msg, "mode", ""), msg.armed)
         if msg.connected and not self._mav_connected:
             self._mav_connected = True
@@ -1393,6 +1423,44 @@ class DriftMonitor:
     def _failover_worker(self):
         self.failover_active = self._switch_to_of()
 
+    def _hold_for_reset(self):
+        """while driving an autonomous mode, HOLD through the SLAM reset (resumed on recovery)"""
+        mode = self._mode
+        resume = drive_hold_mode(self.quadrover, self._armed, mode, self.hold_driving_on_reset)
+        if resume is None or self._drive_hold is not None:
+            return
+        if self._set_custom_mode(ROVER_HOLD, "HOLD"):
+            self._drive_hold = (mode, resume)
+            self._send_statustext(_SEV_WARNING, "SLAM reset: HOLD, then back to %s" % mode, force=True)
+
+    def _resume_after_reset(self):
+        """SLAM healthy again: back to the held mode, unless the pilot changed mode or disarmed"""
+        mode, num = self._drive_hold
+        self._drive_hold = None
+        if self._mode != "HOLD" or not self._armed:
+            self._send_statustext(_SEV_WARNING, "SLAM back: not resuming %s (%s)" % (
+                mode, "disarmed" if not self._armed else "mode changed"), force=True)
+            return
+        ok = self._set_custom_mode(num, mode)
+        self._send_statustext(_SEV_WARNING, ("SLAM back: resuming %s" if ok else "SLAM back: %s refused") % mode,
+                              force=True)
+
+    def _set_custom_mode(self, num, label):
+        """MAV_CMD_DO_SET_MODE (176), param1 1 = custom mode num; -> True if accepted"""
+        rospy.logwarn("drift_monitor: *** commanding FC custom mode %d (%s) ***", num, label)
+        try:
+            rospy.wait_for_service("/mavros/cmd/command", timeout=3.0)
+            resp = rospy.ServiceProxy("/mavros/cmd/command", CommandLong)(
+                broadcast=False, command=176, confirmation=0, param1=1.0, param2=float(num),
+                param3=0.0, param4=0.0, param5=0.0, param6=0.0, param7=0.0)
+            ok = bool(getattr(resp, "success", False))
+            if not ok:
+                rospy.logerr("drift_monitor: custom mode %d (%s) REJECTED by FC (result=%s)",
+                             num, label, getattr(resp, "result", "?"))
+            return ok
+        except Exception as e:
+            rospy.logerr("drift_monitor: custom mode %d (%s) failed: %s", num, label, e); return False
+
     def _rc_out_cb(self, msg):
         self._rc_out = list(msg.channels)
         self._rc_out_t = time.time()
@@ -1400,10 +1468,11 @@ class DriftMonitor:
     def _switch_to_of(self):
         """fail the FC over to optical flow (SRC2) unless a QuadRover is driving
         (failover_allowed); -> True if the FC is now on SRC2"""
-        if not failover_allowed(self._fc_mav_type, self._rc_out, time.time() - self._rc_out_t,
+        if not failover_allowed(self.quadrover, self._rc_out, time.time() - self._rc_out_t,
                                 self.motor_run_us, self.no_failover_driving):
             rospy.logwarn("drift_monitor: SLAM fault while driving (copter motors off): no OF failover, EKF stays on SLAM")
             self._send_statustext(_SEV_WARNING, "SLAM fault driving: no OF failover", force=True)
+            self._hold_for_reset()
             return False
         ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
         self._send_statustext(_SEV_CRITICAL,
@@ -1488,22 +1557,10 @@ class DriftMonitor:
         # commands a real descent when flying. Does NOT arm. Gated entirely by restart_mode.
         if not _HAVE_MAVROS:
             rospy.logerr("drift_monitor: restart_mode=land but mavros_msgs unavailable"); return False
-        kind, mode = land_command(self._fc_mav_type, self.land_mode, self.land_mode_rover)
+        kind, mode = land_command(self.quadrover, self.land_mode, self.land_mode_rover)
         if kind == 'custom':
-            # QuadRover: QRLand by number, MAV_CMD_DO_SET_MODE (176), param1 1 = custom mode
-            rospy.logwarn("drift_monitor: *** commanding FC custom mode %d (QRLand) ***", mode)
-            try:
-                rospy.wait_for_service("/mavros/cmd/command", timeout=3.0)
-                resp = rospy.ServiceProxy("/mavros/cmd/command", CommandLong)(
-                    broadcast=False, command=176, confirmation=0, param1=1.0, param2=float(mode),
-                    param3=0.0, param4=0.0, param5=0.0, param6=0.0, param7=0.0)
-                ok = bool(getattr(resp, "success", False))
-                if not ok:
-                    rospy.logerr("drift_monitor: custom mode %d REJECTED by FC (result=%s)",
-                                 mode, getattr(resp, "result", "?"))
-                return ok
-            except Exception as e:
-                rospy.logerr("drift_monitor: custom mode %d failed: %s", mode, e); return False
+            # QuadRover: QRLand by number
+            return self._set_custom_mode(mode, "QRLand")
         rospy.logwarn("drift_monitor: *** commanding FC set_mode -> %s ***", self.land_mode)
         try:
             rospy.wait_for_service("/mavros/set_mode", timeout=3.0)

@@ -1,0 +1,46 @@
+<launch>
+  <!-- QuadRover robots (copter flight on the ArduPilot Rover firmware, branch quadrover-4.7): the
+       SLAM stack of fastlio_to_fc.launch, with drift_monitor's QuadRover-only behaviour and the
+       bridge's frame re-anchor on. Only robots flying QuadRover start this (systemd drop-in
+       deploy/slam-fastlio-quadrover.conf); the rest keep fastlio_to_fc.launch unchanged until
+       QuadRover is switched to for good (owner 2026-10-20).
+
+       restart_mode "of" (owner 2026-10-20): a restart trigger fails over to optical flow while SLAM
+       re-inits and switches back on recovery (safe since the bridge re-anchors onto the EKF, P25).
+       Toggle persistently with scripts/switch_restart_mode.sh (it edits the arg below). -->
+  <arg name="restart_mode" default="of" />
+  <arg name="fcu_url" default="/dev/ttyACM0:921600" />
+  <arg name="gcs_url" default="" />
+  <arg name="tgt_system" default="1" />
+  <arg name="tgt_component" default="1" />
+  <arg name="slam_backend" default="fastlio" />
+
+  <include file="$(dirname)/fastlio_to_fc.launch">
+    <arg name="quadrover" value="true" />
+    <arg name="restart_mode" value="$(arg restart_mode)" />
+    <arg name="fcu_url" value="$(arg fcu_url)" />
+    <arg name="gcs_url" value="$(arg gcs_url)" />
+    <arg name="tgt_system" value="$(arg tgt_system)" />
+    <arg name="tgt_component" value="$(arg tgt_component)" />
+    <arg name="slam_backend" value="$(arg slam_backend)" />
+  </include>
+
+  <!-- The bridge re-anchors the SLAM frame onto the FC's EKF after any FAST-LIO / bridge restart
+       (frame_anchor.py, P25). Off by default in the bridge, so non-QuadRover robots are unchanged. -->
+  <param name="/fastlio_mavros_bridge/enable_reanchor" type="bool" value="true" />
+
+  <!-- "land" mode commands custom mode land_mode_rover, 21 = QRLand, by MAV_CMD_DO_SET_MODE: the
+       Rover firmware has no "LAND" and MAVROS refuses CMODE(n). -1 = land_mode ("LAND"). -->
+  <param name="/drift_monitor/land_mode_rover" type="int" value="21" />
+  <!-- No optical-flow failover while driving (owner 2026-10-20): flow cannot measure ground speed
+       from 8 cm up and the switch moves the heading reference (log 63 L run; SITL
+       SourceSwitchHeadingFlip: 180 deg pivot or a 4-7 m/s runaway). "Flying" = any copter motor
+       output (1-4) above motor_run_us; QuadRover shuts them down while driving. The SLAM restart
+       itself still runs (the bridge re-anchors). -->
+  <param name="/drift_monitor/no_failover_driving" type="bool" value="true" />
+  <param name="/drift_monitor/motor_run_us" type="double" value="1050" />
+  <!-- ...and an autonomous drive mode (Guided, Auto, RTL, SmartRTL, Loiter, Follow, Circle, Dock)
+       goes to HOLD for the reset and back to that mode once SLAM is healthy, unless the pilot
+       changed mode or disarmed meanwhile (owner 2026-10-20). Manual/Acro/Steering are left alone. -->
+  <param name="/drift_monitor/hold_driving_on_reset" type="bool" value="true" />
+</launch>

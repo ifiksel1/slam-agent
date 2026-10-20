@@ -114,8 +114,10 @@ class FastLioMavrosBridge:
         # is anchored onto the FC's current EKF pose, so the FC keeps one continuous frame across
         # laserMapping and bridge restarts (it can reset neither heading nor, through MAVROS,
         # position). With no usable EKF (first boot) the old yaw-datum is used instead.
-        # ~enable_reanchor:=false restores the old behaviour exactly (yaw-datum once, never again).
-        self.enable_reanchor = bool(rospy.get_param('~enable_reanchor', True))
+        # Off by default: the old behaviour exactly (yaw-datum once, never again). QuadRover robots
+        # turn it on (fastlio_to_fc_quadrover.launch); the others keep the old bridge until
+        # QuadRover is switched to for good (owner 2026-10-20).
+        self.enable_reanchor = bool(rospy.get_param('~enable_reanchor', False))
         self.discontinuity = Discontinuity(rospy.get_param('~reanchor_gap_s', 1.0),
                                            rospy.get_param('~reanchor_jump_m', 0.5),
                                            rospy.get_param('~reanchor_jump_deg', 20.0))
