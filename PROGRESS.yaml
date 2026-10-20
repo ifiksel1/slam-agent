@@ -1157,6 +1157,27 @@ pending:
       (3) Fly observe-only, then decide each enable_*_critical. (4) Persist to the FAST_LIO_SLAM fork (docker_src gitignored).
     files: ["docker_src/.../FAST-LIO/src/drift_monitor.py"]
     priority: high
+  - id: P25
+    title: "Bridge re-anchors the SLAM frame onto the FC's EKF after any FAST-LIO / bridge restart"
+    status: done
+    started: "2026-10-20"
+    detail: >
+      A restart (drift_monitor kill of laserMapping + bridge, the health watchdog's laserMapping respawn, or a bridge
+      crash) used to hand the FC a new frame: yaw0 recaptured at the current heading, FAST-LIO back at its origin.
+      ArduPilot cannot absorb that: EKF3 resets position only on a reset_counter change (MAVROS 1.20 sends 0) and has
+      no heading reset for an ExternalNav frame change, so in motion the new heading fails the yaw gate for good
+      (2026-10-19 nuc-04: EKF rejected SLAM, test ratios 12-13, until an FC reboot). frame_anchor.py (ROS-free):
+      the bridge anchors its output (heading + offset) onto the EKF pose (/mavros/local_position/pose at the odometry
+      stamp, VISO_POS lever arm) on every start and every discontinuity (gap > 1 s, step > 0.5 m / 20 deg), when
+      EKF_STATUS_REPORT shows a horizontal position (waits up to ~ekf_wait_s 3 s for it); first boot keeps the old
+      yaw0 datum. ~enable_reanchor:=false restores the old behaviour. Bridge + frame_anchor now bind-mounted
+      (docker-compose.yml); this also deploys the BIEVR bridge options (defaults = FAST-LIO behaviour).
+      Tests: scripts/replay/test_frame_anchor.py (old path jumps 15.1 m / 172 deg on a simulated restart, new stays
+      on the truth); bench nuc-01 disarmed: bridge restart after a 90 deg hand turn moved the pose 0.04 m / 0.2 deg
+      (old: 96 deg jump); laserMapping restart (FC failed over to OF meanwhile): "avoided 0.34 m / 105 deg", then
+      within 0.005 m / 1.7 deg of the EKF. Found on the way: starting any node spikes FAST-LIO latency past 250 ms
+      (FAST-LIO at 160% CPU on nuc-01) and triggers the OF failover, whose compass heading is ~180 deg from the
+      SLAM frame on this robot; policy left to the owner.
 
 # -----------------------------------------------------------------------------
 # QUICK VERIFICATION COMMANDS

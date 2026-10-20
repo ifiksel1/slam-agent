@@ -33,6 +33,7 @@ FILES=(
     "src/flight_recorder.py"
     "src/viz_frames.py"
     "src/bievr_health.py"
+    "src/frame_anchor.py"
 )
 
 # BIEVR-LIO (alternative backend, PROGRESS P23): health topics + lidar/IMU time offset.
