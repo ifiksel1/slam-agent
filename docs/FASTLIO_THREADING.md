@@ -148,9 +148,37 @@ docker tag slam-system:pre-threads-<date> slam-system:latest
 sudo systemctl restart slam-fastlio      # disarmed only
 ```
 
+## Keeping the rest of the stack off FAST-LIO's cores (nuc-01, 2026-10-20)
+
+The pinning leaves one weak spot: FAST-LIO's 4 OpenMP threads each own one of CPUs 0, 2, 4, 6,
+and every scan's parallel loop waits for the slowest thread. Any other busy process on one of
+those CPUs, or on a hyperthread sibling (1, 3, 5, 7) of all four at once, stalls the whole scan.
+That is what the "SLAM latency high" bursts at node starts were (flight recorder on arm/disarm,
+respawns): drift_monitor fails over to optical flow on them.
+
+Measured live on nuc-01 (same CPU as nuc-04), disarmed, FAST-LIO's update time
+(`/fastlio_health` data[2]) and latency (data[7]) around a bridge respawn (a roslaunch child that
+imports numpy, whose OpenBLAS starts one thread per allowed CPU):
+
+| roslaunch (and so every node but laserMapping) on | update max | latency max |
+|---|---|---|
+| any CPU (stock) | 61-154 ms | 183-254 ms |
+| 1, 3, 5, 7, 8-11 (off FAST-LIO's CPUs, siblings allowed) | 78-119 ms | 138-217 ms |
+| **8-11 only** | **13-16 ms** | **79-84 ms** |
+
+Baseline is ~9 ms update (max 25) and ~75 ms latency (p95 78). With the stack on 8-11 those
+cores average 11-13 % busy, so there is headroom. A plain `docker exec` node start (not a
+roslaunch child) shows the same: unpinned 97-185 ms update, pinned to 8-11 or 1,3,5,7 14-18 ms.
+
+How: start roslaunch itself under `taskset -c 8-11`; children inherit it, and laserMapping's
+`launch-prefix="taskset -c 0,2,4,6"` moves FAST-LIO back. QuadRover robots get this from the
+systemd drop-in `deploy/slam-fastlio-quadrover.conf`. Anything started with `docker exec`
+(helpers, test scripts) should be run as `taskset -c 8-11 ...` too. Host processes outside the
+container are not covered.
+
 ## Not done yet
 
 - Two more runs per variant to put error bars on the numbers.
-- Moving the lidar driver, MAVROS, bridge and recorders to CPUs 8-11 (untested on the live stack).
+- ~~Moving the lidar driver, MAVROS, bridge and recorders to CPUs 8-11~~: done on QuadRover robots, see above.
 - Parallelizing more of FAST-LIO (two extra independent per-point loops are patched in a test
   workspace but not benchmarked).
