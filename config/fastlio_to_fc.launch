@@ -199,6 +199,13 @@
          land_mode_rover (21 = QRLand) by MAV_CMD_DO_SET_MODE, since Rover has no "LAND" and MAVROS
          refuses CMODE(n); any other FC still gets land_mode ("LAND"). -1 = always land_mode. -->
     <param name="land_mode_rover"     type="int"  value="21" />
+    <!-- No optical-flow failover while a QuadRover drives (owner 2026-10-20): flow cannot measure
+         ground speed from 8 cm up and the switch moves the heading reference (log 63 L run; SITL
+         SourceSwitchHeadingFlip: 180 deg pivot or a 4-7 m/s runaway). "Flying" = any copter motor
+         output (1-4) above motor_run_us; QuadRover shuts them down while driving. The SLAM restart
+         itself still runs (the bridge re-anchors). Copter FCs are unaffected. -->
+    <param name="no_failover_driving" type="bool" value="true" />
+    <param name="motor_run_us"        type="double" value="1050" />
     <!-- RC stream keepalive: re-request RC_CHANNELS from the FC on every mavros connect so
          /mavros/rc/in stays populated and the CH9 trigger survives reboots/mavros restarts
          (ArduPilot won't stream RC to the companion link on its own; SR0_RC_CHAN alone is not enough). -->

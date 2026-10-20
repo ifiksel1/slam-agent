@@ -93,7 +93,7 @@ except Exception:
     _HAVE_ODOM = False
 
 try:
-    from mavros_msgs.msg import StatusText, RCIn, State, DebugValue, Mavlink, VFR_HUD
+    from mavros_msgs.msg import StatusText, RCIn, RCOut, State, DebugValue, Mavlink, VFR_HUD
     from mavros_msgs.srv import SetMode, CommandLong, StreamRate
     _HAVE_MAVROS = True
 except Exception:
@@ -122,6 +122,23 @@ def land_command(fc_mav_type, land_mode, land_mode_rover):
     if fc_mav_type == _MAV_TYPE_GROUND_ROVER and int(land_mode_rover) >= 0:
         return ('custom', int(land_mode_rover))
     return ('name', land_mode)
+
+
+def failover_allowed(fc_mav_type, rc_out, rc_out_age_s, motor_run_us, enabled=True):
+    """may the EKF fail over to optical flow (SRC2) now?
+
+    Not while a QuadRover drives (owner 2026-10-20): flow cannot measure ground speed from 8 cm
+    up and the switch moves the heading reference, so log 63's L run paused and pivoted on it,
+    and SITL (SourceSwitchHeadingFlip) turned 180 deg and drove away, or ran away at 4-7 m/s.
+    QuadRover shuts its copter motors down (SHUT_DOWN) while driving and spins them in every
+    flight mode and Auto flight leg, so "flying" = any of outputs 1-4 above motor_run_us.
+    A non-Rover FC (Copter) or an FC not yet seen always may; so may a Rover FC whose outputs
+    have not been seen for 1 s (no data: keep the old behaviour)."""
+    if not enabled or fc_mav_type != _MAV_TYPE_GROUND_ROVER:
+        return True
+    if rc_out is None or rc_out_age_s > 1.0 or len(rc_out) < 4:
+        return True
+    return max(rc_out[:4]) > motor_run_us
 # Reported to the FC when latency is enabled but no number can be produced (no /Odometry, no
 # health, rejected samples). Large enough to trip any sane gate: unmeasurable is treated as bad,
 # matching _lat_arm_bad(), which also calls lat_ms=None bad. Note this is NOT how the FC-side gate
@@ -645,6 +662,11 @@ class DriftMonitor:
         # ...and the custom mode number used instead when the FC is Rover-based (QuadRover):
         # 21 = QRLand (owner 2026-10-20). -1 = always use land_mode. See land_command().
         self.land_mode_rover = int(g("~land_mode_rover", 21))
+        # no optical-flow failover while a QuadRover drives (failover_allowed())
+        self.no_failover_driving = bool(g("~no_failover_driving", True))
+        self.motor_run_us = float(g("~motor_run_us", 1050.0))
+        self._rc_out = None
+        self._rc_out_t = 0.0
         self._fc_mav_type = None    # HEARTBEAT.type of the FC (sysid fc_sysid, compid 1)
         self.fc_sysid = int(g("~fc_sysid", 1))
         self.statustext_period = float(g("~statustext_period", 2.0))
@@ -777,6 +799,9 @@ class DriftMonitor:
             rospy.Subscriber("/mavros/rc/in", RCIn, self._rc_in_cb, queue_size=10)
         if _HAVE_MAVROS:
             rospy.Subscriber("/mavros/state", State, self.state_cb, queue_size=10)
+        if _HAVE_MAVROS:
+            # copter motor outputs for failover_allowed()
+            rospy.Subscriber("/mavros/rc/out", RCOut, self._rc_out_cb, queue_size=5)
         if _HAVE_MAVROS:
             # EKF_STATUS_REPORT for the SP check, and the FC's HEARTBEAT type for land_command()
             rospy.Subscriber(self.mavlink_from_topic, Mavlink, self._mavlink_cb, queue_size=50)
@@ -1366,10 +1391,24 @@ class DriftMonitor:
             rospy.logwarn("drift_monitor: source failover disabled -> no source switch for latency")
 
     def _failover_worker(self):
+        self.failover_active = self._switch_to_of()
+
+    def _rc_out_cb(self, msg):
+        self._rc_out = list(msg.channels)
+        self._rc_out_t = time.time()
+
+    def _switch_to_of(self):
+        """fail the FC over to optical flow (SRC2) unless a QuadRover is driving
+        (failover_allowed); -> True if the FC is now on SRC2"""
+        if not failover_allowed(self._fc_mav_type, self._rc_out, time.time() - self._rc_out_t,
+                                self.motor_run_us, self.no_failover_driving):
+            rospy.logwarn("drift_monitor: SLAM fault while driving (copter motors off): no OF failover, EKF stays on SLAM")
+            self._send_statustext(_SEV_WARNING, "SLAM fault driving: no OF failover", force=True)
+            return False
         ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
-        self.failover_active = ok
         self._send_statustext(_SEV_CRITICAL,
                               "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
+        return ok
 
     # ---- shared response (drift CRITICAL, CH9, and latency escalation; branches on restart_mode) ----
     def _execute_restart(self, source):
@@ -1424,10 +1463,7 @@ class DriftMonitor:
             # failed, then LAND, then restart SLAM. If the switch is refused, LAND anyway: that is
             # the old behaviour, and still better than not landing. Never switched back to SRC1.
             if self.enable_source_failover and not self.failover_active:
-                ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
-                self.failover_active = ok
-                self._send_statustext(_SEV_CRITICAL,
-                                      "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
+                self.failover_active = self._switch_to_of()
             ok = self._command_land()
             self._send_statustext(_SEV_CRITICAL, "LANDING" if ok else "LAND cmd FAILED", force=True)
         else:
@@ -1435,10 +1471,7 @@ class DriftMonitor:
             # on OF while laserMapping re-inits. Switch the source FIRST, then drop vision (restart),
             # so the EKF never loses its position feed. Switched back SRC2->SRC1 on recovery (health_cb).
             if self.enable_source_failover and not self.failover_active:
-                ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
-                self.failover_active = ok
-                self._send_statustext(_SEV_CRITICAL,
-                                      "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
+                self.failover_active = self._switch_to_of()
         if self.enable_auto_restart and not self._suppress_node_kill:
             rospy.logwarn("drift_monitor: restarting [%s] (rosnode kill -> roslaunch respawns)", self.restart_nodes)
             try:
