@@ -109,6 +109,19 @@ except Exception:
 OK, WARN, CRITICAL = "OK", "WARN", "CRITICAL"
 _LEVEL = {OK: 0, WARN: 1, CRITICAL: 2}
 _EKF_STATUS_REPORT_MSGID = 193
+_HEARTBEAT_MSGID = 0
+_MAV_TYPE_GROUND_ROVER = 10     # MAV_TYPE of a Rover-based FC: QuadRover (copter flight on Rover)
+
+
+def land_command(fc_mav_type, land_mode, land_mode_rover):
+    """the FC request restart_mode="land" makes: ('custom', n) = MAV_CMD_DO_SET_MODE with custom
+    mode n for a Rover-based FC (QuadRover: QRLand = 21; MAVROS has no names for the QR modes and
+    its set_mode refuses "CMODE(n)", and "LAND" does not exist on Rover); otherwise ('name',
+    land_mode) through /mavros/set_mode (Copter: "LAND"). An FC not yet seen (no HEARTBEAT) gets
+    the name, which a Rover-based FC simply rejects."""
+    if fc_mav_type == _MAV_TYPE_GROUND_ROVER and int(land_mode_rover) >= 0:
+        return ('custom', int(land_mode_rover))
+    return ('name', land_mode)
 # Reported to the FC when latency is enabled but no number can be produced (no /Odometry, no
 # health, rejected samples). Large enough to trip any sane gate: unmeasurable is treated as bad,
 # matching _lat_arm_bad(), which also calls lat_ms=None bad. Note this is NOT how the FC-side gate
@@ -629,6 +642,11 @@ class DriftMonitor:
         self.enable_ch9_land = bool(g("~enable_ch9_land", False))          # CH9 switch drives the action
         self.restart_nodes = g("~restart_nodes", "/laserMapping /fastlio_mavros_bridge")
         self.land_mode = g("~land_mode", "LAND")   # FC flight mode used by restart_mode="land"
+        # ...and the custom mode number used instead when the FC is Rover-based (QuadRover):
+        # 21 = QRLand (owner 2026-10-20). -1 = always use land_mode. See land_command().
+        self.land_mode_rover = int(g("~land_mode_rover", 21))
+        self._fc_mav_type = None    # HEARTBEAT.type of the FC (sysid fc_sysid, compid 1)
+        self.fc_sysid = int(g("~fc_sysid", 1))
         self.statustext_period = float(g("~statustext_period", 2.0))
 
         # restart_mode selects the FC response run on trigger (drift CRITICAL, latency CRITICAL, CH9):
@@ -759,7 +777,8 @@ class DriftMonitor:
             rospy.Subscriber("/mavros/rc/in", RCIn, self._rc_in_cb, queue_size=10)
         if _HAVE_MAVROS:
             rospy.Subscriber("/mavros/state", State, self.state_cb, queue_size=10)
-        if _HAVE_MAVROS and self.enable_sp_check:
+        if _HAVE_MAVROS:
+            # EKF_STATUS_REPORT for the SP check, and the FC's HEARTBEAT type for land_command()
             rospy.Subscriber(self.mavlink_from_topic, Mavlink, self._mavlink_cb, queue_size=50)
         if self.enable_motion_check and _HAVE_MAVROS and _HAVE_MOTION_MSGS:
             rospy.Subscriber("/mavros/imu/data", Imu, self._imu_cb, queue_size=1)
@@ -797,7 +816,15 @@ class DriftMonitor:
 
     # ---- (5) EKF innovation and (6) motion intake. Clock is time.time(), as in health_cb ----
     def _mavlink_cb(self, msg):
-        if msg.msgid != _EKF_STATUS_REPORT_MSGID:
+        if msg.msgid == _HEARTBEAT_MSGID and msg.sysid == self.fc_sysid and msg.compid == 1:
+            # HEARTBEAT: custom_mode u32, then type u8 (MAV_TYPE); MAVLink2 trims zeros, so pad
+            raw = b"".join(struct.pack("<Q", w) for w in msg.payload64).ljust(9, b"\0")
+            if self._fc_mav_type != raw[4]:
+                rospy.loginfo("drift_monitor: FC HEARTBEAT type %d -> restart_mode=land sends %s",
+                              raw[4], land_command(raw[4], self.land_mode, self.land_mode_rover))
+            self._fc_mav_type = raw[4]
+            return
+        if msg.msgid != _EKF_STATUS_REPORT_MSGID or not self.enable_sp_check:
             return
         try:
             raw = b"".join(struct.pack("<Q", w) for w in msg.payload64).ljust(22, b"\0")  # MAVLink2 trims zeros
@@ -1422,11 +1449,28 @@ class DriftMonitor:
         self._send_statustext(_SEV_CRITICAL, "Restart in progress", force=True)
 
     def _command_land(self):
-        # restart_mode="land": set the FC flight mode to LAND via /mavros/set_mode. This is a
+        # restart_mode="land": set the FC flight mode to LAND via /mavros/set_mode (QRLand by number
+        # on a Rover-based FC, land_command()). This is a
         # FLIGHT-MODE CHANGE (unlike the OF source switch). Benign while disarmed (no motion);
         # commands a real descent when flying. Does NOT arm. Gated entirely by restart_mode.
         if not _HAVE_MAVROS:
             rospy.logerr("drift_monitor: restart_mode=land but mavros_msgs unavailable"); return False
+        kind, mode = land_command(self._fc_mav_type, self.land_mode, self.land_mode_rover)
+        if kind == 'custom':
+            # QuadRover: QRLand by number, MAV_CMD_DO_SET_MODE (176), param1 1 = custom mode
+            rospy.logwarn("drift_monitor: *** commanding FC custom mode %d (QRLand) ***", mode)
+            try:
+                rospy.wait_for_service("/mavros/cmd/command", timeout=3.0)
+                resp = rospy.ServiceProxy("/mavros/cmd/command", CommandLong)(
+                    broadcast=False, command=176, confirmation=0, param1=1.0, param2=float(mode),
+                    param3=0.0, param4=0.0, param5=0.0, param6=0.0, param7=0.0)
+                ok = bool(getattr(resp, "success", False))
+                if not ok:
+                    rospy.logerr("drift_monitor: custom mode %d REJECTED by FC (result=%s)",
+                                 mode, getattr(resp, "result", "?"))
+                return ok
+            except Exception as e:
+                rospy.logerr("drift_monitor: custom mode %d failed: %s", mode, e); return False
         rospy.logwarn("drift_monitor: *** commanding FC set_mode -> %s ***", self.land_mode)
         try:
             rospy.wait_for_service("/mavros/set_mode", timeout=3.0)
