@@ -162,6 +162,17 @@ _LAT_UNKNOWN_MS = 9999.0
 _SEV_WARNING, _SEV_CRITICAL = 4, 2  # MAV_SEVERITY
 
 
+def event_text(cause, *outcomes):
+    """the STATUSTEXT for one event: "<cause>: <outcome>, <outcome>". A QuadRover sends one message
+    per event, cause and outcome together: the SIYI app shows only the newest of a burst, so of
+    the four sent within 10 ms at a HOLD the pilot saw only the last (owner 2026-10-21, FC log 64).
+    With no cause (not a QuadRover) the outcomes alone, capitalised, as the old separate messages."""
+    text = ", ".join(outcomes)
+    if cause is None:
+        return text[:1].upper() + text[1:]
+    return cause + ": " + text if text else cause
+
+
 def mean(seq):
     # rolling average baseline (over OK scans)
     return (sum(seq) / len(seq)) if seq else 0.0
@@ -1105,22 +1116,25 @@ class DriftMonitor:
         self._lat_report_ms = _LAT_UNKNOWN_MS
         self.risk_pub.publish(String(
             data="CRITICAL | health_lost:%.1fs | eig=0(avg 0) matched=0(avg 0) | lat=no_health" % silent))
-        self._send_statustext(_SEV_CRITICAL, "SLAM node down %.0fs" % silent)
+        fire = (not self._health_wd_fired and self.enable_latency_critical
+                and now >= self._lat_blank_until)
+        failover = fire and self.enable_source_failover and not self.failover_active
+        if not (failover and self.quadrover):    # QuadRover: the failover's message says it (event_text)
+            self._send_statustext(_SEV_CRITICAL, "SLAM node down %.0fs" % silent)
 
         # One-shot lane-change to OF. Deliberately does NOT restart anything: roslaunch
         # respawn="true" already owns bringing laserMapping back, and a rosnode kill against a
         # dead node achieves nothing. Both modes: in "land" a dead laserMapping otherwise leaves
         # the EKF on SRC1 with no vision at all. No LAND here; the watchdog has never commanded
         # a flight mode. Recovery runs as usual ("land" stays on SRC2).
-        if (not self._health_wd_fired and self.enable_latency_critical
-                and now >= self._lat_blank_until):
+        if fire:
             self._health_wd_fired = True
             rospy.logwarn("drift_monitor: health lost -> OF (SRC2); respawn owns the restart")
             self._restart_lock = True
             self._refresh_interlock()
-            if self.enable_source_failover and not self.failover_active:
+            if failover:
                 self.failover_active = True
-                self._spawn(self._failover_worker)
+                self._spawn(self._failover_worker, "SLAM down" if self.quadrover else None)
 
     # ---- detection ----
     def health_cb(self, msg):
@@ -1276,12 +1290,18 @@ class DriftMonitor:
                 self.failover_active = False       # clear first so this cannot re-enter
                 self._spawn(self._set_ekf_source, self.src1_switch_pos, "SLAM (SRC1)")
                 recovery_msg = "Restart finished, back to SRC1"
+                plain_restart = False
             elif self.failover_active:
                 self.failover_active = False
                 recovery_msg = "SLAM back, staying on SRC2"
+                plain_restart = False
             else:
                 recovery_msg = "Restarted, ready to arm"
-            if self._drive_hold is not None:
+                plain_restart = True
+            # a held drive's "SLAM back: resuming AUTO" is this event's one message (event_text);
+            # read before the spawn, which clears _drive_hold
+            held = self._drive_hold is not None
+            if held:
                 self._spawn(self._resume_after_reset)
             self._restart_lock = False
             self._lat_no_restart = False
@@ -1289,7 +1309,8 @@ class DriftMonitor:
             self._lat_failover_at = None
             self._lat_land_fired = False
             self._refresh_interlock()
-            self._send_statustext(6, recovery_msg, force=True)   # MSG 4/4
+            if not (held and plain_restart):
+                self._send_statustext(6, recovery_msg, force=True)   # MSG 4/4
 
         if geom_raw == OK:
             self.base_eig.append(eig); self.base_matched.append(matched)
@@ -1411,27 +1432,36 @@ class DriftMonitor:
         self._lat_no_restart = True
         self._lat_escalated = False
         self._lat_failover_at = time.time()
-        self._send_statustext(_SEV_CRITICAL, "SLAM latency high, switching to OF", force=True)
+        cause = "SLAM latency high" if self.quadrover else None    # one message per event
+        if cause is None:
+            self._send_statustext(_SEV_CRITICAL, "SLAM latency high, switching to OF", force=True)
         # Both modes. "land" used to skip this, and the 5 s drain was then flown on stale SLAM
         # height: that is the FC log 233 climb (see restart_mode in __init__).
         if self.enable_source_failover and not self.failover_active:
             self.failover_active = True     # optimistic; the worker clears it if the FC refuses
-            self._spawn(self._failover_worker)
-        elif not self.enable_source_failover:
+            self._spawn(self._failover_worker, cause)
+            return
+        if not self.enable_source_failover:
             rospy.logwarn("drift_monitor: source failover disabled -> no source switch for latency")
+        if cause is not None:
+            self._send_statustext(_SEV_CRITICAL, event_text(
+                cause, "already on OF" if self.failover_active else "no failover"), force=True)
 
-    def _failover_worker(self):
-        self.failover_active = self._switch_to_of()
+    def _failover_worker(self, cause=None):
+        self.failover_active, severity, outcome = self._switch_to_of()
+        self._send_statustext(severity, event_text(cause, outcome), force=True)
 
     def _hold_for_reset(self):
-        """while driving an autonomous mode, HOLD through the SLAM reset (resumed on recovery)"""
+        """while driving an autonomous mode, HOLD through the SLAM reset (resumed on recovery);
+        -> the mode it resumes, or None if not holding"""
+        if self._drive_hold is not None:
+            return self._drive_hold[0]
         mode = self._mode
         resume = drive_hold_mode(self.quadrover, self._armed, mode, self.hold_driving_on_reset)
-        if resume is None or self._drive_hold is not None:
-            return
-        if self._set_custom_mode(ROVER_HOLD, "HOLD"):
-            self._drive_hold = (mode, resume)
-            self._send_statustext(_SEV_WARNING, "SLAM reset: HOLD, then back to %s" % mode, force=True)
+        if resume is None or not self._set_custom_mode(ROVER_HOLD, "HOLD"):
+            return None
+        self._drive_hold = (mode, resume)
+        return mode
 
     def _resume_after_reset(self):
         """SLAM healthy again: back to the held mode, unless the pilot changed mode or disarmed"""
@@ -1467,17 +1497,15 @@ class DriftMonitor:
 
     def _switch_to_of(self):
         """fail the FC over to optical flow (SRC2) unless a QuadRover is driving
-        (failover_allowed); -> True if the FC is now on SRC2"""
+        (failover_allowed); -> (True if the FC is now on SRC2, severity, outcome). The caller sends
+        the outcome (event_text), so each event is one message."""
         if not failover_allowed(self.quadrover, self._rc_out, time.time() - self._rc_out_t,
                                 self.motor_run_us, self.no_failover_driving):
             rospy.logwarn("drift_monitor: SLAM fault while driving (copter motors off): no OF failover, EKF stays on SLAM")
-            self._send_statustext(_SEV_WARNING, "SLAM fault driving: no OF failover", force=True)
-            self._hold_for_reset()
-            return False
+            held = self._hold_for_reset()
+            return False, _SEV_WARNING, "HOLD, then %s" % held if held else "driving, no OF"
         ok = self._set_ekf_source(self.src2_switch_pos, "OF (SRC2)")
-        self._send_statustext(_SEV_CRITICAL,
-                              "Switched to OF (SRC2)" if ok else "SRC2 switch FAILED", force=True)
-        return ok
+        return ok, _SEV_CRITICAL, "switched to OF (SRC2)" if ok else "SRC2 switch FAILED"
 
     # ---- shared response (drift CRITICAL, CH9, and latency escalation; branches on restart_mode) ----
     def _execute_restart(self, source):
@@ -1499,9 +1527,11 @@ class DriftMonitor:
                 rospy.logwarn("drift_monitor: %s came back %.1fs after the last restart "
                               "(cooldown %.0fs) -- holding on OF, not restarting again",
                               source, now - self._last_restart_at, self.restart_cooldown_sec)
-                self._send_statustext(_SEV_CRITICAL, "Still degraded, holding on OF", force=True)
+                if not self.quadrover:
+                    self._send_statustext(_SEV_CRITICAL, "Still degraded, holding on OF", force=True)
             self._suppress_node_kill = True
-            self._spawn(self._restart_worker)
+            self._spawn(self._restart_worker, None if not self.quadrover else
+                        "SLAM degraded, holding on OF" if self.failover_active else "SLAM degraded")
             return
 
         self._cooldown_announced = False
@@ -1517,30 +1547,47 @@ class DriftMonitor:
         # the cold start that follows it as a fresh fault.
         self._lat_blank_until = time.time() + self.lat_restart_blank_sec
         self._health_wd_fired = True                      # suppress the watchdog for this outage
-        # MSG 1/4: restart triggered (source-dependent text)
-        self._send_statustext(_SEV_CRITICAL,
-                              "Restart triggered manually" if manual else "Drift detected, restart triggered",
-                              force=True)
+        # MSG 1/4: restart triggered (source-dependent text); a QuadRover's worker sends it with
+        # MSG 2/4 and 3/4 as one message (event_text)
+        if not self.quadrover:
+            self._send_statustext(_SEV_CRITICAL,
+                                  "Restart triggered manually" if manual else "Drift detected, restart triggered",
+                                  force=True)
         # The FC action and the node kill must stay ORDERED - source switch FIRST, then drop
         # vision - so they run together on one worker thread rather than being split.
-        self._spawn(self._restart_worker)
+        self._spawn(self._restart_worker, ("CH9 restart" if manual else "Drift restart")
+                    if self.quadrover else None)
 
-    def _restart_worker(self):
+    def _restart_worker(self, cause=None):
+        # With a cause (QuadRover) MSG 1-3/4 go out as one message at the end (event_text).
+        outcomes = []
+
+        def report(severity, outcome):
+            if cause is None:
+                self._send_statustext(severity, event_text(None, outcome), force=True)
+            else:
+                outcomes.append(outcome)
+
+        def switch_to_of():
+            self.failover_active, severity, outcome = self._switch_to_of()
+            report(severity, outcome)
+
         # MSG 2/4: mode-specific FC action.
         if self.restart_mode == "land":
             # SRC2 FIRST, so LAND descends on rangefinder height rather than on the SLAM that just
             # failed, then LAND, then restart SLAM. If the switch is refused, LAND anyway: that is
             # the old behaviour, and still better than not landing. Never switched back to SRC1.
             if self.enable_source_failover and not self.failover_active:
-                self.failover_active = self._switch_to_of()
+                switch_to_of()
             ok = self._command_land()
-            self._send_statustext(_SEV_CRITICAL, "LANDING" if ok else "LAND cmd FAILED", force=True)
+            # "LAND FAILED" keeps the longest combined message within the 49 characters
+            report(_SEV_CRITICAL, "LANDING" if ok else "LAND cmd FAILED" if cause is None else "LAND FAILED")
         else:
             # "of": lane-change to Optical Flow (SRC2) INSTEAD OF LANDing, so the vehicle keeps flying
             # on OF while laserMapping re-inits. Switch the source FIRST, then drop vision (restart),
             # so the EKF never loses its position feed. Switched back SRC2->SRC1 on recovery (health_cb).
             if self.enable_source_failover and not self.failover_active:
-                self.failover_active = self._switch_to_of()
+                switch_to_of()
         if self.enable_auto_restart and not self._suppress_node_kill:
             rospy.logwarn("drift_monitor: restarting [%s] (rosnode kill -> roslaunch respawns)", self.restart_nodes)
             try:
@@ -1548,7 +1595,10 @@ class DriftMonitor:
             except Exception as e:
                 rospy.logerr("drift_monitor: restart failed: %s", e)
         # MSG 3/4: restart in progress
-        self._send_statustext(_SEV_CRITICAL, "Restart in progress", force=True)
+        if cause is None:
+            self._send_statustext(_SEV_CRITICAL, "Restart in progress", force=True)
+        else:
+            self._send_statustext(_SEV_CRITICAL, event_text(cause, *outcomes), force=True)
 
     def _command_land(self):
         # restart_mode="land": set the FC flight mode to LAND via /mavros/set_mode (QRLand by number
