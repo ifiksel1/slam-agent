@@ -7,8 +7,9 @@ QuadRover port of land_speed_schedule.lua (Copter). Same behaviour, same LSS_ pa
 WHAT IT DOES
   In every QuadRover landing, while armed: descend at LSS_HI_SPD (50 cm/s) until the rangefinder
   reads below LSS_LO_ALT (50 cm), then at LSS_LO_SPD (25 cm/s) to touchdown. The landings are
-  QRLand (mode 21), Auto's VTOL_LAND (mode 10) and Guided's land (mode 15); QRRTL lands by
-  handing over to QRLand at Q_LAND_ALT, so it is shaped there (owner 2026-10-21: all landings).
+  QRLand (mode 21), QRRTL (mode 20, which lands itself as Copter's RTL since 2026-10-22), Auto's
+  VTOL_LAND (mode 10) and Guided's land (mode 15) (owner 2026-10-21: all landings). QRSmartRTL
+  (mode 23) is not shaped: it lands on the way back and drives on.
   Outside those modes it puts Q_LAND_SPD and Q_LAND_ALT back to the values they had at boot.
 
 HOW IT DRIVES THE LANDINGS
@@ -31,8 +32,8 @@ SAFETY PROPERTIES (unchanged from the Copter script)
   * The script commands nothing: no mode change, no arming. On touchdown QuadRover itself switches
     QRLand to Manual, Auto disarms or drives on, Guided drives on; outside the three modes (or
     disarmed) the script restores both params.
-  * QRRTL is left alone (its landing is QRLand): holding Q_LAND_ALT there would move its
-    hand-over to QRLand to the top of its descent.
+  * In QRRTL the params are held for the whole mode: they act only in its landing (QRRTL no
+    longer hands over to QRLand at Q_LAND_ALT).
 
 REQUIRES  SCR_ENABLE 1, RNGFND1_ORIENT 25 (down), QuadRover firmware (Q_LAND_SPD / Q_LAND_ALT).
 --]]
@@ -42,8 +43,8 @@ local PARAM_TABLE_CANDIDATES = {93, 117, 151, 177, 197}
 local PARAM_TABLE_PREFIX = "LSS_"
 local RUN_INTERVAL_MS = 50           -- 20 Hz; at 0.5 m/s that is 2.5 cm between looks
 
--- the modes whose landings are shaped (QRRTL lands in QRLand)
-local MODES = { [21] = "QRLand", [10] = "Auto", [15] = "Guided" }
+-- the modes whose landings are shaped
+local MODES = { [21] = "QRLand", [20] = "QRRTL", [10] = "Auto", [15] = "Guided" }
 local RELEASE_CM = 30                -- LO released above LSS_LO_ALT + this (takeoff, driving away)
 local ROTATION_PITCH_270 = 25        -- downward
 local RNG_GOOD = 4
