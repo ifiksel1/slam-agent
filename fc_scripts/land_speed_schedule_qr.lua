@@ -1,12 +1,22 @@
 --[[
-land_speed_schedule_qr.lua -- two-stage landing descent on the downward rangefinder, for QuadRover.
+land_speed_schedule_qr.lua -- staged landing descent on the downward rangefinder, for QuadRover.
 
-QuadRover port of land_speed_schedule.lua (Copter). Same behaviour, same LSS_ parameters
-(cm/s, cm): install ONE of the two, never both (they share the LSS_ table).
+QuadRover port of land_speed_schedule.lua (Copter), with a final stage and a touchdown stage
+(owner 2026-10-23): same LSS_ parameters (cm/s, cm) plus LSS_FI_SPD / LSS_FI_ALT and
+LSS_TD_SPD / LSS_TD_ALT: install ONE of the two, never both (they share the LSS_ table).
 
 WHAT IT DOES
   In every QuadRover landing, while armed: descend at LSS_HI_SPD (50 cm/s) until the rangefinder
-  reads below LSS_LO_ALT (50 cm), then at LSS_LO_SPD (25 cm/s) to touchdown. The landings are
+  reads below LSS_LO_ALT (50 cm), then at LSS_LO_SPD (25 cm/s) until it reads below LSS_FI_ALT
+  (25 cm), then at LSS_FI_SPD (15 cm/s), and below LSS_TD_ALT (13 cm, the robot reads 10-12 cm
+  at rest) at LSS_TD_SPD (50 cm/s) to touchdown.
+  Why the touchdown stage (FC logs 82-84): with the slow final speed as the descent target at
+  contact, the position controller hardly sees the ground stop it and keeps near-hover thrust
+  for 0.3 s or more, and the robot rocks on its springy gear. A pilot landing in QRLoiter
+  holds the stick down, so the target is 0.34-0.57 m/s at contact, the controller drops the
+  thrust within ~0.15 s and the robot is planted. LSS_TD_SPD does the same: the approach stays
+  gentle, and at the ground the target steps to 50 cm/s. LSS_TD_ALT 0 turns the stage off.
+  The landings are
   QRLand (mode 21), QRRTL (mode 20, which lands itself as Copter's RTL since 2026-10-22), Auto's
   VTOL_LAND (mode 10) and Guided's land (mode 15) (owner 2026-10-21: all landings). QRSmartRTL
   (mode 23) is not shaped: it lands on the way back and drives on.
@@ -26,8 +36,8 @@ SAFETY PROPERTIES (unchanged from the Copter script)
     "Write Params" from a GCS mid-QRLand.
   * Rangefinder not Good -> HI. The MTF-01 reports OutOfRangeLow with distance 0 when it loses
     the ground at height (FC log 231), so status 2 is NOT treated as "close to the ground".
-  * Once LO is latched it stays latched until the mode ends, or the rangefinder reads above
-    LSS_LO_ALT + RELEASE_CM: Auto and Guided also drive (the rangefinder reads ~8 cm on the
+  * Once LO (and FI, TD) is latched it stays latched until the mode ends, or the rangefinder
+    reads above LSS_LO_ALT + RELEASE_CM (all released together): Auto and Guided also drive (the rangefinder reads ~8 cm on the
     ground), and take off again, so the next landing starts at HI. The gap is the hysteresis.
   * The script commands nothing: no mode change, no arming. On touchdown QuadRover itself switches
     QRLand to Manual, Auto disarms or drives on, Guided drives on; outside the three modes (or
@@ -52,7 +62,7 @@ local QR_HOLD_ALT_M = 1000           -- Q_LAND_ALT while active: whole descent o
 
 local PARAM_TABLE_KEY
 for _, key in ipairs(PARAM_TABLE_CANDIDATES) do
-   if param:add_table(key, PARAM_TABLE_PREFIX, 4) then
+   if param:add_table(key, PARAM_TABLE_PREFIX, 8) then
       PARAM_TABLE_KEY = key
       break
    end
@@ -75,10 +85,19 @@ end
 -- LSS_HI_SPD:  descent above LSS_LO_ALT, cm/s.
 -- LSS_LO_SPD:  descent below LSS_LO_ALT, cm/s.
 -- LSS_LO_ALT:  rangefinder distance at which to slow down, cm.
+-- LSS_FI_SPD:  final descent below LSS_FI_ALT, cm/s.
+-- LSS_FI_ALT:  rangefinder distance at which to slow down again, cm (below LSS_LO_ALT).
+-- LSS_TD_SPD:  touchdown descent target below LSS_TD_ALT, cm/s.
+-- LSS_TD_ALT:  rangefinder distance of the touchdown stage, cm (just above the resting reading);
+--              0 = no touchdown stage.
 local LSS_ENABLE = add_param("ENABLE", 1, 1)
 local LSS_HI_SPD = add_param("HI_SPD", 2, 50)
 local LSS_LO_SPD = add_param("LO_SPD", 3, 25)
 local LSS_LO_ALT = add_param("LO_ALT", 4, 50)
+local LSS_FI_SPD = add_param("FI_SPD", 5, 15)
+local LSS_FI_ALT = add_param("FI_ALT", 6, 25)
+local LSS_TD_SPD = add_param("TD_SPD", 7, 50)
+local LSS_TD_ALT = add_param("TD_ALT", 8, 13)
 
 if add_param_failed then
    gcs:send_text(0, "LSS: could not add params - land speed schedule INACTIVE")
@@ -94,6 +113,9 @@ local saved_alt = Q_LAND_ALT:get()
 
 local active = false      -- we currently own Q_LAND_SPD / Q_LAND_ALT
 local low_latched = false -- went below LSS_LO_ALT, not yet back above LSS_LO_ALT + RELEASE_CM
+local final_latched = false -- went below LSS_FI_ALT, released with low_latched
+local td_latched = false  -- went below LSS_TD_ALT, released with low_latched
+local announce = false    -- this LO latch came from a descent (its FI step is news too)
 local active_mode = nil   -- the mode we are shaping
 local came_down = false   -- read above LSS_LO_ALT since the schedule started or LO was released
 
@@ -110,6 +132,9 @@ local function restore()
       active = false
    end
    low_latched = false
+   final_latched = false
+   td_latched = false
+   announce = false
    active_mode = nil
    came_down = false
 end
@@ -127,6 +152,8 @@ function update()
 
    local hi = LSS_HI_SPD:get()
    local lo = LSS_LO_SPD:get()
+   local fi = LSS_FI_SPD:get()
+   local td = LSS_TD_SPD:get()
 
    if rangefinder:status_orient(ROTATION_PITCH_270) == RNG_GOOD then
       -- 4.7 returns metres as a float; round so the %d below gets an integer
@@ -136,12 +163,27 @@ function update()
          low_latched = true
          -- on the ground (driving in Auto/Guided) it latches quietly: only a descent through
          -- LSS_LO_ALT is news
-         if came_down then
+         announce = came_down
+         if announce then
             gcs:send_text(6, string.format("LSS: %d cm, slowing to %.0f cm/s", dist_cm, lo))
          end
          came_down = false
       elseif low_latched and dist_cm > LSS_LO_ALT:get() + RELEASE_CM then
          low_latched = false
+         final_latched = false
+         td_latched = false
+      end
+      if low_latched and not final_latched and dist_cm < LSS_FI_ALT:get() then
+         final_latched = true
+         if announce then
+            gcs:send_text(6, string.format("LSS: %d cm, slowing to %.0f cm/s", dist_cm, fi))
+         end
+      end
+      if final_latched and not td_latched and LSS_TD_ALT:get() > 0 and dist_cm < LSS_TD_ALT:get() then
+         td_latched = true
+         if announce then
+            gcs:send_text(6, string.format("LSS: %d cm, touchdown at %.0f cm/s", dist_cm, td))
+         end
       end
       if dist_cm >= LSS_LO_ALT:get() then
          came_down = true
@@ -151,11 +193,20 @@ function update()
    if not active then
       active = true
       active_mode = mode
-      gcs:send_text(6, string.format("LSS: %s landings at %.0f cm/s, %.0f below %.0f cm",
-                                     MODES[mode], hi, lo, LSS_LO_ALT:get()))
+      -- one STATUSTEXT holds 50 characters
+      gcs:send_text(6, string.format("LSS: %s %.0f/%.0f/%.0f cm/s at %.0f/%.0f cm",
+                                     MODES[mode], hi, lo, fi, LSS_LO_ALT:get(), LSS_FI_ALT:get()))
    end
    set_if_changed(Q_LAND_ALT, QR_HOLD_ALT_M)
-   set_if_changed(Q_LAND_SPD, (low_latched and lo or hi) * 0.01)
+   local spd = hi
+   if td_latched then
+      spd = td
+   elseif final_latched then
+      spd = fi
+   elseif low_latched then
+      spd = lo
+   end
+   set_if_changed(Q_LAND_SPD, spd * 0.01)
 
    return update, RUN_INTERVAL_MS
 end
