@@ -233,4 +233,5 @@ See `docs/AGENT_TEAM.md` for full architecture documentation.
 | `docs/phases/*.md` | Individual phase instructions |
 | `docs/troubleshooting/*.md` | Per-issue troubleshooting guides |
 | `scripts/install_slam_integration.sh` | Automated installation orchestrator |
+| `scripts/flight_routine.py` | QuadRover automated flight test routine in Guided (takeoff, pitch/roll moves, yaw, climb, diagonals, orbits, attitude doublets, land), run from revolute-gui's Testing page; never arms. `--dry-run` shows the plan. SITL-tested by the ardupilot autotest `FlightRoutineScript` |
 | `docs/SLAM_ARDUPILOT_INTEGRATION_GUIDE.md` | Deep technical reference |
