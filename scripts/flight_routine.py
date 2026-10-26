@@ -10,8 +10,11 @@ switched on in the config, in a fixed order:
 It never arms. Any mode other than GUIDED, or a disarm, ends the run at once (the pilot takes over
 with ch7 mid = QRLoiter). SIGINT = hold: hover where it is and end. SIGUSR1 = land now.
 
-Every move streams position + velocity targets along a straight line at the routine speed and then
-holds until settled, so the speed is the routine's, not Q_WP_SPD. Doublets are attitude targets
+Every move streams position, velocity and acceleration targets along a smooth speed profile
+(cosine ramps up to the routine speed and down again, see Profile) and then holds until settled,
+so the speed is the routine's, not Q_WP_SPD. The targets agree with each other, so the FC's
+position controller has nothing to catch up: a target that jumped straight to full speed made the
+robot surge to twice the speed, stall half way and overshoot the end (robot log 98). Doublets are attitude targets
 with thrust 0.5, which QuadRover's Guided reads as "hold height" (Q_GUID_OPTIONS 0).
 
 Output: one JSON object per line on stdout (events), for revolute-gui's Testing page.
@@ -36,6 +39,7 @@ DEFAULTS = {
     'height_m': 1.5,          # takeoff height above the liftoff point
     'distance_m': 1.0,        # pitch / roll moves and diagonals
     'speed_ms': 0.5,          # every move and the orbits
+    'accel_mss': 0.5,         # peak acceleration of the speed ramps
     'climb_m': 0.5,           # up and down from the takeoff height
     'yaw_deg': 90.0,          # yaw turns each way
     'yaw_rate_degs': 30.0,
@@ -77,7 +81,7 @@ def merge_config(cfg):
             out['parts'].update({p: bool(on) for p, on in v.items() if p in out['parts']})
         elif k in out:
             out[k] = v
-    for k in ('height_m', 'distance_m', 'speed_ms', 'climb_m', 'yaw_deg', 'yaw_rate_degs',
+    for k in ('height_m', 'distance_m', 'speed_ms', 'accel_mss', 'climb_m', 'yaw_deg', 'yaw_rate_degs',
               'orbit_radius_m', 'doublet_deg', 'doublet_yaw_deg', 'doublet_s', 'max_height_m',
               'min_height_m', 'battery_min_v'):
         out[k] = float(out[k])
@@ -152,7 +156,7 @@ def build_plan(cfg):
     if cfg['land']:
         steps.append({'part': 'land', 'name': 'land', 'kind': 'land'})
     else:
-        steps.append({'part': 'hold', 'name': 'hold for the pilot', 'kind': 'hold'})
+        steps.append({'part': 'hold', 'name': 'hover until the pilot takes over or Land now', 'kind': 'hold'})
 
     radius = 0.0
     for s in steps:
@@ -169,6 +173,8 @@ def build_plan(cfg):
         problems.append('plan goes down to %.2f m, below the min height %.2f m' % (bottom, cfg['min_height_m']))
     if cfg['speed_ms'] <= 0 or cfg['speed_ms'] > 2.0:
         problems.append('speed %.2f m/s outside 0-2 m/s' % cfg['speed_ms'])
+    if cfg['accel_mss'] < 0.1 or cfg['accel_mss'] > 2.0:
+        problems.append('acceleration %.2f m/s/s outside 0.1-2 m/s/s' % cfg['accel_mss'])
     if cfg['orbit_radius_m'] < 0.5 and p['orbits']:
         problems.append('orbit radius under 0.5 m')
     if cfg['doublet_deg'] > 15 or cfg['doublet_yaw_deg'] > 45:
@@ -186,17 +192,19 @@ class MavrosBackend:
 
     def __init__(self):
         import rospy
-        from geometry_msgs.msg import PoseStamped
+        from geometry_msgs.msg import PoseStamped, TwistStamped
         from mavros_msgs.msg import AttitudeTarget, PositionTarget, State, StatusText
         from mavros_msgs.srv import CommandLong
         from nav_msgs.msg import Odometry
         from sensor_msgs.msg import BatteryState
         self.rospy, self.PositionTarget, self.AttitudeTarget = rospy, PositionTarget, AttitudeTarget
-        self.S = {'state': None, 'pose': None, 'volt': None, 'odom_t': None}
+        self.S = {'state': None, 'pose': None, 'vel': None, 'volt': None, 'odom_t': None}
         self.texts = []
         rospy.init_node('flight_routine', anonymous=True, disable_signals=True)
         rospy.Subscriber('/mavros/state', State, lambda m: self.S.__setitem__('state', m))
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped, lambda m: self.S.__setitem__('pose', m))
+        rospy.Subscriber('/mavros/local_position/velocity_local', TwistStamped,
+                         lambda m: self.S.__setitem__('vel', m.twist.linear))
         rospy.Subscriber('/mavros/battery', BatteryState, lambda m: self.S.__setitem__('volt', m.voltage))
         rospy.Subscriber('/mavros/statustext/recv', StatusText, lambda m: self.texts.append(m.text))
         rospy.Subscriber('/Odometry', Odometry, lambda m: self.S.__setitem__('odom_t', time.time()))
@@ -224,6 +232,10 @@ class MavrosBackend:
         roll, pitch, yaw = quat_to_euler(q.w, q.x, q.y, q.z)     # ENU/FLU
         return p.position.x, p.position.y, p.position.z, yaw, roll, -pitch
 
+    def velocity(self):
+        v = self.S['vel']
+        return (v.x, v.y, v.z) if v is not None else (0.0, 0.0, 0.0)
+
     def voltage(self):
         return self.S['volt']
 
@@ -236,13 +248,14 @@ class MavrosBackend:
                        param4=0, param5=0, param6=0, param7=p7)
         return bool(res.success)
 
-    def pos_target(self, e, n, u, ve, vn, vu, yaw):
+    def pos_target(self, e, n, u, ve, vn, vu, yaw, ae=0.0, an=0.0, au=0.0):
         m = self.PositionTarget()
         m.header.stamp = self.rospy.Time.now()
         m.coordinate_frame = self.PositionTarget.FRAME_LOCAL_NED      # values in ENU; MAVROS converts
-        m.type_mask = 64 | 128 | 256 | 2048                            # ignore accel and yaw rate
+        m.type_mask = 2048                                              # ignore yaw rate
         m.position.x, m.position.y, m.position.z = e, n, u
         m.velocity.x, m.velocity.y, m.velocity.z = ve, vn, vu
+        m.acceleration_or_force.x, m.acceleration_or_force.y, m.acceleration_or_force.z = ae, an, au
         m.yaw = yaw
         self.sp_pos.publish(m)
 
@@ -335,6 +348,10 @@ class MavlinkBackend:
         lp, att = self.st['lp'], self.st['att']
         return lp.y, lp.x, -lp.z, wrap_pi(math.pi / 2 - att.yaw), att.roll, att.pitch
 
+    def velocity(self):
+        lp = self.st['lp']
+        return lp.vy, lp.vx, -lp.vz
+
     def voltage(self):
         return self.st['volt']
 
@@ -351,9 +368,9 @@ class MavlinkBackend:
                 return self.acks[cmd] == 0
         return False
 
-    def pos_target(self, e, n, u, ve, vn, vu, yaw):
+    def pos_target(self, e, n, u, ve, vn, vu, yaw, ae=0.0, an=0.0, au=0.0):
         self.m.mav.set_position_target_local_ned_send(
-            0, 1, 1, 1, 64 | 128 | 256 | 2048, n, e, -u, vn, ve, -vu, 0, 0, 0,
+            0, 1, 1, 1, 2048, n, e, -u, vn, ve, -vu, an, ae, -au,
             wrap_pi(math.pi / 2 - yaw), 0)
 
     def att_target(self, roll, pitch, yaw):
@@ -385,6 +402,41 @@ def quat_to_euler(w, x, y, z):
 # The routine
 # ---------------------------------------------------------------------------------------------
 
+class Profile:
+    """Distance, speed and acceleration along a path of length dist against time: a cosine ramp
+    up to speed v (peak acceleration a), a cruise, and the same ramp down. A path too short for
+    both ramps never reaches v. at(t) -> (s, ds/dt, d2s/dt2); duration is the time to the end."""
+
+    def __init__(self, dist, v, a):
+        self.dist = dist
+        if dist <= 1e-6:
+            self.v = self.tr = self.tc = self.duration = 0.0
+            return
+        # ramp speed v (1 - cos(pi t / tr)) / 2 peaks at acceleration v pi / (2 tr) = a and covers v tr / 2
+        if v * v * math.pi / (2 * a) > dist:
+            v = math.sqrt(2 * a * dist / math.pi)
+        self.v = v
+        self.tr = v * math.pi / (2 * a)
+        self.tc = (dist - v * self.tr) / v
+        self.duration = 2 * self.tr + self.tc
+
+    def _ramp(self, t):
+        ph = math.pi * t / self.tr
+        return (self.v / 2 * (t - self.tr / math.pi * math.sin(ph)), self.v / 2 * (1 - math.cos(ph)),
+                self.v * math.pi / (2 * self.tr) * math.sin(ph))
+
+    def at(self, t):
+        if self.duration <= 0.0:
+            return self.dist, 0.0, 0.0
+        t = min(max(t, 0.0), self.duration)
+        if t < self.tr:
+            return self._ramp(t)
+        if t < self.tr + self.tc:
+            return self.v * self.tr / 2 + self.v * (t - self.tr), self.v, 0.0
+        s, v, a = self._ramp(self.duration - t)
+        return self.dist - s, v, -a
+
+
 class Stop(Exception):
     """ends the run: reason, and whether it is a fault"""
 
@@ -393,12 +445,46 @@ class Stop(Exception):
         self.reason, self.fault = reason, fault
 
 
+class Track:
+    """How a move was flown, from the vehicle's own velocity: peak speed, slowest speed in the
+    middle third of the move (a surge-and-stall shows here), and how far it ran past the end
+    point along the line."""
+
+    def __init__(self, be, start, end, t_move, speed_ms):
+        self.be, self.t_move, self.speed_ms = be, t_move, speed_ms
+        self.t0 = be.now()
+        d = [b - a for a, b in zip(start, end)]
+        self.dist = math.sqrt(sum(x * x for x in d))
+        self.start = start
+        self.unit = [x / self.dist for x in d] if self.dist > 1e-6 else None
+        self.peak, self.mid_min, self.over = 0.0, None, 0.0
+
+    def sample(self):
+        t = self.be.now() - self.t0
+        speed = math.sqrt(sum(v * v for v in self.be.velocity()))
+        self.peak = max(self.peak, speed)
+        if self.t_move / 3 <= t <= 2 * self.t_move / 3:
+            self.mid_min = speed if self.mid_min is None else min(self.mid_min, speed)
+        if self.unit is not None and t >= self.t_move / 2:
+            pos = self.be.pose()[:3]
+            along = sum((p - a) * u for p, a, u in zip(pos, self.start, self.unit))
+            self.over = max(self.over, along - self.dist)
+
+    def result(self):
+        out = {'speed_ms': round(self.speed_ms, 2), 'peak_ms': round(self.peak, 2),
+               'mid_min_ms': round(self.mid_min if self.mid_min is not None else self.peak, 2)}
+        if self.unit is not None:
+            out['overshoot_m'] = round(self.over, 2)
+        return out
+
+
 class Routine:
     def __init__(self, be, cfg):
         self.be, self.cfg = be, cfg
         self.flag = None                  # 'hold' or 'land', set by a signal
         self.in_guided = False
         self.target = None                # the last commanded (e, n, u, yaw)
+        self.track = None                 # the move being flown, sampled on every tick
 
     # --- checks run on every tick ----------------------------------------------------------
     def tick(self):
@@ -407,6 +493,8 @@ class Routine:
         armed, mode = self.be.armed_mode()
         if not armed:
             raise Stop('disarmed')
+        if self.track is not None:
+            self.track.sample()
         if self.in_guided and mode != 'GUIDED':
             raise Stop('pilot took over (%s)' % mode)
         if self.flag == 'hold':
@@ -450,26 +538,35 @@ class Routine:
             self.be.wait(STREAM_DT)
 
     def fly_line(self, e1, n1, u1, yaw1, what):
+        """a straight move and/or a turn on one smooth profile: whichever of the two takes
+        longer at its own speed sets the pace, and the other follows the same fraction"""
         e0, n0, u0, yaw0 = self.target
-        dist = math.sqrt((e1 - e0) ** 2 + (n1 - n0) ** 2 + (u1 - u0) ** 2)
-        v = self.cfg['speed_ms']
+        d = (e1 - e0, n1 - n0, u1 - u0)
+        dist = math.sqrt(sum(x * x for x in d))
         dyaw = wrap_pi(yaw1 - yaw0)
-        t_move = max(dist / v, abs(math.degrees(dyaw)) / self.cfg['yaw_rate_degs'], STREAM_DT)
+        move = Profile(dist, self.cfg['speed_ms'], self.cfg['accel_mss'])
+        rate = self.cfg['yaw_rate_degs']
+        turn = Profile(abs(math.degrees(dyaw)), rate, rate)          # about 1.6 s up to the yaw rate
+        prof = move if move.duration >= turn.duration else turn
+        span = prof.dist
+        self.track = Track(self.be, (e0, n0, u0), (e1, n1, u1), prof.duration,
+                           move.v * move.duration / prof.duration if move.duration > 0 else 0.0)
         t0 = self.be.now()
         while True:
             self.tick()
-            s = min(1.0, (self.be.now() - t0) / t_move)
-            if dist > 1e-6:
-                k = v / dist if s < 1.0 else 0.0
-                ve, vn, vu = (e1 - e0) * k, (n1 - n0) * k, (u1 - u0) * k
-            else:
-                ve = vn = vu = 0.0
-            self.be.pos_target(e0 + (e1 - e0) * s, n0 + (n1 - n0) * s, u0 + (u1 - u0) * s, ve, vn, vu,
-                               wrap_pi(yaw0 + dyaw * s))
-            if s >= 1.0:
+            t = self.be.now() - t0
+            s, sd, sdd = prof.at(t)
+            f, fd, fdd = (s / span, sd / span, sdd / span) if span > 1e-9 else (1.0, 0.0, 0.0)
+            self.be.pos_target(e0 + d[0] * f, n0 + d[1] * f, u0 + d[2] * f,
+                               d[0] * fd, d[1] * fd, d[2] * fd, wrap_pi(yaw0 + dyaw * f),
+                               d[0] * fdd, d[1] * fdd, d[2] * fdd)
+            if t >= prof.duration:
                 break
             self.be.wait(STREAM_DT)
-        return self.settle(e1, n1, u1, yaw1, t_move + 15, what)
+        try:
+            return self.settle(e1, n1, u1, yaw1, prof.duration + 15, what)
+        finally:
+            self.last_track, self.track = self.track.result(), None
 
     def land(self):
         if not self.be.command(21):                                      # MAV_CMD_NAV_LAND
@@ -496,14 +593,23 @@ class Routine:
             if time.time() - t0 > 15:
                 raise Stop('no state or position from the FC', fault=True)
             self.be.wait(0.1)
+        # a fresh subscription has not had its first odometry yet: wait for one before refusing
+        t0 = time.time()
+        while self.cfg['slam_check'] and not self.be.slam_ok():
+            if time.time() - t0 > 3:
+                raise Stop('SLAM odometry is stale (none in 3 s)', fault=True)
+            self.be.wait(0.1)
         armed, mode = self.be.armed_mode()
         if not armed:
             raise Stop('not armed: the pilot arms in MANUAL first', fault=True)
+        t0 = time.time()
+        while self.cfg['battery_min_v'] > 0 and self.be.voltage() is None:      # same race as the odometry
+            if time.time() - t0 > 3:
+                raise Stop('no battery voltage from the FC in 3 s', fault=True)
+            self.be.wait(0.1)
         v = self.be.voltage()
-        if self.cfg['battery_min_v'] > 0 and v is not None and 0 < v < self.cfg['battery_min_v']:
+        if self.cfg['battery_min_v'] > 0 and 0 < v < self.cfg['battery_min_v']:
             raise Stop('battery %.1f V below %.1f V' % (v, self.cfg['battery_min_v']), fault=True)
-        if self.cfg['slam_check'] and not self.be.slam_ok():
-            raise Stop('SLAM odometry is stale', fault=True)
         emit('preflight', armed=armed, mode=mode, battery_v=v, envelope=env)
 
     def run(self, steps):
@@ -531,7 +637,7 @@ class Routine:
             e, n, u = point(st)
             err, _ = self.fly_line(e, n, u, yaw0, st['name'])
             pe, pn, pu, _, _, _ = self.be.pose()
-            return {'pos_err_m': err, 'height_m': round(pu - geo['ground_u'], 2)}
+            return dict({'pos_err_m': err, 'height_m': round(pu - geo['ground_u'], 2)}, **self.last_track)
         if k == 'yaw':
             e, n, u = point({'fwd': st.get('hold_fwd', 0.0)})
             yaw = wrap_pi(yaw0 + math.radians(st['yaw_deg']))
@@ -545,8 +651,17 @@ class Routine:
             self.land()
             return {}
         if k == 'hold':
-            self.hold_here()
-            raise Stop('routine done: holding for the pilot')
+            self.hover_for_pilot()
+
+    def hover_for_pilot(self):
+        """Hover at the last target and keep watching, so Land now still works: tick() ends the
+        run on a takeover or a disarm, lands on Land now, and stops on Hold. The position target
+        never times out; it is resent at 2 Hz all the same."""
+        e, n, u, yaw = self.target
+        while True:
+            self.tick()
+            self.be.pos_target(e, n, u, 0, 0, 0, yaw)
+            self.be.wait(0.5)
         raise Stop('unknown step %s' % k, fault=True)
 
     def takeoff(self, geo):
@@ -584,27 +699,30 @@ class Routine:
         oe, on = c_e, c_n                                                   # centred on the hover point
         theta0 = yaw0                                                       # the vehicle starts r ahead
         sign = -1.0 if direction == 'cw' else 1.0
-        w = self.cfg['speed_ms'] / r
         sweep = 2 * math.pi * self.cfg['orbit_turns']
+        prof = Profile(r * sweep, self.cfg['speed_ms'], self.cfg['accel_mss'])   # along the arc
+        self.track = Track(self.be, (0, 0, 0), (0, 0, 0), prof.duration, prof.v)
         t0 = self.be.now()
         rad_err = 0.0
         while True:
             self.tick()
-            a = min(sweep, w * (self.be.now() - t0))
-            th = theta0 + sign * a
-            moving = a < sweep
-            ve = -sign * math.sin(th) * self.cfg['speed_ms'] if moving else 0.0
-            vn = sign * math.cos(th) * self.cfg['speed_ms'] if moving else 0.0
-            self.be.pos_target(oe + r * math.cos(th), on + r * math.sin(th), c_u, ve, vn, 0.0,
-                               wrap_pi(th + math.pi))
+            t = self.be.now() - t0
+            s, sd, sdd = prof.at(t)
+            th = theta0 + sign * s / r
+            tan = (-sign * math.sin(th), sign * math.cos(th))                # direction of travel
+            cen = sd * sd / r                                                 # towards the centre
+            self.be.pos_target(oe + r * math.cos(th), on + r * math.sin(th), c_u,
+                               sd * tan[0], sd * tan[1], 0.0, wrap_pi(th + math.pi),
+                               sdd * tan[0] - cen * math.cos(th), sdd * tan[1] - cen * math.sin(th), 0.0)
             pe, pn, _, _, _, _ = self.be.pose()
             rad_err = max(rad_err, abs(math.hypot(pe - oe, pn - on) - r))
-            if not moving:
+            if t >= prof.duration:
                 break
             self.be.wait(STREAM_DT)
         self.target = (oe + r * math.cos(theta0), on + r * math.sin(theta0), c_u, wrap_pi(theta0 + math.pi))
+        self.track, track = None, self.track
         self.settle(*self.target, 15, 'orbit end')
-        return {'max_radius_err_m': round(rad_err, 2)}
+        return dict({'max_radius_err_m': round(rad_err, 2)}, **track.result())
 
     def doublet(self, geo, axis, deg):
         c_e, c_n, c_u, yaw0 = geo['centre']
@@ -668,6 +786,13 @@ def main():
     except Stop as ex:
         emit('end', ok=not ex.fault, reason=ex.reason)
         return 1 if ex.fault else 0
+    except Exception as ex:                     # a bug in here: hover where it is and say so
+        try:
+            if rt.in_guided:
+                rt.hold_here()
+        finally:
+            emit('end', ok=False, reason='routine error, holding in place: %r' % ex)
+        raise
     emit('end', ok=True, reason='routine complete')
     return 0
 
