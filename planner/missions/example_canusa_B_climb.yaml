@@ -1,0 +1,17 @@
+# CAN USA warehouse: the real climb to 6.5 m and back (sim mission B, 2 of 2)
+# Converted 2026-10-27 from the MARSIM waypoint file, which is in the planner frame. In simulation the
+# anchor at the start is the identity (planner = fc), so the coordinates are unchanged; on the robot,
+# write waypoints in the FC's EKF frame (MAVROS local ENU) and the executive converts them (D7).
+# map canusa_2034.pcd; needs the 20 m tall local map and the seed-line patch; start 0.00, 0.00, 1.00 (x, y, height).
+name: example_canusa_B_climb
+frame: fc
+takeoff_height: 1.00      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.30, 1.40, 6.50]}
+  - {type: fly, goal: [-0.40, 1.45, 1.00]}

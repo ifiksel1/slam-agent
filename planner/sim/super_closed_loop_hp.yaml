@@ -1,0 +1,177 @@
+# Closed loop (L2): super_hp (r6, virtual ground -0.3, ceiling 5.0) reading the planner bridge outputs.
+# SUPER configuration for the Revolute QuadRover (L4 autonomy, MARSIM simulation).
+# Based on SUPER's click_smooth_ros1.yaml (raycasting and a sliding map, so the backup
+# trajectory has known-free space to stay in), with the robot's own size and limits.
+# Values marked (owner) were set by the owner on 2026-10-27.
+
+fsm:
+  click_goal_en: true
+  click_goal_topic: "/planning/click_goal"  # where mission_planner publishes goals
+  click_height: -10.0   # below -5: use each goal's own height (fsm.cpp:187)
+  click_yaw_en: true
+  replan_rate: 15.0
+  cmd_topic: "/planning/pos_cmd"
+  mpc_cmd_topic: "/planning_cmd/poly_traj"
+  timer_en: true
+
+super_planner:
+  backup_traj_en: true
+  detailed_log_en: false
+  visualization_en: true
+  # SUPER's field-of-view cut is hard-coded for an all-round lidar with +/-35 deg vertical
+  # (super_planner.cpp:59), not the JT128's forward dome (+/-94.5 deg about the nose, blind
+  # behind). Off: the dome-cropped sensor keeps unseen space unknown, the backup trajectory
+  # stays in known-free space, and yaw_mode 1 points the nose along the direction of travel.
+  use_fov_cut: false
+  print_log: false
+  visual_process: false
+  frontend_in_known_free: false
+  goal_yaw_en: true
+  goal_vel_en: false
+  corridor_bound_dis: 1.0
+  corridor_line_max_length: 1.2
+  safe_corridor_line_max_length: 5.0
+  iris_iter_num: 2
+  obs_skip_num: 2
+  replan_forward_dt: 0.1
+  planning_horizon: 7.0
+  # the dome-cropped simulated JT128 range
+  sensing_horizon: 30.0
+  receding_dis: 4.0
+  # half-diagonal of the 0.457 x 0.508 m frame (0.342 m) + 0.1 m clearance margin (owner)
+  robot_r: 0.44
+  # heading changes, rad/s: well inside QuadRover's yaw rate
+  yaw_dot_max: 2.0
+  # Yaw mode: 1 heading to velocity, 2 heading to goal
+  yaw_mode: 1
+  mpc_horizon: 15
+
+traj_opt:
+  switch:
+    save_log_en: false
+    print_optimizer_log: false
+
+  boundary:
+    max_vel: 1.0          # (owner)
+    max_acc: 1.0
+    max_jerk: 10.0
+    max_omg: 2.5
+    # thrust acceleration bounds around g for a 0.5 m/s^2 trajectory
+    max_acc_thr: 20.0
+    min_acc_thr: 6.0
+    penna_margin: 0.05
+
+  exp_traj:
+    # 1 for xi 2 for pos
+    pos_constraint_type: 1
+    energy_cost_type: 4
+    block_energy_cost: false
+    opt_accuracy: 5.0e-6
+    scale_factor: 1.0
+    integral_reso: 15
+    smooth_eps: 0.01
+    penna_t: 12000.0
+    penna_pos: 5.0e+6
+    penna_vel: 5.0e+5
+    penna_acc: 5.0e+5
+    penna_jerk: -5.0e+5
+    penna_attract: 1.0e+3
+    penna_omg: 5.0e+5
+    penna_thr: 1.0e+5
+
+  backup_traj:
+    uniform_time_en: true
+    pos_constraint_type: 1
+    piece_num: 2
+    energy_cost_type: 4
+    block_energy_cost: true
+    opt_accuracy: 1.0e-6
+    scale_factor: 1.0
+    integral_reso: 12
+    smooth_eps: 0.01
+    penna_t: 1200.0
+    penna_ts: 1.0e+5
+    penna_pos: 1.0e+6
+    penna_vel: 1.0e+5
+    penna_acc: 1.0e+5
+    penna_jerk: -1.0e+5
+    penna_omg: 1.0e+5
+    penna_thr: 1.0e+5
+
+  flatness:
+    mass: 1.64
+    dh: 0.35
+    dv: 0.35
+    cp: 0.001
+    v_eps: 0.0001
+    grav: 9.81
+
+
+astar:
+  map_voxel_num: [ 300, 300, 100 ]
+  visual_process: false
+  allow_diag: true
+  # 0 DIAG; 1 MANHATTAN; 2 EUCLIDEAN
+  heu_type: 2
+  debug_visualization_en: false
+
+
+rog_map:
+  resolution: 0.1
+  inflation_resolution: 0.1
+  inflation_step: 5          # 0.5 m >= robot_r, so the path search and CIRI agree
+  unk_inflation_en: false
+  unk_inflation_step: 1
+  # sliding local map around the robot [m]; 10 m tall for the 9.3 m warehouse
+  map_size: [ 30, 30, 10 ]
+  fix_map_origin: [ 0, 0, 1.5 ]
+  frontier_extraction_en: false
+
+  # Virtual ceiling and ground for the Hensel Phelps map (ceiling ~5.6 m, ground at 0 m)
+  virtual_ceil_height: 5.0
+  virtual_ground_height: -0.3   # lowered so the real route flies at its real 1.0-1.1 m (owner)
+
+  load_pcd_en: false
+
+  map_sliding:
+    enable: true
+    threshold: 0.3
+
+  esdf:
+    enable: false
+    resolution: 0.1
+    local_update_box: [ 5, 5, 3 ]
+
+  ros_callback:
+    enable: true
+    cloud_topic: "/planner/cloud"
+    odom_topic: "/planner/odom"
+    odom_timeout: 2.0
+
+  visualization:
+    enable: false
+    use_dynamic_reconfigure: false
+    time_rate: 2
+    frame_rate: 0
+    range: [ 15, 15, 4 ]
+    frame_id: "world"
+    pub_unknown_map_en: false
+
+  intensity_thresh: -10
+  point_filt_num: 1
+
+  raycasting:
+    # on: known-free space exists only where the (dome-cropped) lidar has looked
+    enable: true
+    batch_update_size: 1
+    local_update_box: [ 30, 30, 10 ]
+    # FAST-LIO's 0.4 m blind range to the 30 m sensing horizon
+    ray_range: [ 0.4, 30 ]
+
+    p_min: 0.12
+    p_miss: 0.49
+    p_free: 0.499
+    p_occ: 0.85
+    p_hit: 0.9
+    p_max: 0.98
+    unk_thresh: 1.0

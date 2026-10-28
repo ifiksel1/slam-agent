@@ -1,0 +1,17 @@
+# L4 planner stack on the companion (nuc-01), beside slam-hesai-fastlio.
+# CPUs 8-11 only: FAST-LIO owns 0,2,4,6. Host network: same ROS master as the SLAM container.
+# Start only with the owner's go-ahead; the planner bridge streams Guided setpoints when the FC is in
+# GUIDED, so on the robot it is brought up for bench tests with props off first (L3).
+services:
+  l4-planner:
+    image: l4-planner:latest
+    container_name: l4-planner
+    network_mode: host
+    cpuset: "8-11"
+    restart: "no"
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+    command: >
+      bash -c "rosrun super_planner fsm_node _config_name:=super_revolute.yaml
+               & python3 /opt/planner/planner_bridge.py __name:=planner_bridge _speed_cap:=0.5
+               & wait"

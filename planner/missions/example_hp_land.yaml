@@ -1,0 +1,22 @@
+# Hensel Phelps 2026-10-15 flight 21:06:50 map: the first half of the real route (example_hp_real_route.yaml),
+# then a land leg on the open floor at (-6.00, -9.00) (the landing check must report it clear; the
+# rendered map reads it clear from every side, (-5.70, -8.40) has a 0.09 m bump 0.3 m off it).
+# Waypoints in the map frame = fc in simulation (identity anchor at the start); on the robot, write
+# them in the FC's EKF frame (MAVROS local ENU) and the executive converts them (D7).
+# map hp_1015_carved.pcd; start 0.00, 0.00, yaw -90.7 (x, y, deg): the real takeoff spot.
+name: example_hp_land
+frame: fc
+takeoff_height: 1.00      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [-0.28, -7.61, 1.30]}
+  - {type: fly, goal: [-2.29, -9.57, 1.30]}
+  - {type: fly, goal: [-4.63, -9.75, 1.30]}
+  - {type: land, at: [-6.00, -9.00]}    # fly over it at 1.3 m, landing check, NAV_LAND

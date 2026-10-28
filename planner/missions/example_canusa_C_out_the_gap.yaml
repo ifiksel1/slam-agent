@@ -1,0 +1,19 @@
+# CAN USA warehouse: out through the gap in the south wall (sim mission C, 4 of 4)
+# Converted 2026-10-27 from the MARSIM waypoint file, which is in the planner frame. In simulation the
+# anchor at the start is the identity (planner = fc), so the coordinates are unchanged; on the robot,
+# write waypoints in the FC's EKF frame (MAVROS local ENU) and the executive converts them (D7).
+# map canusa_2034.pcd; start 0.00, 0.00, 1.50 (x, y, height).
+name: example_canusa_C_out_the_gap
+frame: fc
+takeoff_height: 1.50      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.50}
+  - {type: fly, goal: [4.00, -3.80, 1.50]}
+  - {type: fly, goal: [6.60, -6.60, 1.50]}
+  - {type: fly, goal: [6.20, -9.50, 1.50]}
+  - {type: fly, goal: [4.50, -11.00, 1.50]}

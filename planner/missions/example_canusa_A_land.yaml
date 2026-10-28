@@ -1,0 +1,24 @@
+# CAN USA warehouse 2026-07-15 flight 20:34:50 map: mission A (out and back across the open floor),
+# then a land leg on the open floor at (1.50, -2.00) (the landing check must report it clear).
+# Not the spot where the robot really landed (-0.42, 1.45): the merged map holds a 0.25-0.29 m
+# object 0.3 m from it (seen by a few keyframes only, so the real scans read the spot clear), which
+# the L2 render node turns into a solid object; the check refuses that spot in SITL (run cl20).
+# Waypoints as example_canusa_A_inside.yaml: map frame = fc in simulation (identity anchor at the start);
+# on the robot, write them in the FC's EKF frame (MAVROS local ENU) and the executive converts them (D7).
+# map canusa_2034.pcd; start 0.00, 0.00, yaw 0 (x, y, deg).
+name: example_canusa_A_land
+frame: fc
+takeoff_height: 1.50      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.50}
+  - {type: fly, goal: [-0.50, -1.00, 1.50]}
+  - {type: fly, goal: [5.20, -4.20, 1.50]}
+  - {type: fly, goal: [8.80, -3.80, 1.50]}
+  - {type: fly, goal: [5.20, -4.20, 1.50]}
+  - {type: fly, goal: [0.00, 0.00, 1.50]}
+  - {type: land, at: [1.50, -2.00]}     # fly over it at 1.5 m, landing check, NAV_LAND

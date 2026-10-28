@@ -1,0 +1,9 @@
+# The robot's SLAM-to-FC bridge (overrides/FAST-LIO/src/fastlio_mavros_bridge.py) with the params
+# it runs with on a QuadRover (config/fastlio_to_fc.launch + config/fastlio_to_fc_quadrover.launch).
+# Loaded under /fastlio_mavros_bridge by planner/sim/run_ros.sh.
+remap_axes: true
+position_matrix: [0, 0, 1, 1, 0, 0, 0, 1, 0]
+orientation_matrix: [0, 0, 1, 1, 0, 0, 0, 1, 0]
+fc_mount_yaw_deg: -0.45
+restamp_system_time: false
+enable_reanchor: true

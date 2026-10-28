@@ -1,0 +1,40 @@
+# QuadRover SITL for the L2 closed loop: loaded after rover.parm, quadrover.parm and the robot's
+# hardware params (quadrover_from_pixracer.param). Only what SITL needs differently from the robot.
+#
+# MAVLink ports (SITL TCP 5760 + 2n for SERIALn): SERIAL0 5760 MAVROS, SERIAL1 5762 render node
+# (SIM_STATE), SERIAL2 5763 checks. The hardware file has SERIAL2 off.
+SERIAL0_PROTOCOL 2
+SERIAL1_PROTOCOL 2
+SERIAL2_PROTOCOL 2
+# No transmitter or ground station in SITL: their failsafes would fire at once.
+FS_THR_ENABLE 0
+FS_GCS_ENABLE 0
+# SITL's own analog downward rangefinder and flow sensor in place of the MAVLink ones (ToF ring, flow board).
+RNGFND1_TYPE 1
+RNGFND1_MIN 0
+RNGFND1_MAX 40
+RNGFND1_SCALING 12.12
+RNGFND1_PIN 0
+FLOW_TYPE 10
+SIM_FLOW_ENABLE 1
+# No GPS on the robot.
+GPS1_TYPE 0
+SIM_GPS1_ENABLE 0
+# Planner flights (D4): a stale Guided target stops the vehicle after 0.5 s.
+Q_GUID_TIMEOUT 0.5
+# The render node puts the lidar 0.178 m (7 in, measured) ahead of the FC; the robot's file says 0.22.
+VISO_POS_X 0.178
+# The robot's CAN ports: SITL simulates CAN over UDP multicast, which a loopback-only namespace
+# cannot route (SITL exits "udp connect failed on port 20721"); no CAN devices are simulated anyway.
+CAN_P1_DRIVER 0
+CAN_P2_DRIVER 0
+# The robot's ToF ring is a proximity sensor (PRX1_TYPE 2); SITL has none ("PRX1: No Data" blocks arming).
+PRX1_TYPE 0
+# The robot's 6S pack (arm 22.1 V, low 21.6 V, critical 21 V, failsafe actions kept) on SITL's simulated
+# analog monitor (the robot's monitor type 9 is not simulated). SITL's motors give thrust in proportion
+# to SIM_BATT_VOLTAGE: the model is sized for its default 12.6 V, and 25.2 V doubles its thrust (it shot
+# to 20-30 m on a 1.5 m takeoff, motors on the floor). So the thresholds are halved instead.
+BATT_MONITOR 4
+BATT_ARM_VOLT 11.05
+BATT_LOW_VOLT 10.8
+BATT_CRT_VOLT 10.5

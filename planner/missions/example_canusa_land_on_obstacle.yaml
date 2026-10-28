@@ -1,0 +1,17 @@
+# CAN USA warehouse 2026-07-15 flight 20:34:50 map: a land leg at (1.00, -3.25), whose landing disc
+# takes in the edge of the ~0.85 m flat-topped stack east of it (x > 1.25). The landing check must
+# refuse it: the executive then holds in QRLoiter and stops the mission.
+# Waypoints in the map frame = fc in simulation (identity anchor at the start).
+# map canusa_2034.pcd; start 0.00, 0.00, yaw 0 (x, y, deg).
+name: example_canusa_land_on_obstacle
+frame: fc
+takeoff_height: 1.50      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.50}
+  - {type: fly, goal: [-0.50, -1.00, 1.50]}
+  - {type: land, at: [1.00, -3.25]}     # over the stack's edge at 1.5 m: must be refused

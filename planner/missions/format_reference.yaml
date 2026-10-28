@@ -1,0 +1,14 @@
+# Mission format (D6), with every leg type. Waypoints in the FC's EKF frame (fc: MAVROS local ENU, metres).
+name: format_reference
+frame: fc
+takeoff_height: 1.2
+# on_unreachable: what an unreachable goal does: next (QRLoiter hold, then the next leg; owner
+# 2026-10-27, may change) or stop (QRLoiter, mission ends). Per mission here, or per leg.
+defaults: {speed: 0.5, accept_radius: 0.5, leg_timeout_s: 90, no_progress_s: 20, hold_s: 0, on_unreachable: next}
+legs:
+  - {type: drive, goal: [2.0, 0.0]}                    # on the ground: the track planner (/planning/drive_goal), bridge in drive mode
+  - {type: takeoff, height: 1.2}                       # NAV_TAKEOFF in GUIDED, m above the liftoff point
+  - {type: fly, goal: [4.0, -2.0, 1.2], speed: 0.5}    # SUPER, via /planning/click_goal
+  - {type: fly, goal: [6.0, -2.0, 1.5], hold_s: 3, on_unreachable: stop}   # hover 3 s; if blocked, end here
+  - {type: land, at: [6.0, -3.0]}                      # fly over the spot, require it reported clear, NAV_LAND, drive on
+  - {type: drive, goal: [8.0, -3.0], speed: 0.3}

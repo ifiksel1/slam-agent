@@ -1,0 +1,9 @@
+# L2 closed-loop sim image: the planner sim image plus what the render node and the SITL checks
+# need inside a network-less container (pymavlink for SITL's SIM_STATE, scipy for the raycast).
+# Build:  docker build -t l4-sim-l2:latest -f planner/sim/Dockerfile.l2 planner/sim
+FROM l4-sim:latest
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip python3-scipy ros-noetic-tf \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir pymavlink==2.4.41
+# MAVROS refuses to start without GeographicLib's geoid data (UAS: egm96-5.pgm not readable)
+RUN /opt/ros/noetic/lib/mavros/install_geographiclib_datasets.sh

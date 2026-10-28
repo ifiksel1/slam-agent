@@ -1,0 +1,27 @@
+# Hensel Phelps 2026-10-15 flight 21:06:50: the real route the pilot flew (sim mission 1, 12 of 12)
+# Converted 2026-10-27 from the MARSIM waypoint file, which is in the planner frame. In simulation the
+# anchor at the start is the identity (planner = fc), so the coordinates are unchanged; on the robot,
+# write waypoints in the FC's EKF frame (MAVROS local ENU) and the executive converts them (D7).
+# map hp_1015_carved.pcd; takeoff at the real takeoff spot; start 0.00, 0.00, 1.00 (x, y, height).
+name: example_hp_real_route
+frame: fc
+takeoff_height: 1.00      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.07, 0.00, 1.08]}
+  - {type: fly, goal: [-0.05, 0.05, 1.05]}
+  - {type: fly, goal: [0.16, -1.92, 1.08]}
+  - {type: fly, goal: [0.11, -4.46, 1.07]}
+  - {type: fly, goal: [-0.28, -7.61, 1.10]}
+  - {type: fly, goal: [-2.29, -9.57, 1.04]}
+  - {type: fly, goal: [-4.63, -9.75, 1.07]}
+  - {type: fly, goal: [-6.10, -7.40, 0.98]}
+  - {type: fly, goal: [-7.36, -5.10, 0.96]}
+  - {type: fly, goal: [-6.67, -4.40, 3.29]}
+  - {type: fly, goal: [-4.24, -3.72, 3.26]}
+  - {type: fly, goal: [-2.29, -1.83, 3.26]}

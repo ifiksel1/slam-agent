@@ -1,0 +1,21 @@
+# QuadRover SITL liftoff fix (2026-10-27, applied only to the ardupilot snapshot on Shannon ~/sim/ardupilot, NOT pushed to the fork; for the owner to review).
+# Without it the simulated vehicle intermittently never leaves the ground while the EKF believes it climbs.
+diff --git a/libraries/SITL/SIM_QuadRover.cpp b/libraries/SITL/SIM_QuadRover.cpp
+index ffddd45..411b3ce 100644
+--- a/libraries/SITL/SIM_QuadRover.cpp
++++ b/libraries/SITL/SIM_QuadRover.cpp
+@@ -132,7 +132,13 @@ void SimQuadRover::update(const struct sitl_input &input)
+         // check if copter thrust would lift us off
+         Vector3f thrust_earth = dcm * quad_accel_body;
+         if (thrust_earth.z < -GRAVITY_MSS) {
+-            // copter is producing enough thrust to overcome gravity - take off
++            // copter is producing enough thrust to overcome gravity - take off.
++            // Start just clear of the ground: on_ground() is hagl <= 1 mm, and
++            // the first step climbs only v*dt (under 1 mm at a small frame time),
++            // so Aircraft::update_dynamics() clamped it back every step while the
++            // climb rate built up in the IMU: the EKF saw a climb the vehicle never
++            // made (intermittent, with the frame time under CPU load)
++            position.z = -(ground_level + frame_height - home.alt * 0.01f + ground_height_difference()) - 0.002;
+             accel_body += quad_accel_body;
+             update_dynamics(quad_rot_accel);
+         } else {
