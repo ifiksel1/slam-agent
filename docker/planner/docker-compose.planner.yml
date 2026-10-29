@@ -11,7 +11,13 @@ services:
     restart: "no"
     environment:
       - ROS_MASTER_URI=http://localhost:11311
+      # SUPER starts only when ENABLE_SUPER=true (owner, 2026-10-29: off until SUPER is ready).
+      # Start it later in the running container with:
+      #   docker exec -d l4-planner /entrypoint.sh roslaunch l4_bringup super.launch
+      - ENABLE_SUPER=${ENABLE_SUPER:-false}
+      # the mission executive starts only with a mission file (D6, fc frame; a path inside the container)
+      - MISSION=${MISSION:-}
+    # l4_planner.launch (l4_bringup): planner bridge (speed cap 0.5, D10), track planner, landing check,
+    # mission executive (with MISSION), SUPER (with ENABLE_SUPER=true). None of them arms (D5).
     command: >
-      bash -c "rosrun super_planner fsm_node _config_name:=super_revolute.yaml
-               & python3 /opt/planner/planner_bridge.py __name:=planner_bridge _speed_cap:=0.5
-               & wait"
+      bash -c "roslaunch l4_bringup l4_planner.launch enable_super:=$$ENABLE_SUPER speed_cap:=0.5 mission:=$$MISSION"

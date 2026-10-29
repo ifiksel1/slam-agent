@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>l4_track</name>
+  <version>1.0.0</version>
+  <description>QuadRover track planner (L4): the driving-leg planner library (height grid, local ground
+    model, free-space evidence, oriented footprint, pivots, dead-end reverse, run-out) and the
+    track_planner node. C++ port of the former planner/track_core.py and track_planner.py.</description>
+  <maintainer email="idan@revoluterobotics.com">idan</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>quadrotor_msgs</depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+  <test_depend>rostest</test_depend>
+  <test_depend>rosunit</test_depend>
+</package>

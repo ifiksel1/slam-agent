@@ -5,10 +5,24 @@ takeoff_height: 1.2
 # on_unreachable: what an unreachable goal does: next (QRLoiter hold, then the next leg; owner
 # 2026-10-27, may change) or stop (QRLoiter, mission ends). Per mission here, or per leg.
 defaults: {speed: 0.5, accept_radius: 0.5, leg_timeout_s: 90, no_progress_s: 20, hold_s: 0, on_unreachable: next}
+# The heading (owner rule 2026-10-29): the nose points along the direction of travel; the robot yaws only
+# at a waypoint. At the end of a fly leg the executive turns on the spot to face the next fly / land leg;
+# over a land spot it faces the drive leg that follows (the tank starts aligned); then it waits for the
+# yaw to settle (< 5 deg/s, < 0.1 m/s over 1 s; not within 15 s: QRLoiter, mission stopped) before the
+# next leg or the landing check. Optional per leg (not in defaults):
+#   yaw: deg            a deliberate waypoint yaw at the end of a fly or land leg (fc frame: 0 = east,
+#                       90 = north), instead of facing the next leg
+# A deliberate yaw scan (the occupancy grid's reason to yaw), in the air after a fly leg:
+#   {type: scan, yaw_sweep_deg: 360}   turn on the spot through the sweep (+ = counter-clockwise) at
+#                                      scan_rate_deg (optional, default 20 deg/s), then settle
 legs:
   - {type: drive, goal: [2.0, 0.0]}                    # on the ground: the track planner (/planning/drive_goal), bridge in drive mode
   - {type: takeoff, height: 1.2}                       # NAV_TAKEOFF in GUIDED, m above the liftoff point
-  - {type: fly, goal: [4.0, -2.0, 1.2], speed: 0.5}    # SUPER, via /planning/click_goal
+  - {type: fly, goal: [4.0, -2.0, 1.2], speed: 0.5}    # SUPER, via /planning/click_goal; then faces the next leg
+  - {type: scan, yaw_sweep_deg: 360}                   # optional: a full turn on the spot at this waypoint
   - {type: fly, goal: [6.0, -2.0, 1.5], hold_s: 3, on_unreachable: stop}   # hover 3 s; if blocked, end here
-  - {type: land, at: [6.0, -3.0]}                      # fly over the spot, require it reported clear, NAV_LAND, drive on
+  - {type: land, at: [6.0, -3.0]}                      # fly over the spot, face the drive, settle, require it reported clear, NAV_LAND, drive on
   - {type: drive, goal: [8.0, -3.0], speed: 0.3}
+  - {type: takeoff, height: 1.0}
+  - {type: fly, goal: [8.0, 0.0, 1.0], yaw: 90}        # a deliberate waypoint yaw: face north at its end
+  - {type: land, at: [8.0, 1.0], yaw: 180}             # land facing west (no drive follows)

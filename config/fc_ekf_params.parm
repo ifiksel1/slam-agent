@@ -40,7 +40,7 @@ VISO_POS_M_NSE,0.2
 VISO_YAW_M_NSE,0.2
 VISO_VEL_M_NSE,0.1
 # Sensor position offset in body frame (m). X only; Y/Z explicitly zero.
-VISO_POS_X,0.22
+VISO_POS_X,0.193
 VISO_POS_Y,0
 VISO_POS_Z,0
 VISO_ORIENT,0

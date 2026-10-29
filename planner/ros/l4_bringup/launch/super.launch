@@ -1,0 +1,8 @@
+<launch>
+  <!-- SUPER (super_planner fsm_node) on its own: roslaunch l4_bringup super.launch
+       (owner 2026-10-29: SUPER does not start with the stack unless asked; see l4_planner.launch) -->
+  <arg name="config_name" default="super_revolute.yaml"/>
+  <node pkg="super_planner" type="fsm_node" name="fsm_node" output="screen">
+    <param name="config_name" value="$(arg config_name)"/>
+  </node>
+</launch>

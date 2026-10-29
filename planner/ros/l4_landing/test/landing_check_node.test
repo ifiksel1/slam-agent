@@ -1,0 +1,5 @@
+<launch>
+  <!-- the C++ landing_check node against synthetic topics (rostest) -->
+  <node pkg="l4_landing" type="landing_check" name="landing_check" output="screen"/>
+  <test test-name="landing_check_node" pkg="l4_landing" type="test_landing_check_node" time-limit="60.0"/>
+</launch>

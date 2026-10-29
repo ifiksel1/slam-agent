@@ -4,9 +4,9 @@
 # Start 0.00, 0.00, yaw -90.7 (map x, y, deg) on the ground, facing into the corridor.
 #   drive in to (0.00, -2.50), 1.2 m into the corridor (mouth at y -1.30), 1.1 m short of the end wall;
 #   drive to (-0.60, 1.00), behind the robot (open floor north of the takeoff spot): no room to pivot in 0.75 m, so the track planner backs
-#   the robot straight out (track_core.plan_reverse: observed free cells only, at most 2 m), pivots
+#   the robot straight out (l4_track::plan_reverse, planner/ros/l4_track: observed free cells only, at most 2 m), pivots
 #   at the mouth and drives on. The bridge streams the reverse as Rover Guided velocity + heading
-#   targets (bridge_core.reverse_speed), within D5.
+#   targets (l4_bridge bridge_core reverse_speed), within D5.
 name: dead_end_reverse
 frame: fc
 takeoff_height: 1.00

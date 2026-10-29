@@ -1,0 +1,40 @@
+<launch>
+  <!-- The L4 planner stack on the robot (nuc-01, beside slam-hesai-fastlio):
+         roslaunch l4_bringup l4_planner.launch [enable_super:=true] [mission:=/path/mission.yaml] ...
+       D5: none of these nodes arms, disarms or sets FC parameters; only the pilot arms. The bridge streams
+       Guided setpoints only in GUIDED and only while the executive enables it. -->
+
+  <!-- SUPER does not start straight away (owner 2026-10-29): enable_super:=true includes super.launch;
+       later on its own: roslaunch l4_bringup super.launch -->
+  <arg name="enable_super" default="false"/>
+  <arg name="enable_bridge" default="true"/>
+  <arg name="enable_executive" default="true"/>
+  <arg name="enable_track" default="true"/>
+  <arg name="enable_landing" default="true"/>
+  <!-- D10: 0.5 m/s on the robot until Gate L4 passes -->
+  <arg name="speed_cap" default="0.5"/>
+  <arg name="bridge_config" default="$(find l4_bringup)/config/planner_bridge.yaml"/>
+  <!-- the executive needs a mission (D6, fc frame): without one it is not started -->
+  <arg name="mission" default=""/>
+  <arg name="on_unreachable" default="next"/>
+  <arg name="super_config" default="super_revolute.yaml"/>
+
+  <include if="$(arg enable_super)" file="$(find l4_bringup)/launch/super.launch">
+    <arg name="config_name" value="$(arg super_config)"/>
+  </include>
+
+  <node if="$(arg enable_bridge)" pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="screen">
+    <rosparam command="load" file="$(arg bridge_config)"/>
+    <param name="speed_cap" value="$(arg speed_cap)"/>
+  </node>
+
+  <node if="$(arg enable_track)" pkg="l4_track" type="track_planner" name="track_planner" output="screen"/>
+
+  <node if="$(arg enable_landing)" pkg="l4_landing" type="landing_check" name="landing_check" output="screen"/>
+
+  <node if="$(eval arg('enable_executive') and arg('mission') != '')" pkg="l4_executive" type="mission_executive"
+        name="mission_executive" output="screen">
+    <param name="mission" value="$(arg mission)"/>
+    <param name="on_unreachable" value="$(arg on_unreachable)"/>
+  </node>
+</launch>

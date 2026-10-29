@@ -85,7 +85,7 @@ class RenderNode:
     def __init__(self):
         self.start = np.array([rospy.get_param("~start_x", 0.0), rospy.get_param("~start_y", 0.0), 0.0])
         self.start_yaw = math.radians(rospy.get_param("~start_yaw_deg", 0.0))
-        self.lidar_fwd = rospy.get_param("~lidar_fwd", 0.178)
+        self.lidar_fwd = rospy.get_param("~lidar_fwd", 0.193)
         self.lidar_up = rospy.get_param("~lidar_up", 0.0)
         self.odom_hz = rospy.get_param("~odom_hz", 20.0)
         self.scan_every = max(1, int(round(self.odom_hz / rospy.get_param("~scan_hz", 10.0))))

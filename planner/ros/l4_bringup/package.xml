@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>l4_bringup</name>
+  <version>1.0.0</version>
+  <description>Launch files of the L4 planner stack on the robot: l4_planner.launch (planner bridge, mission
+    executive, track planner, landing check; SUPER only with enable_super:=true) and super.launch (SUPER
+    on its own).</description>
+  <maintainer email="idan@revoluterobotics.com">idan</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <exec_depend>l4_bridge</exec_depend>
+  <exec_depend>l4_executive</exec_depend>
+  <exec_depend>l4_track</exec_depend>
+  <exec_depend>l4_landing</exec_depend>
+  <exec_depend>super_planner</exec_depend>
+</package>

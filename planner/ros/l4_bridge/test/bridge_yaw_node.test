@@ -1,0 +1,7 @@
+<launch>
+  <!-- flight yaw (owner rule 2026-10-29): the bridge with ~flight_yaw travel (the default) -->
+  <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
+    <param name="speed_cap" value="1.0"/>
+  </node>
+  <test test-name="test_bridge_yaw_node" pkg="l4_bridge" type="test_bridge_yaw_node" time-limit="120.0"/>
+</launch>

@@ -1,4 +1,4 @@
-# planner_bridge.py parameters (load into the node's private namespace).
+# planner_bridge parameters (l4_bridge) (load into the node's private namespace).
 # Robot values; the sim launch overrides speed_cap to 1.0 m/s.
 
 mode: flight                 # the start mode; the executive switches it on /planner_bridge/set_mode
@@ -8,15 +8,28 @@ rate_hz: 50.0                # D4: targets at 50 Hz
 speed_cap: 0.5               # m/s, D10 (0.5 until Gate L4 passes, then 1.0); sim: 1.0
 max_lead: 1.0                # m the position target may run ahead of the vehicle
 fc_pos_p: 1.0                # the FC's Q_P_NE_POS_P: the speed cap bounds feed-forward + this x position error
-drive_lookahead: 2.5         # m, D4: a dead planner stops the rover within this (at the last target sent).
+drive_lookahead: 2.5         # m, how far ahead of the rover a drive target may be (a dead planner no
+                             # longer leaves it driving there: zero-speed stop, owner 2026-10-29).
                              # Above the track planner's run-out (runout_s 2.1 x drive_speed: 1.05 m at the
                              # robot's WP_SPEED 0.5, 2.1 m at 1.0), which it frame-checks: Rover Guided's
                              # fast-update path asks ~0.5 m/s per metre to its target, so 0.5 here held the
                              # SITL rover to ~0.2-0.3 m/s (d6)
 guided_mode: GUIDED          # /mavros/state mode string for QuadRover Guided (flight and driving)
+# flight yaw (owner rule 2026-10-29: nose along the direction of travel, yaw only at waypoints)
+flight_yaw: travel           # travel: the bridge points the nose along SUPER's commanded velocity, holds it
+                             # (or the executive's waypoint yaw, /planner_bridge/yaw_cmd) when slow;
+                             # planner: SUPER's own yaw (it swung up to 100 deg in hovers, Gate L2 b1)
+yaw_speed_min: 0.3           # m/s commanded horizontal speed above which the nose follows the travel direction
+yaw_rate_max_deg: 60.0       # deg/s, the commanded yaw's rate limit
 
 # HOLD triggers
-planner_timeout: 0.3         # s since the mode's planner command
+planner_timeout: 0.3         # s since the mode's planner command (SUPER ~100 Hz, track planner 10 Hz)
+                             # older: HOLD "planner stale" (resumable) while the planner process is
+                             # there; HOLD "planner_dead" (latched, the leg is over; drive: zero-speed
+                             # stop) when it is gone (owner 2026-10-29)
+planner_ping_s: 0.1          # s between liveness pings of the planner node (XML-RPC getPid, as rosnode ping)
+planner_ping_timeout: 0.25   # s a ping may take
+planner_hung_s: 1.0          # s without an answer (timeouts only) before a planner counts as gone
 slam_timeout: 0.2            # s since /Odometry
 fc_pose_timeout: 0.3         # s since /mavros/local_position/pose (receive time, ~50 Hz): older -> HOLD
                              # "fc_pose_stale" at the last fresh FC position (flight) / nothing sent (drive)

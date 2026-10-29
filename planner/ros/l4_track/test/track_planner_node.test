@@ -1,0 +1,7 @@
+<launch>
+  <!-- the C++ track_planner node against synthetic topics (rostest) -->
+  <node pkg="l4_track" type="track_planner" name="track_planner" output="screen">
+    <param name="drive_speed" value="1.5"/>  <!-- over the 1 m/s cap: clamped, with a warning -->
+  </node>
+  <test test-name="track_planner_node" pkg="l4_track" type="test_track_planner_node" time-limit="60.0"/>
+</launch>

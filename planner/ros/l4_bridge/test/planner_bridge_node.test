@@ -1,0 +1,12 @@
+<launch>
+  <!-- the planner bridge against synthetic inputs (formerly test_planner_bridge.py's Node tests, which
+       started it with _speed_cap:=1.0 _geofence_min:=[-20,-20,-1] _geofence_max:=[20,20,8]) -->
+  <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
+    <param name="speed_cap" value="1.0"/>
+    <!-- the ported cases check SUPER's yaw passed through (the Python bridge); travel yaw: test_bridge_yaw_node -->
+    <param name="flight_yaw" value="planner"/>
+    <rosparam param="geofence_min">[-20, -20, -1]</rosparam>
+    <rosparam param="geofence_max">[20, 20, 8]</rosparam>
+  </node>
+  <test test-name="test_planner_bridge_node" pkg="l4_bridge" type="test_planner_bridge_node" time-limit="300.0"/>
+</launch>

@@ -1,0 +1,436 @@
+// Core tests of the planner bridge: one TEST per case of the former planner/test/test_planner_bridge.py
+// (classes Frames, AnchorTests, Output, Hold, FcPose, Health), same inputs and expectations.
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <random>
+
+#include <Eigen/LU>
+
+#include <yaml-cpp/yaml.h>
+
+#include "l4_bridge/bridge_core.h"
+
+using namespace l4_bridge;
+
+namespace {
+
+void near3(const Vec3& a, const Vec3& b, double tol = 1e-7) {
+  for (int i = 0; i < 3; ++i) EXPECT_NEAR(a[i], b[i], tol) << "component " << i << ": " << a.transpose() << " vs " << b.transpose();
+}
+
+Quat rand_quat(std::mt19937_64& rng) {
+  std::normal_distribution<double> n;
+  double q[4] = {n(rng), n(rng), n(rng), n(rng)};
+  const double s = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+  return {q[0] / s, q[1] / s, q[2] / s, q[3] / s};
+}
+
+Vec3 rand_vec(std::mt19937_64& rng, double scale = 1.0) {
+  std::normal_distribution<double> n;
+  return Vec3(n(rng), n(rng), n(rng)) * scale;
+}
+
+Vec3 quat_rotate(const Quat& q, const Vec3& v) {
+  const Quat p = quat_mul(quat_mul(q, Quat{v[0], v[1], v[2], 0.0}), quat_conj(q));
+  return Vec3(p.x, p.y, p.z);
+}
+
+FcPose tag(double k) { return FcPose{Vec3(k, 0, 0), 0.0}; }
+
+}  // namespace
+
+// ---- Frames ---------------------------------------------------------------------------------------
+
+TEST(Frames, PositionMatrixIsTheBridges) {
+  // raw +z forward -> ENU x, raw +x left -> ENU y, raw +y up -> ENU z
+  near3(raw_to_planner_pos(Vec3(0, 0, 1)), Vec3(1, 0, 0));
+  near3(raw_to_planner_pos(Vec3(1, 0, 0)), Vec3(0, 1, 0));
+  near3(raw_to_planner_pos(Vec3(0, 1, 0)), Vec3(0, 0, 1));
+  EXPECT_NEAR(position_matrix().determinant(), 1.0, 1e-12);
+}
+
+TEST(Frames, OrientationIsTheSimilarityTransform) {
+  // rotating a vector with the converted quaternion = converting the rotated raw vector
+  std::mt19937_64 rng(1);
+  for (int i = 0; i < 50; ++i) {
+    const Quat q = rand_quat(rng);
+    const Vec3 v = rand_vec(rng);
+    near3(quat_rotate(raw_to_planner_quat(q), raw_to_planner_pos(v)), raw_to_planner_pos(quat_rotate(q, v)), 1e-9);
+  }
+}
+
+TEST(Frames, CloudMatchesPositions) {
+  // the node rotates clouds as (x, y, z) -> (z, x, y) on float32: the same as raw_to_planner_pos
+  std::mt19937_64 rng(2);
+  for (int i = 0; i < 100; ++i) {
+    const Vec3 p = rand_vec(rng);
+    near3(Vec3(p[2], p[0], p[1]), raw_to_planner_pos(p), 0.0);
+  }
+}
+
+// ---- Anchor ---------------------------------------------------------------------------------------
+
+class AnchorTests : public ::testing::Test {
+ protected:
+  std::mt19937_64 rng{3};
+
+  void check_anchor_recovered(double psi, const Vec3& t, double mount_yaw = 0.0) {
+    const Vec3 p = rand_vec(rng, 5.0);
+    const Quat q = rand_quat(rng);
+    // what the SLAM bridge publishes: anchor(position); anchor(orientation * mount)
+    const Quat q_m = quat_mul(q, quat_yaw(-mount_yaw));
+    const Anchor A(psi, t);
+    const Vec3 p_fc = A.pos(p);
+    const Quat q_fc = quat_mul(quat_yaw(psi), q_m);
+    const Anchor got = Anchor::from_pair(p, q, p_fc, q_fc, mount_yaw);
+    EXPECT_NEAR(wrap_pi(got.psi - psi), 0.0, 1e-9);
+    near3(got.t, t, 1e-9);
+    // and it maps another point the same way as the bridge would
+    const Vec3 p2 = rand_vec(rng, 5.0);
+    near3(got.pos(p2), A.pos(p2), 1e-9);
+    near3(got.inverse_pos(got.pos(p2)), p2, 1e-9);
+  }
+};
+
+TEST_F(AnchorTests, RecoversTheBridgesAnchor) {
+  std::uniform_real_distribution<double> u(-M_PI, M_PI);
+  for (int i = 0; i < 20; ++i) {
+    const double psi = u(rng);
+    check_anchor_recovered(psi, rand_vec(rng, 3.0));
+  }
+}
+
+TEST_F(AnchorTests, MountYawDoesNotBiasIt) { check_anchor_recovered(0.7, Vec3(1.0, -2.0, 0.3), -0.8 * M_PI / 180.0); }
+
+TEST_F(AnchorTests, TrackerJumpNeedsToPersist) {
+  AnchorTracker tr(0.1, 2.0, 3);
+  const Vec3 p(1.0, 2.0, 1.0);
+  const Quat q = quat_yaw(0.3);
+  auto pair = [&](const Anchor& a) { return tr.update(p, q, a.pos(p), quat_mul(quat_yaw(a.psi), q)).second; };
+  const Anchor A(0.5, Vec3(1.0, 0.0, 0.0));
+  for (int i = 0; i < 5; ++i) EXPECT_FALSE(pair(A));
+  const Anchor B(0.5, Vec3(1.5, 0.0, 0.0));
+  EXPECT_FALSE(pair(B));   // one odd pair: a glitch
+  EXPECT_FALSE(pair(A));
+  std::vector<std::optional<std::string>> reasons;
+  for (int i = 0; i < 3; ++i) reasons.push_back(pair(B));
+  EXPECT_FALSE(reasons[0]);
+  EXPECT_FALSE(reasons[1]);
+  ASSERT_TRUE(reasons[2]);
+  EXPECT_NE(reasons[2]->find("moved"), std::string::npos);
+  near3(tr.anchor->t, B.t);
+  const Anchor C(0.5 + 5.0 * M_PI / 180.0, B.t);
+  reasons.clear();
+  for (int i = 0; i < 3; ++i) reasons.push_back(pair(C));
+  ASSERT_TRUE(reasons[2]);
+  EXPECT_NE(reasons[2]->find("yaw"), std::string::npos);
+}
+
+// ---- Output ---------------------------------------------------------------------------------------
+
+TEST(Output, SpeedCapScalesVelocityAndAcceleration) {
+  auto r = cap_command(Vec3(1, 0, 1), Vec3(2, 0, 0), Vec3(1, 1, 0), Vec3(0.5, 0, 1), 0.5, 1.0);
+  EXPECT_TRUE(r.capped);
+  EXPECT_NEAR(r.v.norm(), 0.5, 1e-7);
+  near3(r.a, Vec3(0.25, 0.25, 0));
+  near3(r.p, Vec3(1, 0, 1));
+}
+
+TEST(Output, LeadIsClamped) {
+  auto r = cap_command(Vec3(5, 0, 1), Vec3(0.3, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 1), 0.5, 1.0);
+  EXPECT_TRUE(r.capped);
+  near3(r.p, Vec3(1, 0, 1));
+}
+
+TEST(Output, UnderTheCapUnchanged) {
+  auto r = cap_command(Vec3(0.3, 0, 1), Vec3(0.4, 0, 0), Vec3(0.1, 0, 0), Vec3(0, 0, 1), 0.5, 1.0);
+  EXPECT_FALSE(r.capped);
+  near3(r.v, Vec3(0.4, 0, 0));
+}
+
+TEST(Output, CapBoundsTheFcDemand) {
+  // lagging 0.6 m behind a 1.0 m/s reference: the FC would fly 1.0 + 1.0 * 0.6 = 1.6 m/s
+  auto r = cap_command(Vec3(0.6, 0, 1), Vec3(1.0, 0, 0), Vec3(0.5, 0, 0), Vec3(0, 0, 1), 1.0, 1.0, 1.0);
+  EXPECT_TRUE(r.capped);
+  near3(r.p, Vec3(0.6, 0, 1));   // the correction is kept
+  EXPECT_NEAR((r.v + 1.0 * (r.p - Vec3(0, 0, 1))).norm(), 1.0, 1e-7);
+  near3(r.a, Vec3(0.2, 0, 0), 1e-9);   // scaled with the velocity
+  // a lateral error: the demand is still within the cap
+  r = cap_command(Vec3(0.2, 0.5, 1), Vec3(1.0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0, 1.0, 1.0);
+  EXPECT_LE((r.v + (r.p - Vec3(0, 0, 1))).norm(), 1.0 + 1e-9);
+  // the correction alone over the cap: no feed-forward, a lead of cap / gain
+  r = cap_command(Vec3(2.0, 0, 1), Vec3(1.0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0, 1.5, 1.0);
+  near3(r.v, Vec3::Zero());
+  near3(r.p, Vec3(1.0, 0, 1));
+  // under the cap: unchanged
+  r = cap_command(Vec3(0.2, 0, 1), Vec3(0.5, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 1), 1.0, 1.0, 1.0);
+  EXPECT_FALSE(r.capped);
+  near3(r.v, Vec3(0.5, 0, 0));
+}
+
+TEST(Output, DriveTargetWithinTheLookahead) {
+  near3(drive_target(Vec3(3, 0, 0.2), Vec3(1, 0, 0), Vec3(0, 0, 0.2), 0.5), Vec3(0.5, 0, 0.2));
+  const Vec3 n = drive_target(Vec3(0.1, 0.1, 0.2), Vec3(0, 0, 0), Vec3(0, 0, 0.2), 0.5);
+  EXPECT_LE(n.head<2>().norm(), 0.5);
+}
+
+TEST(Output, DriveTargetOnATrackPlannerCarrot) {
+  // the track planner's carrot: position + yaw, zero velocity; 0.5 m ahead of its odometry point, which
+  // is ~0.18 m ahead of the FC: the target is the lookahead toward it, at the FC's z
+  near3(drive_target(Vec3(0.68, 0.0, 0.25), Vec3(0, 0, 0), Vec3(0.0, 0.0, 0.05), 0.5), Vec3(0.5, 0.0, 0.05), 1e-9);
+  near3(drive_target(Vec3(0.2, 0.2, 0.25), Vec3(0, 0, 0), Vec3(0.0, 0.0, 0.05), 0.5), Vec3(0.2, 0.2, 0.05), 1e-9);
+}
+
+TEST(Output, DriveTargetOnARunOut) {
+  // the track planner's run-out puts its target up to 2.1 m from the FC on the carrot's bearing (at
+  // 1 m/s): passed as is within ~drive_lookahead (2.5), clipped beyond it
+  near3(drive_target(Vec3(2.1 * 0.6, 2.1 * 0.8, 0.25), Vec3(0, 0, 0), Vec3(0.0, 0.0, 0.05), 2.5), Vec3(1.26, 1.68, 0.05), 1e-9);
+  near3(drive_target(Vec3(3.0, 0.0, 0.25), Vec3(0, 0, 0), Vec3(0.0, 0.0, 0.05), 2.5), Vec3(2.5, 0.0, 0.05), 1e-9);
+}
+
+TEST(Output, DriveLookaheadCoversTheRunOut) {
+  // the config's drive_lookahead must not clip the track planner's run-out (2.1 s x 1.0 m/s from the FC
+  // at the Gate's 1 m/s, plus the FC/EKF and odometry disagreeing by a few cm)
+  YAML::Node cfg = YAML::LoadFile(BRIDGE_CONFIG);
+  EXPECT_GE(cfg["drive_lookahead"].as<double>(), 2.1 * 1.0 + 0.1);
+}
+
+TEST(Output, ReverseSpeed) {
+  // a velocity against the yaw is a reverse to p_cmd: |v| at most, tapering 1/s on the metres left
+  // (along the heading, the FC past the end point), 0 within 2 cm or past it
+  EXPECT_FALSE(reverse_speed(Vec3(1, 0, 0), Vec3(0.3, 0, 0), 0.0, Vec3(0, 0, 0)));   // forward
+  EXPECT_FALSE(reverse_speed(Vec3(1, 0, 0), Vec3(0, 0, 0), 0.0, Vec3(0, 0, 0)));     // a carrot
+  EXPECT_NEAR(*reverse_speed(Vec3(-1.0, 0, 0), Vec3(-0.25, 0, 0), 0.0, Vec3(0, 0, 0)), 0.25, 1e-7);
+  EXPECT_NEAR(*reverse_speed(Vec3(-1.0, 0, 0), Vec3(-0.25, 0, 0), 0.0, Vec3(-0.9, 0.3, 0)), 0.1, 1e-7);
+  EXPECT_EQ(*reverse_speed(Vec3(-1.0, 0, 0), Vec3(-0.25, 0, 0), 0.0, Vec3(-0.99, 0, 0)), 0.0);
+  EXPECT_EQ(*reverse_speed(Vec3(-1.0, 0, 0), Vec3(-0.25, 0, 0), 0.0, Vec3(-1.2, 0, 0)), 0.0);
+  // heading north, backing south
+  EXPECT_NEAR(*reverse_speed(Vec3(0, -2.0, 0), Vec3(0, -0.3, 0), M_PI / 2, Vec3(0, 0, 0)), 0.3, 1e-7);
+}
+
+TEST(Output, Geofence) {
+  Geofence f(Vec3(-1, -1, 0), Vec3(1, 1, 2));
+  EXPECT_TRUE(f.inside(Vec3(0, 0, 1)));
+  EXPECT_FALSE(f.inside(Vec3(2, 0, 1)));
+  near3(f.clamp(Vec3(2, -3, 5)), Vec3(1, -1, 2));
+}
+
+// ---- Hold -----------------------------------------------------------------------------------------
+
+TEST(Hold, StreamsWhenFresh) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, 9.95, 9.95), "STREAM");
+}
+
+TEST(Hold, PlannerStale) {
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.95, 9.95);
+  EXPECT_EQ(h.step(10.5, 10.0, 10.45), "HOLD");
+  EXPECT_NE(h.reason.find("planner stale"), std::string::npos);
+}
+
+TEST(Hold, SlamStale) {
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.95, 9.95);
+  EXPECT_EQ(h.step(10.3, 10.25, 10.0), "HOLD");
+  EXPECT_NE(h.reason.find("SLAM stale"), std::string::npos);
+}
+
+TEST(Hold, ResumeNeedsAFreshCommand) {
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.95, 9.95);
+  h.step(10.3, 10.25, 10.0);                         // SLAM stale -> HOLD at 10.3
+  EXPECT_EQ(h.step(10.4, 10.25, 10.38), "HOLD");      // SLAM back, but the command predates the hold
+  EXPECT_EQ(h.step(10.5, 10.45, 10.48), "STREAM");
+}
+
+TEST(Hold, LatchedAnchorJump) {
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.95, 9.95);
+  h.latch("frame re-anchored", 10.0);
+  EXPECT_EQ(h.step(10.1, 9.99, 10.08), "HOLD");       // command older than the jump
+  EXPECT_EQ(h.step(10.2, 10.15, 10.18), "STREAM");
+}
+
+TEST(Hold, ExternalFault) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, 9.95, 9.95, {"target outside the geofence"}), "HOLD");
+  EXPECT_EQ(h.reason, "target outside the geofence");
+}
+
+TEST(Hold, WaitBeforeAnyCommand) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, std::nullopt, 9.95), "WAIT");
+}
+
+TEST(Hold, ModeChangeHoldsUntilTheNewPlannerCommands) {
+  // the node drops the last command on a mode change and latches: no command at all, then one from the
+  // new planner, is what resumes
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.95, 9.95);
+  h.latch("mode changed to drive", 10.0);
+  EXPECT_EQ(h.step(10.1, std::nullopt, 10.08), "HOLD");
+  EXPECT_EQ(h.reason, "mode changed to drive");
+  EXPECT_EQ(h.step(10.2, 10.15, 10.18), "STREAM");
+}
+
+TEST(Hold, PlannerDeadLatchesAndNeverResumes) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, 9.99, 9.99, {}, true), "STREAM");
+  // the process is gone but its last command is only 0.1 s old: not yet
+  EXPECT_EQ(h.step(10.1, 10.0, 10.09, {}, false), "STREAM");
+  EXPECT_EQ(h.step(10.35, 10.0, 10.34, {}, false), "HOLD");
+  EXPECT_EQ(h.reason, PLANNER_DEAD);
+  EXPECT_TRUE(h.dead);
+  // the planner comes back and plans again: the leg is over, still HOLD
+  for (double t : {10.5, 11.0, 12.0}) {
+    EXPECT_EQ(h.step(t, t - 0.01, t - 0.01, {}, true), "HOLD");
+    EXPECT_EQ(h.reason, PLANNER_DEAD);
+  }
+}
+
+TEST(Hold, PlannerDeadEndsWithANewLegOnly) {
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.99, 9.99, {}, true);
+  h.step(10.4, 10.0, 10.39, {}, false);
+  h.new_leg();
+  EXPECT_EQ(h.reason, "waiting for a fresh planner command");
+  EXPECT_EQ(h.step(10.5, 10.0, 10.49, {}, false), "HOLD");   // still gone: again
+  EXPECT_EQ(h.reason, PLANNER_DEAD);
+  h.new_leg();
+  EXPECT_EQ(h.step(10.6, 10.59, 10.59, {}, true), "STREAM");  // a restarted planner, new leg
+}
+
+TEST(Hold, AliveButSilentPlannerIsTheResumableStaleHold) {
+  // SUPER with no plan, the track planner at NO_PATH or REACHED: not dead
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.99, 9.99, {}, true);
+  EXPECT_EQ(h.step(12.0, 10.0, 11.99, {}, true), "HOLD");
+  EXPECT_NE(h.reason.find("planner stale"), std::string::npos);
+  EXPECT_FALSE(h.dead);
+  EXPECT_EQ(h.step(12.1, 12.05, 12.09, {}, true), "STREAM");
+  // liveness unknown (no answer yet, master unreachable): not dead either
+  EXPECT_EQ(h.step(13.0, 12.05, 12.99, {}, std::nullopt), "HOLD");
+  EXPECT_NE(h.reason.find("planner stale"), std::string::npos);
+}
+
+TEST(Hold, APlannerThatNeverStartedKeepsTheWait) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, std::nullopt, 9.99, {}, std::nullopt), "WAIT");
+  EXPECT_EQ(h.step(30.0, std::nullopt, 29.99, {}, std::nullopt), "WAIT");
+}
+
+TEST(Hold, AKnownPlannerDeadAfterAModeChange) {
+  // the node drops the command on a mode change; that mode's planner, known from an earlier leg, is
+  // gone: dead without waiting for a first command
+  HoldLogic h(0.3, 0.2);
+  h.step(10.0, 9.99, 9.99, {}, true);
+  h.latch("mode changed to drive", 10.0);
+  EXPECT_EQ(h.step(10.1, std::nullopt, 10.09, {}, false), "HOLD");
+  EXPECT_EQ(h.reason, PLANNER_DEAD);
+}
+
+// ---- FcPose (the FC pose's freshness, owner decision 2026-10-28) ------------------------------------
+
+TEST(FcPose, NeverThenOk) {
+  FcPoseGuard g(0.3, 5);
+  EXPECT_EQ(g.check(10.0), "never");
+  EXPECT_FALSE(g.age(10.0));
+  g.on_pose(10.0, tag(1));
+  EXPECT_EQ(g.check(10.1), "ok");
+  EXPECT_NEAR(*g.age(10.1), 0.1, 1e-7);
+}
+
+TEST(FcPose, StaleKeepsTheLastGoodPose) {
+  FcPoseGuard g(0.3, 5);
+  for (int k = 0; k < 10; ++k) g.on_pose(10.0 + 0.02 * k, tag(k));
+  EXPECT_EQ(g.check(10.3), "ok");   // 0.12 s old
+  EXPECT_EQ(g.check(10.6), "stale");
+  EXPECT_EQ(g.good->p[0], 9);
+}
+
+TEST(FcPose, ResumeNeedsNFreshPoses) {
+  FcPoseGuard g(0.3, 5);
+  g.on_pose(10.0, tag(-1));
+  EXPECT_EQ(g.check(11.0), "stale");
+  for (int k = 0; k < 4; ++k) {
+    g.on_pose(11.0 + 0.02 * k, tag(100 + k));
+    EXPECT_EQ(g.check(11.0 + 0.02 * k), "stale");
+    EXPECT_EQ(g.good->p[0], -1);   // still the pose from before the gap
+  }
+  g.on_pose(11.08, tag(104));
+  EXPECT_EQ(g.check(11.08), "ok");
+  EXPECT_EQ(g.good->p[0], 104);
+}
+
+TEST(FcPose, AGapSeenOnlyOnArrivalIsStale) {
+  // no check during the gap (the tick was late): the arrival after it still starts the count
+  FcPoseGuard g(0.3, 3);
+  g.on_pose(10.0, tag(1));
+  g.on_pose(10.5, tag(2));
+  EXPECT_EQ(g.check(10.5), "stale");
+  EXPECT_EQ(g.good->p[0], 1);
+}
+
+TEST(FcPose, ATrickleStaysStale) {
+  FcPoseGuard g(0.3, 5);
+  g.on_pose(10.0, tag(1));
+  for (int k = 1; k < 20; ++k) {
+    const double t = 10.0 + 0.4 * k;   // 2.5 Hz: each pose fresh on arrival
+    EXPECT_EQ(g.check(t - 0.01), "stale");
+    g.on_pose(t, tag(2));
+    EXPECT_EQ(g.check(t), "stale");
+  }
+  EXPECT_EQ(g.good->p[0], 1);
+}
+
+// ---- Health ---------------------------------------------------------------------------------------
+
+static bool any_has(const std::vector<std::string>& v, const char* s) {
+  for (const auto& x : v)
+    if (x.find(s) != std::string::npos) return true;
+  return false;
+}
+
+TEST(Health, FastlioHealth) {
+  HealthCheck hc;
+  hc.on_health(10.0, {100, 0, 0, 0, 20000, 0, 0, 80});
+  EXPECT_TRUE(any_has(hc.faults(10.1), "matched"));
+  hc.on_health(10.2, {2000, 0, 0, 0, 20000, 0, 0, 300});
+  EXPECT_TRUE(any_has(hc.faults(10.3), "latency"));
+  EXPECT_TRUE(hc.faults(11.0).empty());   // too old: ignored
+}
+
+TEST(Health, HeightCrossCheck) {
+  HealthCheck hc(150.0, 5000.0, 250.0, 0.5);
+  hc.on_range(10.0, 0.20, 0.25);   // learns fc z - range = 0.05
+  hc.on_range(10.5, 2.00, 2.06);
+  EXPECT_TRUE(hc.faults(10.6).empty());
+  hc.on_range(11.0, 4.50, 2.10);   // log 233: SLAM says 2.1 m, the rangefinder 4.5 m
+  EXPECT_TRUE(any_has(hc.faults(11.1), "rangefinder"));
+}
+
+// ---- flight yaw (owner rule 2026-10-29) -------------------------------------------------------------
+
+TEST(FlightYaw, TravelHeadingAboveTheSpeedThreshold) {
+  EXPECT_FALSE(travel_yaw(Vec3(0.2, 0.2, 1.0), 0.3));          // 0.28 m/s horizontal: slow (z ignored)
+  EXPECT_NEAR(*travel_yaw(Vec3(0.0, 0.5, -0.3), 0.3), M_PI / 2, 1e-12);
+  EXPECT_NEAR(*travel_yaw(Vec3(-1.0, 0.0, 0.0), 0.3), M_PI, 1e-12);
+  EXPECT_NEAR(*travel_yaw(Vec3(1.0, -1.0, 0.0), 0.3), -M_PI / 4, 1e-12);
+}
+
+TEST(FlightYaw, RateLimitedStepTheShortWayRound) {
+  EXPECT_NEAR(yaw_step(0.0, 1.0, 0.1), 0.1, 1e-12);
+  EXPECT_NEAR(yaw_step(0.0, -1.0, 0.1), -0.1, 1e-12);
+  EXPECT_NEAR(yaw_step(0.0, 0.05, 0.1), 0.05, 1e-12);          // within a step: there
+  EXPECT_NEAR(yaw_step(3.1, -3.1, 0.1), wrap_pi(3.1 + 0.0831853071795865), 1e-9);   // across +-pi
+  double y = 0.0;
+  for (int i = 0; i < 50; ++i) y = yaw_step(y, M_PI / 2, 60.0 * M_PI / 180.0 / 50.0);   // 1 s at 60 deg/s, 50 Hz
+  EXPECT_NEAR(y, M_PI / 3, 1e-9);
+}
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}

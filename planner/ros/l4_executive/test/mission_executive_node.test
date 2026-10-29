@@ -1,0 +1,4 @@
+<launch>
+  <!-- the executive's scenarios: the test node is the fake world and starts the executive per scenario -->
+  <test test-name="test_mission_executive_node" pkg="l4_executive" type="test_mission_executive_node" time-limit="900.0"/>
+</launch>

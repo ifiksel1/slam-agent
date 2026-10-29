@@ -22,8 +22,9 @@ GPS1_TYPE 0
 SIM_GPS1_ENABLE 0
 # Planner flights (D4): a stale Guided target stops the vehicle after 0.5 s.
 Q_GUID_TIMEOUT 0.5
-# The render node puts the lidar 0.178 m (7 in, measured) ahead of the FC; the robot's file says 0.22.
-VISO_POS_X 0.178
+# The render node puts the lidar 0.193 m ahead of the FC (~lidar_fwd), as the robot's file (owner 2026-10-29:
+# FAST-LIO's odometry point measured 0.193 m ahead of the body centre; it was 0.22).
+VISO_POS_X 0.193
 # The robot's CAN ports: SITL simulates CAN over UDP multicast, which a loopback-only namespace
 # cannot route (SITL exits "udp connect failed on port 20721"); no CAN devices are simulated anyway.
 CAN_P1_DRIVER 0

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(l4_bringup)
+find_package(catkin REQUIRED)
+catkin_package()
+# config/planner_bridge.yaml is a link to planner/config/planner_bridge.yaml (copy the package with cp -L)
+install(DIRECTORY launch config DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

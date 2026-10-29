@@ -34,9 +34,9 @@ case $case_ in
   baseline)            TRIG="start"; ACT=(none) ;;
   # 1 / coast (D4): the planner killed at speed; the bridge killed at speed (no setpoints at all)
   coast_fly_super)     TRIG=$FLY; ACT=("pkill:-9 -x fsm_node") ;;
-  coast_fly_bridge)    TRIG=$FLY; ACT=("pkill:-9 -f '^python3 -u /planner/planner_bridge.py'") ;;
-  coast_drive_track)   TRIG=$DRV; ACT=("pkill:-9 -f '^python3 -u /planner/track_planner.py'") ;;
-  coast_drive_bridge)  TRIG=$DRV; ACT=("pkill:-9 -f '^python3 -u /planner/planner_bridge.py'") ;;
+  coast_fly_bridge)    TRIG=$FLY; ACT=("pkill:-9 -f '^/ws[^ ]*/lib/l4_bridge/planner_bridge'") ;;
+  coast_drive_track)   TRIG=$DRV; ACT=("pkill:-9 -f '^/ws[^ ]*/lib/l4_track/track_planner'") ;;
+  coast_drive_bridge)  TRIG=$DRV; ACT=("pkill:-9 -f '^/ws[^ ]*/lib/l4_bridge/planner_bridge'") ;;
   # 2 SLAM stale: /Odometry and /cloud_registered stop (FAST-LIO dead) or freeze (stuck), 8 s, then back
   stale_fly_stop)      TRIG=$FLY; ACT=('render:{"stale": "stop"}' "sleep:8" 'render:{"stale": "none"}') ;;
   stale_fly_freeze)    TRIG=$FLY; ACT=('render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;

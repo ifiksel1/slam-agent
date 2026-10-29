@@ -6,7 +6,7 @@ Runs inside an L2 run's ROS container (see closed_loop.sh), after SUPER and the 
 1. Converts the mission's waypoints from the map frame (the MARSIM mission files) to the fc frame,
    through /sim/map_to_planner (map -> planner) and the bridge's /planner_bridge/anchor (planner -> fc),
    and writes /run/mission_fc.yaml. The executive converts them back with the live anchor (D7).
-2. Starts the mission executive on that file.
+2. Starts the mission executive (the C++ l4_executive node; BRIDGE_IMPL=py: the former Python one) on that file.
 3. Arms SITL (SIMULATION ONLY: tcp 5763 inside the run's private network namespace; on the robot the
    pilot arms, D5) and calls /mission_executive/start.
 4. Waits for the executive's DONE or STOPPED, then lands in SITL (QRLAND) and disarms.
@@ -15,6 +15,7 @@ usage: fly_mission.py <mission_map_frame.yaml> [timeout_s]
 """
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -82,13 +83,20 @@ for leg in doc["legs"]:
         leg["goal"] = [round(float(x), 3) for x in fc[:len(g)]]
     if "at" in leg:      # land legs: the spot, on the ground
         leg["at"] = [round(float(x), 3) for x in map_to_fc(list(leg["at"])[:2] + [0.0])[:2]]
+    if "yaw" in leg:     # a deliberate waypoint yaw (deg): map heading -> fc heading
+        leg["yaw"] = round(float(leg["yaw"]) + math.degrees(anchor["psi"] - yaw), 2)
 doc["frame"] = "fc"
 doc["note"] = "converted from %s (map frame) by fly_mission.py" % src
 yaml.safe_dump(doc, open(OUT, "w"), sort_keys=False)
 print("mission in the fc frame: %s" % OUT, flush=True)
 
-ex = subprocess.Popen(["python3", "-u", "/planner/mission_executive.py", "__name:=mission_executive",
-                       "_mission:=" + OUT, "_on_unreachable:=next"],
+# the mission executive: the C++ node (l4_executive, copied into the run by closed_loop.sh), or with
+# BRIDGE_IMPL=py the former Python one from a planner/ copy that still has it (A/B only)
+if os.environ.get("BRIDGE_IMPL", "cpp") == "py":
+    EXEC_CMD = ["python3", "-u", "/planner/mission_executive.py"]
+else:
+    EXEC_CMD = [os.environ.get("EXEC_BIN", "/ws_bx/install/lib/l4_executive/mission_executive")]
+ex = subprocess.Popen(EXEC_CMD + ["__name:=mission_executive", "_mission:=" + OUT, "_on_unreachable:=next"],
                       stdout=open("/run/logs/executive.log", "w"), stderr=subprocess.STDOUT)
 rospy.wait_for_service("/mission_executive/start", 60)
 

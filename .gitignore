@@ -20,3 +20,4 @@ li_init_result/
 
 # LI-Init calibration archive bags (multi-GB)
 bags/
+planner/sim/course/*.pcd

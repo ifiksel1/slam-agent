@@ -6,7 +6,7 @@
 
 Extends ~/sim/l2/clear_all.py (box at the odometry point, flying only) for driving:
 - the frame: a 0.508 x 0.457 x 0.203 m box (length, width, height) with its centre ODOM_AHEAD 0.193 m
-  behind the odometry point (track_core.ODOM_AHEAD) and its bottom LIDAR_UP below it (SITL's vehicle
+  behind the odometry point (l4_track::ODOM_AHEAD, planner/ros/l4_track) and its bottom LIDAR_UP below it (SITL's vehicle
   stands on the map's z = 0 and the render node's lidar sits LIDAR_UP above it), in the body's attitude;
 - floor contact ignored: map points less than --floor-ignore above SITL's ground (map z = 0) are left
   out, in every phase. The merged map's floor is a smear whose top lies around z = 0 with 0.1-0.3 m

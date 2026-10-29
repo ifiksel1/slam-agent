@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>l4_executive</name>
+  <version>1.0.0</version>
+  <description>QuadRover mission executive (L4, D5/D6/D7): flies and drives a YAML mission through the
+    planner bridge (Guided setpoints) with NAV_TAKEOFF / NAV_LAND and mode changes among GUIDED, QRLOITER,
+    QRLAND and QRSMARTRTL only; never arms, disarms or sets parameters. C++ port of the former
+    planner/mission_executive.py.</description>
+  <maintainer email="idan@revoluterobotics.com">idan</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>l4_common</depend>
+  <depend>yaml-cpp</depend>
+  <build_depend>eigen</build_depend>
+  <test_depend>rostest</test_depend>
+  <test_depend>rosunit</test_depend>
+</package>

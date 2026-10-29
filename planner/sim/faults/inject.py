@@ -157,7 +157,7 @@ def last_exec():
 
 
 def exec_alive():
-    return subprocess.run(["pgrep", "-f", "/planner/mission_executive.py"], capture_output=True).returncode == 0
+    return subprocess.run(["pgrep", "-f", "/lib/l4_executive/mission_executive|/planner/mission_executive.py"], capture_output=True).returncode == 0
 
 
 # ---- trigger --------------------------------------------------------------------------------------
@@ -276,7 +276,7 @@ def r3(x):
 res = {"case": args.case, "trigger": args.trigger, "actions": args.action, "fired_by": fired_by,
        "end_why": end_why, "events": events}
 res["planner_md5"] = {p.split("/")[-1]: hashlib.md5(open(p, "rb").read()).hexdigest()[:8]
-                      for p in sorted(glob.glob("/planner/*.py"))}
+                      for p in sorted(glob.glob("/planner/*.py") + glob.glob("/ws*/install/lib/l4_*/*"))}
 with lock:
     T = np.array(truth) if truth else np.zeros((0, 7))
     M, E, B, X, K = list(modes), list(execs), list(bridge), list(texts), list(track)

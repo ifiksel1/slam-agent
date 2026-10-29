@@ -59,7 +59,7 @@ Environment variables for `up`:
 
 ## Closed loop with the landing check
 
-`closed_loop.sh` starts the planner bridge, SUPER and `landing_check.py` (it reads `/planner/cloud` and
+`closed_loop.sh` starts the C++ planner bridge (`l4_bridge`), SUPER and the C++ `landing_check` node (`l4_landing`; it reads `/planner/cloud` and
 `/planner/odom` and answers `/planner/landing_spot` on `/planner/landing_clear` and
 `/planner/landing_status`, all recorded in the bag). A mission's `land` legs fly over the spot,
 ask the check and land only on a clear answer; otherwise the executive holds in QRLoiter and stops
@@ -83,13 +83,50 @@ then the check).
 
 ## Closed loop that drives and flies
 
-`closed_loop.sh` also starts `track_planner.py`. A mission's `drive` legs go to the track planner on
+`closed_loop.sh` also starts the C++ `track_planner` node (`l4_track`). A mission's `drive` legs go to the track planner on
 `/planning/drive_goal`. The executive switches the bridge's mode per leg on `/planner_bridge/set_mode`
 (latched) and enables the bridge only once the bridge's status reports that mode. In drive mode
 the bridge takes only the track planner's carrot (`/track_planner/pos_cmd`) and streams Rover
 Guided position targets (mask 2552). In flight mode it takes only SUPER's `/planning/pos_cmd`.
 SUPER keeps publishing toward its last goal after a landing, so the two planners publish on
 separate topics.
+
+The track planner and the landing check are C++ (`planner/ros`: `l4_track`, `l4_landing`; ported from
+Python 2026-10-29). `closed_loop.sh` copies a catkin install space of them (`L4_WS`, default
+`~/sim/cpp_ws/install`) into the ROS container and starts them with `rosrun`. Build it, and run their
+tests and the real-map gate, in the l2 image, network-less:
+
+```bash
+# on Shannon: the packages in ~/sim/cpp_ws/src/{l4_track,l4_landing} (copies of planner/ros/*)
+docker run --rm --network none --cpus 8 -u $(id -u):$(id -g) -e HOME=/tmp -v ~/sim/cpp_ws:/ws -w /ws \
+  --entrypoint bash l4-sim-l2:latest -c "source /opt/ros/noetic/setup.bash; source /super_ws/devel/setup.bash;
+  catkin_make -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/ws/install -j8 install tests"
+# gtests (real-data cases with LANDING_MAPS / LANDING_SIM set), rostests (rostest l4_track track_planner_node.test,
+# rostest l4_landing landing_check_node.test), and the real-map gate (formerly test_track_planner.py --gate):
+taskset -c 20-23 ~/sim/cpp_ws/devel/lib/l4_track/track_gate --gate --map hp_1015:pcd=...,meta=...,kf=... ...
+```
+
+The planner bridge and the mission executive are C++ too (`planner/ros`: `l4_bridge`, `l4_executive`,
+with the shared headers in `l4_common`; ported from Python 2026-10-29: same node names, topics,
+parameters, services, status JSON and mission format). `closed_loop.sh` copies their install space
+(`L4_BRIDGE_WS`, default `~/sim/cpp_ws_bx/install`) to `/ws_bx/install` and starts
+`/ws_bx/install/lib/l4_bridge/planner_bridge`; `fly_mission.py` starts
+`/ws_bx/install/lib/l4_executive/mission_executive`. `BRIDGE_IMPL=py` with a `PLANNER_DIR` that still
+holds the Python files (Shannon: `~/sim/l2/planner_bx_py`) runs the former Python pair (A/B only).
+
+```bash
+# on Shannon: ~/sim/cpp_ws_bx/planner/{ros/{l4_common,l4_bridge,l4_executive},config,missions} (copies)
+~/sim/cpp_ws_bx/build.sh install     # catkin_make --source planner/ros ... install (l4-sim-l2, network-less)
+~/sim/cpp_ws_bx/test.sh              # run_tests: gtests and rostests, then catkin_test_results
+~/sim/cpp_ws_bx/ab/ab_bridge.sh b1 py cpp   # A/B: the Python and C++ bridges on run b1's recorded inputs
+```
+
+Since 2026-10-29 the bridge points the nose along the travel direction in flight (`~flight_yaw travel`;
+SUPER's own yaw swung up to 100 deg in hovers), and the executive yaws at waypoints: at the end of a fly
+leg it faces the next fly / land leg, over a land spot it faces the drive that follows, and it waits for
+the yaw to settle (WAYPOINT_YAW: < 5 deg/s and < 0.1 m/s over 1 s) before the next leg or the landing
+check; a leg's `yaw` overrides the direction, `{type: scan, yaw_sweep_deg: 360}` turns on the spot
+(`missions/format_reference.yaml`). The bag records `/planner_bridge/yaw_cmd`.
 
 How QuadRover takes the transitions (firmware `Rover/mode_guided*.cpp`, seen in SITL):
 - `NAV_LAND` in GUIDED lands, says "Guided landing complete" and drives on in GUIDED, armed.
@@ -102,11 +139,16 @@ How QuadRover takes the transitions (firmware `Rover/mode_guided*.cpp`, seen in 
 - A position hold at the vehicle is not a stop on the ground. The hold point is taken while the
   robot moves, so it is soon behind it, and Rover Guided orbits it (cl36: about 0.28 m/s for
   15 s, and the takeoff went in during a slowdown). A zero-speed heading target let SITL's rover
-  lurch into reverse and creep (cl37, cl38). In drive mode the bridge's HOLD therefore streams
-  nothing. Rover Guided drives on to the last target it was sent (at most `drive_lookahead`
-  ahead, in the direction of travel), counts it reached and brakes, which is D4's "a dead
-  planner stops the rover within the lookahead". Before a takeoff that follows a drive, the
-  executive keeps the bridge on until the vehicle has stood still for 1 s.
+  lurch into reverse and creep (cl37, cl38). In drive mode the bridge's HOLD for a live but
+  silent planner (NO_PATH, REACHED) therefore streams nothing: Rover Guided drives on to the last
+  target it was sent, counts it reached and brakes.
+  A dead planner is different (owner, 2026-10-29: the robot just stops, no continuation): once
+  the planner process is gone the bridge latches `planner_dead` and sends a zero-speed velocity +
+  heading target at the current heading (no run-out target); the executive goes STOPPED "planner
+  died" in GUIDED with the bridge off (p2: stopped 0.54 m from the kill at 0.47 m/s, with the
+  friction-fixed SITL; the cl37/38 reverse lurch did not recur). Flying, it holds, then QRLoiter
+  and STOPPED. Before a takeoff that follows a drive, the executive keeps the bridge on until
+  the vehicle has stood still for 1 s, and stops the mission if it doesn't.
 
 `DRIVE_PARMS` (closed_loop.sh) adds the nuc-04 robot's driving params to SITL through
 `EXTRA_PARMS`: `WP_SPEED 0.5`, `WP_RADIUS 0.3`, `WP_PIVOT_ANGLE 60`, `CRUISE_SPEED 0.5`,
@@ -129,7 +171,7 @@ the robot will.
 `TRACK_Z_LO` (closed_loop.sh default 0.30 m; the node's own default is 0.15) is the track
 planner's obstacle band floor in SITL. The rendered floor also steps 0.15-0.25 m between areas
 (map drift baked in). At 0.15 the live window's evidence memory held most of the floor beyond
-1.5 m as walls, and there was no path (cl31). 0.30 is track_core's whole-map value for the same
+1.5 m as walls, and there was no path (cl31). 0.30 is the track planner's whole-map value (l4_track::Config) for the same
 smear. It is a sim-only param: on the robot the live scans have no map drift.
 
 The bag also records the bridge mode (`/planner_bridge/mode`, `/planner_bridge/mode_code`),
