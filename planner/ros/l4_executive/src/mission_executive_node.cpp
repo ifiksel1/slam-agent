@@ -71,14 +71,31 @@
 // the bridge a waypoint yaw facing that leg (/planner_bridge/yaw_cmd, latched std_msgs/Float64, fc frame,
 // rad; NaN = none) and waits, hovering, until the yaw has settled (WAYPOINT_YAW: yaw rate under
 // ~yaw_settle_rate_deg 5 deg/s and horizontal speed under ~yaw_settle_speed 0.1 m/s over 1 s, within
-// ~yaw_tol_deg 10 of the waypoint yaw) before the next leg. A land leg does the same over its spot
+// ~yaw_tol_deg 10 of the waypoint yaw) before the next leg. While the waypoint yaw is set the bridge holds
+// a fixed point (the reached goal) instead of following SUPER, whose hover round a reached goal never
+// stands still (Gate L2 b2); a waypoint with no yaw to face sends the yaw the vehicle has, so the bridge
+// holds there too. A land leg does the same over its spot
 // before it asks the landing check: it faces the drive leg that follows (so the tank starts aligned),
 // or keeps its yaw. Not settled within ~yaw_settle_s (15 s): "yaw did not settle", the
 // landing-not-clear path (QRLOITER, STOPPED). A leg's optional "yaw" (deg, fc frame) is a deliberate
 // waypoint yaw at its end and overrides the direction of the next leg. Each new leg clears the waypoint
-// yaw. A scan leg ({type: scan, yaw_sweep_deg: 360}, optional scan_rate_deg, default ~scan_rate_deg 20)
+// yaw. A fly or land leg that starts with the bridge not streaming (after a takeoff, or a QRLOITER)
+// first faces its goal the same way ("for": "leg start"). A scan leg ({type: scan, yaw_sweep_deg: 360}, optional scan_rate_deg, default ~scan_rate_deg 20)
 // turns on the spot at a waypoint in the air, through the sweep, then settles (the occupancy-grid reason
 // to yaw); it needs a fly leg before it.
+//
+// SUPER's re-seed (Gate L2 b7). SUPER takes a goal that comes while it follows a trajectory as a replan from
+// that trajectory, and one that comes at rest with PlanFromRest. In b7, after the 3.55 s leg-start turn on
+// leg 7, SUPER had long reached its post-takeoff hover point and sat at rest; its PlanFromRest toward leg 7
+// (pole_b on the straight line 2.2 m ahead, in view once the nose faced it) found a path every time but its
+// backup trajectory failed ("Pos violation", ~4600 times in 20 s), so it sent nothing, the vehicle held, the
+// inputs never changed, and the leg went unreachable. b5, without the turn, gave SUPER leg 7's goal mid-climb
+// and flew it. So after a leg-start turn the executive re-seeds SUPER (PLANNER_SEED, "why": "leg start"): a
+// goal ~leg_start_seed_dz (0.3 m) straight above the vehicle (never below: toward the inflated floor), and
+// after ~leg_start_seed_s (0.5 s) with SUPER commanding again (the bridge's "planner_age" fresh) it sends the
+// leg's goal, which SUPER then replans from its moving trajectory. The same on a flight leg whose planner has
+// been silent ~planner_stuck_s (3 s; "planner_age") with the goal sent at least that long ago: re-seed, send
+// the goal again, the no-progress clock restarted; at most ~planner_stuck_max (2) times a leg.
 //
 // One difference from the Python node: a MAVROS service that cannot be called (MAVROS gone) counts as a
 // refused command here (success false); the Python node raised ServiceException and died (RESULTS.md 7c).
@@ -172,6 +189,13 @@ class MissionExecutive {
     yaw_tol_ = l4::param_double(pnh_, "yaw_tol_deg", 10.0) * (M_PI / 180.0);
     waypoint_min_dist_ = l4::param_double(pnh_, "waypoint_min_dist", 0.3);   // nearer: no direction to face
     scan_rate_ = l4::param_double(pnh_, "scan_rate_deg", 20.0) * (M_PI / 180.0);
+    // SUPER's re-seed (Gate L2 b7): a short vertical move from the vehicle, so that the leg's goal reaches
+    // SUPER while it follows a trajectory, not at rest. After the leg start's turn, and when SUPER has been
+    // silent ~planner_stuck_s on a flight leg (at most ~planner_stuck_max times a leg). 0 disables either
+    seed_dz_ = l4::param_double(pnh_, "leg_start_seed_dz", 0.3);
+    seed_s_ = l4::param_double(pnh_, "leg_start_seed_s", 0.5);
+    stuck_s_ = l4::param_double(pnh_, "planner_stuck_s", 3.0);
+    stuck_max_ = l4::param_int(pnh_, "planner_stuck_max", 2);
     bridge_ = {{"state", "OK"}, {"slam_ok", true}};
     bridge_ok_since_ = now();
 
@@ -496,6 +520,34 @@ class MissionExecutive {
     return std::atan2(y - (*p)[1], x - (*p)[0]);
   }
 
+  // re-seed SUPER (Gate L2 b7): a goal ~leg_start_seed_dz straight above the vehicle (always up: b10's
+  // downward seeds took it toward the inflated floor), then ~leg_start_seed_s with SUPER commanding before the caller sends the
+  // leg's goal. SUPER handles a goal that comes while it follows a trajectory as a replan from that
+  // trajectory; one that comes at rest goes to its PlanFromRest, whose backup trajectory failed every
+  // attempt for 20 s in b7 (leg 7, pole_b on the line 2.2 m ahead: "Pos violation") with nothing sent, so
+  // the vehicle never moved and nothing changed. A vertical move toward no obstacle is planned from rest
+  // without that backup (all of it in view), and the leg's goal then comes mid-move (as in b5, mid-climb).
+  // False when there is no seed to send (disabled, no pose).
+  bool seed_planner(int idx, const Vec3& target, const std::string& why) {
+    const auto here = pose_copy();
+    if (seed_dz_ <= 0 || !here) return false;
+    const Vec3 seed((*here)[0], (*here)[1], (*here)[2] + seed_dz_);
+    const Vec3 planner = publish_goal(seed);
+    report({{"phase", "PLANNER_SEED"}, {"leg", idx}, {"why", why}, {"seed_fc", vec_json(seed)}, {"seed_planner", vec_json(planner)}});
+    // SUPER commanding again (the bridge's planner_age fresh; an older bridge without it: the time alone)
+    const double t0 = now();
+    while (!shutdown() && now() - t0 < seed_s_ + 2.0) {
+      l4::ojson age;
+      {
+        std::lock_guard<std::mutex> g(lock_);
+        age = l4::get(bridge_, "planner_age");
+      }
+      if (now() - t0 >= seed_s_ && (!age.is_number() || age.get<double>() <= 0.2)) break;
+      sleep(0.05);
+    }
+    return true;
+  }
+
   // a leg's deliberate waypoint yaw ("yaw", deg, fc frame)
   static std::optional<double> leg_yaw(const l4::ojson& leg) {
     if (!leg.contains("yaw")) return std::nullopt;
@@ -508,6 +560,8 @@ class MissionExecutive {
   double unreachable_hold_s_, map_rebuild_s_, landing_check_s_, takeoff_timeout_s_, land_timeout_s_, goal_resend_s_,
       bridge_mode_timeout_s_, takeoff_settle_s_, drive_progress_m_, goal_settle_s_;
   double yaw_settle_s_, yaw_settle_rate_, yaw_settle_speed_, yaw_tol_, waypoint_min_dist_, scan_rate_;
+  double seed_dz_, seed_s_, stuck_s_;
+  int stuck_max_;
   ros::Publisher yaw_pub_;
 
   std::mutex lock_;   // the inputs, written by the callbacks
@@ -625,7 +679,23 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
     std::lock_guard<std::mutex> g(lock_);
     goals_before = track_goals_;
   }
+  bool turned = false;
+  if (!drive && flying_ && !streaming_) {
+    // a flight leg with the bridge not streaming yet (after a takeoff, or after a QRLOITER): the waypoint at
+    // its start (owner 2026-10-29: the robot yaws only at waypoints). Face the leg, hovering, before it
+    // starts (Gate L2 b5, leg 7: off the ground facing the drive, the nose turned 100 deg in flight)
+    const std::optional<double> y = heading_to(target[0], target[1]);
+    if (y) {
+      publish_yaw(y);
+      bridge_enable(true);
+      if (Why w = waypoint(idx, y, "leg start")) return w;
+      turned = true;
+    }
+  }
   publish_yaw(std::nullopt);   // the last waypoint's yaw is over: the nose follows the travel direction
+  // after the turn SUPER has long reached the hover point it was given and sits at rest (b7: the 3.55 s turn
+  // on leg 7, then PlanFromRest failing for 20 s): re-seed it so the leg's goal comes while it moves
+  if (turned) seed_planner(idx, target, "leg start");
   Vec3 planner = publish_goal(target, drive);
   if (!drive && !streaming_ && goal_settle_s_ > 0) sleep(goal_settle_s_);   // SUPER plans the new goal before anything streams
   bridge_enable(true);
@@ -636,6 +706,7 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
   std::optional<Vec3> moved_from;   // drive legs: driving on counts as progress (a detour round an obstacle
   double last_send = t0;            // first takes the vehicle no closer to the goal)
   bool held = false;
+  int reseeds = 0;   // SUPER re-seeded after falling silent on this leg
   const double accept_radius = num(leg["accept_radius"]), no_progress_s = num(leg["no_progress_s"]),
                leg_timeout_s = num(leg["leg_timeout_s"]);
   while (!shutdown()) {
@@ -691,6 +762,22 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
         moved_from = *pos;
       }
       if (t - last_progress_t > no_progress_s || t - t0 > leg_timeout_s) return std::string("unreachable");
+      // SUPER silent on a flight leg (the bridge's planner_age; its PlanFromRest failing at rest sends
+      // nothing, so nothing moves and nothing changes, Gate L2 b7): re-seed it and send the goal again
+      const l4::ojson age = l4::get(bridge, "planner_age");
+      if (!drive && stuck_s_ > 0 && reseeds < stuck_max_ && age.is_number() && age.get<double>() >= stuck_s_ &&
+          t - last_send >= stuck_s_ && l4::truthy(l4::get(bridge, "enabled", true))) {
+        reseeds += 1;
+        report({{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"planner_silent_s", l4::py_round(age.get<double>(), 2)},
+                {"reseed", reseeds}});
+        if (seed_planner(idx, target, "planner silent")) {
+          planner = publish_goal(target, drive);
+          last_send = now();
+          last_progress_t = last_send;   // a fresh start for the re-sent goal
+          report({{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"resent", true}, {"goal_planner", vec_json(planner)}});
+        }
+        continue;
+      }
       if (goal_resend_s_ > 0 && t - last_send > goal_resend_s_) {
         publish_goal(target, drive);
         last_send = t;
@@ -779,7 +866,14 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
 // keep the yaw it has) and hover with the yaw settled; none when settled, "yaw did not settle" after
 // ~yaw_settle_s (the caller takes the landing-not-clear path: QRLOITER, STOPPED)
 Why MissionExecutive::waypoint(int idx, std::optional<double> yaw, const std::string& why) {
-  publish_yaw(yaw);
+  // the bridge holds a fixed point (not SUPER's hover round its goal) while a waypoint yaw is set (Gate L2
+  // b2), so "keep the yaw it has" goes out as the yaw it has now
+  std::optional<double> hold_yaw = yaw;
+  if (!hold_yaw) {
+    std::lock_guard<std::mutex> g(lock_);
+    hold_yaw = yaw_;
+  }
+  publish_yaw(hold_yaw);
   l4::ojson r = {{"phase", "WAYPOINT_YAW"}, {"leg", idx}, {"for", why}};
   r["yaw_deg"] = yaw ? l4::ojson(l4::py_round(*yaw * (180.0 / M_PI), 1)) : l4::ojson(nullptr);
   report(r);

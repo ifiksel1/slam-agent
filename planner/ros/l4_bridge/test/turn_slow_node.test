@@ -1,0 +1,12 @@
+<launch>
+  <!-- the turn slowdown (owner 2026-10-29): the bridge with its defaults, except no position correction
+       (fc_pos_p 0) and no lead clamp (max_lead 100), so each setpoint is the replayed reference itself -->
+  <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
+    <param name="speed_cap" value="1.0"/>
+    <param name="fc_pos_p" value="0.0"/>
+    <param name="max_lead" value="100.0"/>
+    <!-- a long lag limit, so the cases see the slowdown hold and the lag level off (default 0.5 s) -->
+    <param name="turn_slow_max_lag_s" value="2.0"/>
+  </node>
+  <test test-name="test_bridge_turn_slow_node" pkg="l4_bridge" type="test_bridge_turn_slow_node" time-limit="120.0"/>
+</launch>

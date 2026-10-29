@@ -319,6 +319,79 @@ double yaw_step(double current, double desired, double max_step) {
   return wrap_pi(current + std::max(-max_step, std::min(max_step, d)));
 }
 
+double yaw_max_step(double rate_max, double dt, double dt_max) {
+  return rate_max * std::max(0.0, std::min(dt, dt_max));
+}
+
+Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, double goal_max) {
+  if (goal_fc && (*goal_fc - p_now).norm() <= goal_max) return *goal_fc;
+  return p_now;
+}
+
+bool departed(const Vec3& point, const std::optional<Vec3>& goal_fc, bool goal_new, const Vec3& p_cmd, const Vec3& v_cmd,
+              double speed_min, double behind_tol, double min_dist) {
+  if (!goal_fc) return true;   // no goal known: nothing to wait for
+  Eigen::Vector2d d = (*goal_fc - point).head<2>();
+  const double n = d.norm();
+  if (n <= min_dist) return goal_new;
+  d /= n;
+  return v_cmd.head<2>().dot(d) > speed_min && (p_cmd - point).head<2>().dot(d) >= -behind_tol;
+}
+
+// ---- the turn slowdown ------------------------------------------------------------------------------
+
+double turn_speed_frac(double err, double start, double full, double min_frac) {
+  if (err <= start) return 1.0;
+  if (err >= full || full <= start) return min_frac;
+  const double x = (err - start) / (full - start);
+  const double s = x * x * (3.0 - 2.0 * x);
+  return 1.0 - (1.0 - min_frac) * s;
+}
+
+std::optional<double> turn_heading_error(double yaw, const Vec3& v, const Vec3& a, double lookahead, double speed_min) {
+  if (std::hypot(v[0], v[1]) <= speed_min) return std::nullopt;
+  double err = std::abs(wrap_pi(yaw - std::atan2(v[1], v[0])));
+  const Vec3 ahead = v + a * lookahead;
+  if (lookahead > 0 && std::hypot(ahead[0], ahead[1]) > speed_min)
+    err = std::max(err, std::abs(wrap_pi(yaw - std::atan2(ahead[1], ahead[0]))));
+  return err;
+}
+
+double replay_rate(double allowed, double speed, double lag, double catchup, double max_lag) {
+  // catching up only beyond REPLAY_LAG_MIN: SUPER's commands arrive in bursts against the bridge's tick,
+  // and a replay sitting at the newest one would otherwise flick between catching up and SUPER's pace
+  double rate = lag > REPLAY_LAG_MIN ? std::max(1.0, catchup) : 1.0;
+  if (speed > 1e-6) rate = std::min(rate, std::max(0.0, allowed) / speed);
+  // near the lag limit the rate's floor rises linearly to SUPER's pace (a hard switch at max_lag flicked
+  // between the two with each burst of commands)
+  const double band = std::min(REPLAY_LAG_BAND, max_lag);
+  const double floor = band > 0 ? (lag - (max_lag - band)) / band : (lag >= max_lag ? 1.0 : 0.0);
+  return std::max(rate, std::min(1.0, floor));
+}
+
+void RefBuffer::push(const Sample& s) {
+  if (!s_.empty() && s.t < s_.back().t) return;
+  s_.push_back(s);
+}
+
+RefBuffer::Sample RefBuffer::at(double t) const {
+  if (t <= s_.front().t) return s_.front();
+  if (t >= s_.back().t) return s_.back();
+  // the first sample after t
+  const auto it = std::upper_bound(s_.begin(), s_.end(), t, [](double x, const Sample& s) { return x < s.t; });
+  const Sample& b = *it;
+  const Sample& a = *(it - 1);
+  const double span = b.t - a.t;
+  const double w = span > 0 ? (t - a.t) / span : 1.0;
+  return Sample{t, a.p + (b.p - a.p) * w, a.v + (b.v - a.v) * w, a.a + (b.a - a.a) * w, a.yaw};
+}
+
+void RefBuffer::trim(double before) {
+  size_t k = 0;
+  while (k + 1 < s_.size() && s_[k + 1].t <= before) ++k;
+  if (k > 0) s_.erase(s_.begin(), s_.begin() + static_cast<long>(k));
+}
+
 // ---- HealthCheck ----------------------------------------------------------------------------------
 
 HealthCheck::HealthCheck(double matched_min_, double eig_min_, double latency_max_ms_, double height_tol_,

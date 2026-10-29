@@ -5,6 +5,8 @@
     <param name="speed_cap" value="1.0"/>
     <!-- the ported cases check SUPER's yaw passed through (the Python bridge); travel yaw: test_bridge_yaw_node -->
     <param name="flight_yaw" value="planner"/>
+    <!-- SUPER's command streamed as it is (the turn slowdown: turn_slow_node.test) -->
+    <param name="turn_slow_enable" value="false"/>
     <rosparam param="geofence_min">[-20, -20, -1]</rosparam>
     <rosparam param="geofence_max">[20, 20, 8]</rosparam>
   </node>

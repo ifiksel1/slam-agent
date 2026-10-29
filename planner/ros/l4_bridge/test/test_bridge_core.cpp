@@ -2,6 +2,7 @@
 // (classes Frames, AnchorTests, Output, Hold, FcPose, Health), same inputs and expectations.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 
@@ -428,6 +429,181 @@ TEST(FlightYaw, RateLimitedStepTheShortWayRound) {
   double y = 0.0;
   for (int i = 0; i < 50; ++i) y = yaw_step(y, M_PI / 2, 60.0 * M_PI / 180.0 / 50.0);   // 1 s at 60 deg/s, 50 Hz
   EXPECT_NEAR(y, M_PI / 3, 1e-9);
+}
+
+TEST(FlightYaw, StepSizedOnTheElapsedTime) {
+  // Gate L2 b2: the step follows the time since the last tick, so the commanded rate is the cap however
+  // the ticks fall; at most two ticks' worth after a stall, nothing for no time
+  const double r = 60.0 * M_PI / 180.0;
+  EXPECT_NEAR(yaw_max_step(r, 0.02, 0.04), r * 0.02, 1e-15);
+  EXPECT_NEAR(yaw_max_step(r, 0.0173, 0.04), r * 0.0173, 1e-15);   // early tick: a smaller step
+  EXPECT_NEAR(yaw_max_step(r, 0.5, 0.04), r * 0.04, 1e-15);        // a stall: capped
+  EXPECT_EQ(yaw_max_step(r, -0.01, 0.04), 0.0);
+  // ticks at jittered times: the yaw over the elapsed time never beats the rate
+  double y = 0.0, t = 0.0;
+  const double dts[] = {0.02, 0.0173, 0.0227, 0.001, 0.039, 0.02};
+  for (double dt : dts) {
+    const double y1 = yaw_step(y, M_PI, yaw_max_step(r, dt, 0.04));
+    EXPECT_LE(std::abs(y1 - y) / dt, r * (1 + 1e-12));
+    y = y1;
+    t += dt;
+  }
+  EXPECT_NEAR(y, r * t, 1e-12);
+}
+
+// ---- the waypoint hold (Gate L2 b2) -------------------------------------------------------------------
+
+TEST(WaypointHold, AtTheReachedGoalElseAtTheVehicle) {
+  const Vec3 p_now(1.0, 2.0, 1.3);
+  // the reached goal (within goal_max): there, not where the vehicle is
+  const Vec3 g(1.3, 2.4, 1.3);   // 0.5 m off, the executive's accept radius
+  EXPECT_TRUE(waypoint_hold_point(g, p_now, 1.0).isApprox(g));
+  // no goal known, or one farther than goal_max: the vehicle's position
+  EXPECT_TRUE(waypoint_hold_point(std::nullopt, p_now, 1.0).isApprox(p_now));
+  EXPECT_TRUE(waypoint_hold_point(Vec3(4.0, 2.0, 1.3), p_now, 1.0).isApprox(p_now));
+  EXPECT_TRUE(waypoint_hold_point(Vec3(1.0, 2.0, 2.31), p_now, 1.0).isApprox(p_now));   // 1.01 m up
+}
+
+TEST(WaypointHold, TheCappedTargetEasesOntoTheGoal) {
+  // the hold goes out through cap_command with zero velocity: the FC's demand (fc_pos_p * lead) stays
+  // under the speed cap, the target never runs past the goal
+  const Vec3 p_now(0.0, 0.0, 1.0), g(0.5, 0.0, 1.0), z = Vec3::Zero();
+  auto c = cap_command(g, z, z, p_now, 0.5, 1.0, 1.0);
+  EXPECT_TRUE(c.v.isZero());
+  EXPECT_TRUE(c.a.isZero());
+  EXPECT_LE(1.0 * (c.p - p_now).norm(), 0.5 + 1e-12);
+  EXPECT_GE((c.p - p_now).dot(g - p_now), 0.0);
+  auto c2 = cap_command(g, z, z, Vec3(0.3, 0.0, 1.0), 1.0, 1.0, 1.0);   // within reach: the goal itself
+  EXPECT_TRUE(c2.p.isApprox(g));
+  EXPECT_TRUE(c2.v.isZero());
+}
+
+TEST(WaypointHold, DepartureOnlyWhenTheCommandSetsOffTowardTheGoal) {
+  // Gate L2 b5, leg 2: held at (1.73, 0.17), next goal (4.27, 0.13); SUPER first commands backwards
+  const Vec3 pt(1.73, 0.17, 1.05), g(4.27, 0.13, 1.05);
+  EXPECT_FALSE(departed(pt, g, true, Vec3(2.09, 0.13, 1.05), Vec3(-0.32, 0.0, 0.0), 0.3));   // backwards
+  EXPECT_FALSE(departed(pt, g, true, Vec3(1.34, 0.12, 1.05), Vec3(0.18, 0.0, 0.0), 0.3));    // turning: slow
+  EXPECT_FALSE(departed(pt, g, true, Vec3(1.40, 0.12, 1.05), Vec3(0.45, 0.0, 0.0), 0.3));    // forward, but behind
+  EXPECT_TRUE(departed(pt, g, true, Vec3(1.70, 0.12, 1.05), Vec3(0.55, 0.0, 0.0), 0.3));     // at the point, off
+  EXPECT_TRUE(departed(pt, g, true, Vec3(1.80, 0.40, 1.05), Vec3(0.45, 0.45, 0.0), 0.3));    // round an obstacle: 45 deg off
+  EXPECT_FALSE(departed(pt, g, true, Vec3(1.80, 0.40, 1.05), Vec3(0.0, 0.6, 0.0), 0.3));     // across the leg
+  EXPECT_FALSE(departed(pt, g, true, Vec3(1.73, 0.17, 1.05), Vec3(0.0, 0.0, 0.8), 0.3));     // climbing only
+  // no direction (no goal, or the goal at the point: the old goal still): only a goal that came after the clear
+  EXPECT_TRUE(departed(pt, std::nullopt, false, pt, Vec3::Zero(), 0.3));   // no goal known: nothing to wait for
+  EXPECT_FALSE(departed(pt, Vec3(1.80, 0.17, 1.05), false, pt, Vec3(0.5, 0, 0), 0.3));
+  EXPECT_TRUE(departed(pt, Vec3(1.80, 0.17, 1.05), true, pt, Vec3::Zero(), 0.3));
+}
+
+// ---- the turn slowdown (owner 2026-10-29) ---------------------------------------------------------------
+
+TEST(TurnSlow, FractionFullThenSmoothThenTheFloor) {
+  const double d = M_PI / 180.0;
+  EXPECT_EQ(turn_speed_frac(0.0, 15 * d, 45 * d, 0.25), 1.0);
+  EXPECT_EQ(turn_speed_frac(15 * d, 15 * d, 45 * d, 0.25), 1.0);
+  EXPECT_NEAR(turn_speed_frac(30 * d, 15 * d, 45 * d, 0.25), 0.625, 1e-12);   // the midpoint: half way down
+  EXPECT_EQ(turn_speed_frac(45 * d, 15 * d, 45 * d, 0.25), 0.25);
+  EXPECT_EQ(turn_speed_frac(M_PI, 15 * d, 45 * d, 0.25), 0.25);
+  // monotone, and smooth at both ends (no step: within 0.002 of the ends 0.1 deg inside them)
+  double prev = 1.0;
+  for (double e = 0; e <= 60; e += 0.5) {
+    const double f = turn_speed_frac(e * d, 15 * d, 45 * d, 0.25);
+    EXPECT_LE(f, prev + 1e-12);
+    prev = f;
+  }
+  EXPECT_GT(turn_speed_frac(15.1 * d, 15 * d, 45 * d, 0.25), 0.998);
+  EXPECT_LT(turn_speed_frac(44.9 * d, 15 * d, 45 * d, 0.25), 0.252);
+}
+
+TEST(TurnSlow, HeadingErrorNowAndAhead) {
+  const double d = M_PI / 180.0;
+  // flying +x with the nose at +x: no error; slower than speed_min: no travel direction
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 0), Vec3::Zero(), 0.5, 0.3), 0.0, 1e-12);
+  EXPECT_FALSE(turn_heading_error(0.0, Vec3(0.2, 0.1, 0), Vec3(0, 2, 0), 0.5, 0.3));
+  // the nose 30 deg off the velocity, either side, the short way round
+  EXPECT_NEAR(*turn_heading_error(30 * d, Vec3(1, 0, 0), Vec3::Zero(), 0.5, 0.3), 30 * d, 1e-12);
+  EXPECT_NEAR(*turn_heading_error(wrap_pi(M_PI - 10 * d), Vec3(-1, 0, 0), Vec3::Zero(), 0.5, 0.3), 10 * d, 1e-12);
+  // a corner coming: +x at 1 m/s turning +y at 2 m/s^2 -> 0.5 s ahead (1, 1): 45 deg, before any error now
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 0), Vec3(0, 2, 0), 0.5, 0.3), 45 * d, 1e-12);
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 0), Vec3(0, 2, 0), 0.0, 0.3), 0.0, 1e-12);   // no lookahead
+  // braking along the line (a against v) is no corner; braking to (nearly) a stop drops the ahead term
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 0), Vec3(-1, 0, 0), 0.5, 0.3), 0.0, 1e-12);
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 0), Vec3(-1.9, 0.1, 0), 0.5, 0.3), 0.0, 1e-12);
+  // vertical velocity and acceleration play no part
+  EXPECT_NEAR(*turn_heading_error(0.0, Vec3(1, 0, 3), Vec3(0, 0, 5), 0.5, 0.3), 0.0, 1e-12);
+}
+
+TEST(TurnSlow, ReplayRate) {
+  // SUPER's pace when allowed; slower in proportion when not; never negative
+  EXPECT_EQ(replay_rate(1.0, 1.0, 0.0, 1.5, 1.5), 1.0);
+  EXPECT_NEAR(replay_rate(0.25, 1.0, 0.0, 1.5, 1.5), 0.25, 1e-12);
+  EXPECT_NEAR(replay_rate(0.25, 0.5, 0.3, 1.5, 1.5), 0.5, 1e-12);
+  EXPECT_EQ(replay_rate(-1.0, 1.0, 0.0, 1.5, 1.5), 0.0);
+  // hovering (no speed): SUPER's pace, or catching up when behind
+  EXPECT_EQ(replay_rate(0.25, 0.0, 0.0, 1.5, 1.5), 1.0);
+  EXPECT_EQ(replay_rate(0.25, 0.0, 0.5, 1.5, 1.5), 1.5);
+  // behind: catch up as far as the allowed speed permits
+  EXPECT_NEAR(replay_rate(1.0, 0.8, 0.5, 1.5, 1.5), 1.25, 1e-12);
+  EXPECT_EQ(replay_rate(1.0, 0.5, 0.5, 1.5, 1.5), 1.5);
+  EXPECT_EQ(replay_rate(1.0, 0.5, 0.03, 1.5, 1.5), 1.0);   // within REPLAY_LAG_MIN: at SUPER's pace
+  // at the lag limit: no slower than SUPER; within 0.5 s of it, the floor rising linearly to SUPER's pace
+  EXPECT_EQ(replay_rate(0.25, 1.0, 1.5, 1.5, 1.5), 1.0);
+  EXPECT_EQ(replay_rate(0.25, 1.0, 2.0, 1.5, 1.5), 1.0);
+  EXPECT_NEAR(replay_rate(0.25, 1.0, 1.25, 1.5, 1.5), 0.5, 1e-12);
+  EXPECT_NEAR(replay_rate(0.25, 1.0, 1.0, 1.5, 1.5), 0.25, 1e-12);
+}
+
+TEST(TurnSlow, RefBufferInterpolatesClampsAndTrims) {
+  RefBuffer b;
+  EXPECT_TRUE(b.empty());
+  b.push({1.0, Vec3(0, 0, 1), Vec3(1, 0, 0), Vec3(0, 0, 0), 0.1});
+  b.push({1.1, Vec3(0.1, 0, 1), Vec3(1, 0.2, 0), Vec3(0, 2, 0), 0.2});
+  b.push({1.05, Vec3(9, 9, 9), Vec3(9, 9, 9), Vec3(9, 9, 9), 9.0});   // out of order: dropped
+  b.push({1.2, Vec3(0.2, 0.01, 1), Vec3(1, 0.4, 0), Vec3(0, 2, 0), 0.3});
+  EXPECT_EQ(b.size(), 3u);
+  EXPECT_EQ(b.newest(), 1.2);
+  auto s = b.at(1.05);
+  EXPECT_NEAR(s.p[0], 0.05, 1e-12);
+  EXPECT_NEAR(s.v[1], 0.1, 1e-12);
+  EXPECT_NEAR(s.a[1], 1.0, 1e-12);
+  EXPECT_EQ(s.yaw, 0.1);   // the earlier sample's
+  EXPECT_NEAR(b.at(0.5).p[0], 0.0, 1e-12);   // before the oldest: the oldest
+  EXPECT_NEAR(b.at(2.0).p[0], 0.2, 1e-12);   // after the newest: the newest
+  b.trim(1.15);   // keeps the last sample at or before 1.15, so 1.15 still interpolates
+  EXPECT_EQ(b.size(), 2u);
+  EXPECT_EQ(b.oldest(), 1.1);
+  EXPECT_NEAR(b.at(1.15).p[0], 0.15, 1e-12);
+  b.trim(5.0);
+  EXPECT_EQ(b.size(), 1u);
+}
+
+TEST(TurnSlow, ReplayedCornerStaysOnThePathCappedChaseCutsIt) {
+  // SUPER flies a 90 deg corner at 1 m/s (+x to (2, 0), then +y), its command at 100 Hz. A vehicle allowed
+  // 0.25 m/s through it: replaying SUPER's reference at replay_rate keeps every target on SUPER's path;
+  // chasing SUPER's newest command with the cap alone (cap_command at 0.25 m/s, 1 m lead) aims across the
+  // corner
+  RefBuffer b;
+  auto ref = [](double t) { return t <= 2.0 ? Vec3(t, 0, 1) : Vec3(2.0, t - 2.0, 1); };
+  auto vel = [](double t) { return t <= 2.0 ? Vec3(1, 0, 0) : Vec3(0, 1, 0); };
+  auto off_path = [](const Vec3& p) {   // distance from the corner path
+    const double dx = p[0] <= 2.0 ? std::abs(p[1]) : 1e9, dy = p[1] >= 0.0 ? std::abs(p[0] - 2.0) : 1e9;
+    return std::min({dx, dy, (p.head<2>() - Eigen::Vector2d(2, 0)).norm()});
+  };
+  double tau = 1.5;
+  Vec3 veh = ref(1.5);   // the vehicle on the path at the corner's approach
+  double worst_replay = 0, worst_chase = 0;
+  for (double t = 1.5; t < 4.0; t += 0.01) {
+    b.push({t, ref(t), vel(t), Vec3::Zero(), 0.0});
+    const auto s0 = b.at(tau);
+    const double rate = replay_rate(0.25, s0.v.norm(), b.newest() - tau, 1.5, 100.0);
+    tau = std::min(tau + rate * 0.01, b.newest());
+    const auto s = b.at(tau);
+    worst_replay = std::max(worst_replay, off_path(s.p));
+    veh = s.p;   // the vehicle tracks the replayed reference
+    auto c = cap_command(ref(t), vel(t), Vec3::Zero(), veh, 0.25, 1.0, 1.0);
+    worst_chase = std::max(worst_chase, off_path(c.p));
+  }
+  EXPECT_LT(worst_replay, 0.01);   // on the path (interpolation between two 10 ms samples at the corner)
+  EXPECT_GT(worst_chase, 0.05);
 }
 
 int main(int argc, char** argv) {

@@ -21,6 +21,18 @@ flight_yaw: travel           # travel: the bridge points the nose along SUPER's 
                              # planner: SUPER's own yaw (it swung up to 100 deg in hovers, Gate L2 b1)
 yaw_speed_min: 0.3           # m/s commanded horizontal speed above which the nose follows the travel direction
 yaw_rate_max_deg: 60.0       # deg/s, the commanded yaw's rate limit
+# the turn slowdown (owner 2026-10-29: the lidar faces forward; never fly faster than the nose can turn):
+# flight speed by the heading error (the FC's yaw against SUPER's travel direction, now and lookahead ahead),
+# SUPER's reference replayed at that speed so the vehicle stays on SUPER's path
+turn_slow_enable: true
+turn_slow_start_deg: 15.0    # full speed up to this heading error
+turn_slow_full_deg: 45.0     # min_frac of speed_cap from this error on (smooth between)
+turn_slow_min_frac: 0.25     # the floor, a fraction of speed_cap
+turn_slow_lookahead_s: 0.5   # s: also the error against the direction of v + a * this (slows before the corner)
+turn_slow_accel: 1.5         # m/s^2 the allowed speed may change at
+turn_slow_catchup: 1.5       # x SUPER's pace the replay may catch up at (within the allowed speed)
+turn_slow_max_lag_s: 0.5     # s behind SUPER's newest command where the lag levels off (SUPER checks its backup from
+                             # the vehicle: b9, with 2.0, saw SUPER stall at the tower 0.77 s behind)
 
 # HOLD triggers
 planner_timeout: 0.3         # s since the mode's planner command (SUPER ~100 Hz, track planner 10 Hz)

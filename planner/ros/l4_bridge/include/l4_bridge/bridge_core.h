@@ -201,6 +201,88 @@ class HealthCheck {
 std::optional<double> travel_yaw(const Vec3& v, double speed_min);
 // one rate-limited step from `current` toward `desired` (shortest way round), at most max_step rad
 double yaw_step(double current, double desired, double max_step);
+// the largest yaw step for a tick that came dt s after the one before: rate_max * dt, dt clamped to
+// [0, dt_max]. A step per elapsed time, not per tick, keeps the commanded rate at rate_max when the timer
+// fires late and catches up (Gate L2 b2: a fixed 1.2 deg step per nominal 20 ms tick read 69 deg/s
+// between two setpoints 17 ms apart)
+double yaw_max_step(double rate_max, double dt, double dt_max);
+
+// ---- the waypoint hold (Gate L2 b2) -------------------------------------------------------------
+// While the executive's waypoint yaw is set (/planner_bridge/yaw_cmd, at the end of a fly leg or over a
+// landing spot) the bridge does not follow SUPER: SUPER, hovering at its reached goal, keeps replanning
+// round it (0.2-0.4 m/s commanded, its position wandering 0.2 m), and the vehicle never stood still for
+// the executive's yaw settle (b2: "yaw did not settle"). It holds a fixed point instead, zero velocity,
+// facing the waypoint yaw. The point, fixed when the hold begins: the reached goal (the executive's last
+// goal, /planning/click_goal, anchored to the fc frame) when it is within goal_max of the vehicle, else
+// (no goal known, or a goal farther than that) the vehicle's position.
+// Why the goal and not where the turn began: the executive ends a leg at accept_radius (0.5 m) from the
+// goal, often still moving; the goal is the point the mission named (the landing check is asked about
+// it, the next drive leg starts from it) and SUPER's reference hovers at it, and SUPER replans the next
+// leg from its committed trajectory, not from the odometry, so a hold at the goal starts the next plan
+// where the vehicle is (a hold 0.5 m short would make the next plan start 0.5 m away from it).
+Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, double goal_max);
+
+// The departure from a waypoint hold (Gate L2 b5). When the executive clears the waypoint yaw and sends
+// the next goal, SUPER's command is first still its hover round the old goal, then a new plan that
+// starts from SUPER's own committed trajectory, which kept wandering while the vehicle held (b5: SUPER
+// commanded 0.6 m/s backwards for 2 s at the start of leg 2, its reference 0.3 m ahead of the held vehicle
+// then 0.5 m behind it; the travel yaw turned the nose after it). So the bridge keeps holding (point and
+// yaw) until SUPER sets off toward the goal: its commanded horizontal velocity along the direction from
+// the hold point to the goal above speed_min, and its commanded position no more than behind_tol behind
+// the hold point along it, so the stream resumes with SUPER's reference at the vehicle. A goal within
+// min_dist of the point gives no direction: departed once a goal came after the clear (goal_new; the old
+// goal is the hold point). No goal known at all: departed (nothing to wait for). The caller streams
+// anyway after a timeout.
+bool departed(const Vec3& point, const std::optional<Vec3>& goal_fc, bool goal_new, const Vec3& p_cmd, const Vec3& v_cmd,
+              double speed_min, double behind_tol = 0.05, double min_dist = 0.2);
+
+// ---- the turn slowdown (owner 2026-10-29: the lidar faces forward, so the robot must not fly faster than its
+// nose can turn toward the direction of travel) ---------------------------------------------------------
+// The fraction of the speed cap allowed at a heading error `err` (rad, >= 0): 1 up to `start`, `min_frac`
+// from `full` on, a smoothstep between (no corner in the speed as the error grows).
+double turn_speed_frac(double err, double start, double full, double min_frac);
+
+// The heading error the slowdown acts on (rad, >= 0): the vehicle's yaw against the commanded travel direction
+// (the horizontal heading of v), and against where that direction is going (v + a * lookahead: SUPER's
+// commanded acceleration turns the velocity before the corner, so the slowdown starts before the error
+// builds), the larger of the two. None while the commanded horizontal speed is at most speed_min (no travel
+// direction: hovering, arriving; the ahead term is left out when v + a * lookahead is that slow).
+std::optional<double> turn_heading_error(double yaw, const Vec3& v, const Vec3& a, double lookahead, double speed_min);
+
+// The rate the bridge replays SUPER's reference at (1: SUPER's own pace). SUPER cannot be slowed (its
+// max_vel is fixed), so a slowed vehicle falls behind SUPER's reference; chasing the newest reference (as the
+// speed cap alone does) would cut the corner on the straight line to it, away from SUPER's collision-checked
+// path. The bridge instead plays back SUPER's own commands (RefBuffer) at this rate: the vehicle stays on the
+// path SUPER flew, only later. allowed: the speed allowed now (m/s); speed: SUPER's commanded speed at the
+// replay point; lag: how far (s) the replay is behind SUPER's newest command. Behind: catch up at up to
+// `catchup` as the allowed speed permits; near max_lag never much slower than SUPER: the rate's floor rises
+// linearly from 0 at max_lag - REPLAY_LAG_BAND (0.5 s) to 1 (SUPER's pace) at max_lag, so the lag levels off
+// there. Within REPLAY_LAG_MIN (0.05 s) of the newest command the replay counts as at it (SUPER's pace).
+constexpr double REPLAY_LAG_MIN = 0.05;
+constexpr double REPLAY_LAG_BAND = 0.5;
+double replay_rate(double allowed, double speed, double lag, double catchup, double max_lag);
+
+// SUPER's recent commands by receive time (planner frame), for the replay. at(t): the command at time t,
+// interpolated (p, v, a linearly; yaw: the earlier sample's), clamped to the oldest/newest sample.
+class RefBuffer {
+ public:
+  struct Sample {
+    double t;
+    Vec3 p, v, a;
+    double yaw;
+  };
+  void push(const Sample& s);   // a sample older than the newest is dropped (out of order)
+  void clear() { s_.clear(); }
+  bool empty() const { return s_.empty(); }
+  size_t size() const { return s_.size(); }
+  double newest() const { return s_.back().t; }
+  const Sample& last() const { return s_.back(); }
+  double oldest() const { return s_.front().t; }
+  Sample at(double t) const;
+  void trim(double before);   // drop samples older than `before`, keeping the last one at or before it
+ private:
+  std::vector<Sample> s_;
+};
 
 // printf-style formatting into a std::string (the Python "%" reasons)
 std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
