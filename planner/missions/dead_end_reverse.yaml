@@ -1,0 +1,21 @@
+# Dead-end reverse proof (owner 2026-10-28), SITL only, on planner/sim/course/hp_dead_end.pcd
+# (hp_1015_carved.pcd + hp_dead_end.json: a 0.75 m dead-end corridor straight ahead of the takeoff spot;
+# 0.70 m cannot be driven into at the planner's 0.1 m cells, see the json).
+# Start 0.00, 0.00, yaw -90.7 (map x, y, deg) on the ground, facing into the corridor.
+#   drive in to (0.00, -2.50), 1.2 m into the corridor (mouth at y -1.30), 1.1 m short of the end wall;
+#   drive to (-0.60, 1.00), behind the robot (open floor north of the takeoff spot): no room to pivot in 0.75 m, so the track planner backs
+#   the robot straight out (track_core.plan_reverse: observed free cells only, at most 2 m), pivots
+#   at the mouth and drives on. The bridge streams the reverse as Rover Guided velocity + heading
+#   targets (bridge_core.reverse_speed), within D5.
+name: dead_end_reverse
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 0.5
+  accept_radius: 0.4
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: drive, goal: [0.00, -2.50], accept_radius: 0.3}
+  - {type: drive, goal: [-0.60, 1.00]}

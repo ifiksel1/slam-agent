@@ -7,7 +7,8 @@ keyframe scans, sensor frame), aligned to the path by a rigid fit of the keyfram
   map mode   the whole map, built once (HeightGrid), with the keyframes' free-space evidence when
              given; goals sampled every step metres along the driven path, dist metres ahead of it
   live mode  the keyframes replayed in order through LiveWindow (the node's map), a replan from
-             every live_step-th keyframe to a goal 3 and 6 m ahead along the driven path; timed
+             every live_step-th keyframe to a goal 3 and 6 m ahead along the driven path, with the
+             keyframe's heading (the start pivot; heading=False: none); timed
   walls      reference walls (points in each 0.3 m layer from 0.3 to 1.5 m above the ground and,
              with keyframes, hit by 3+ of them and never mostly seen through: people are tall
              too); driven-path pairs 1-4 m apart with a wall between them but far apart along the
@@ -210,7 +211,7 @@ class RealMap:
         return {"pairs": (good, len(pairs)), "behind": (good2, len(behind), routed), "fails": fails}
 
     # live mode
-    def live_mode(self, goals=(3.0, 6.0), live_step=2, window_s=3.0, low=9.0, cfg=None, **lw_kw):
+    def live_mode(self, goals=(3.0, 6.0), live_step=2, window_s=3.0, low=9.0, cfg=None, heading=True, **lw_kw):
         kf = self.kf
         if kf is None:
             return None
@@ -228,6 +229,7 @@ class RealMap:
         okf = {d: 0 for d in goals}
         nf = {d: 0 for d in goals}
         fails = []
+        npiv = [0, 0, 0]      # plans with a pivot, start pivots, pivots in all
         for k in range(len(kf)):
             scan = kf.scan(k)
             t0 = time.time()
@@ -236,15 +238,22 @@ class RealMap:
             if k % live_step:
                 continue
             i = Dk.query(kf.pk[k, :2])[1]
+            # the robot's heading: the nose (FAST-LIO body +z) in the map frame, for the start pivot
+            nose = (kf.Rk[k] @ np.array([0.0, 0.0, 1.0]))[:2]
+            yaw = float(np.arctan2(nose[1], nose[0])) if heading else None
             for dist in goals:
                 j = int(np.searchsorted(S, S[i] + dist))
                 if j >= len(D) or Dz[i] > low or Dz[j] > low:
                     continue
                 t0 = time.time()
-                out = lw.plan(kf.pk[k, :2], D[j])
+                out = lw.plan(kf.pk[k, :2], D[j], start_yaw=yaw)
                 times.append(time.time() - t0)
                 n[dist] += 1
                 ok[dist] += out["ok"]
+                if out["ok"] and out["pivots"]:
+                    npiv[0] += 1
+                    npiv[1] += sum(p["start"] for p in out["pivots"])
+                    npiv[2] += len(out["pivots"])
                 # free now: no band return of this very scan within the frame's half-width of the
                 # driven stretch (the path is known free when the robot drove it, not before)
                 if "hg" in out:
@@ -273,7 +282,7 @@ class RealMap:
                 if cand:
                     c = min(cand, key=lambda c: np.linalg.norm(ref[c] - p))
                     u = (ref[c] - p) / np.linalg.norm(ref[c] - p)
-                    out = lw.plan(p, ref[c] + u)
+                    out = lw.plan(p, ref[c] + u, start_yaw=yaw)
                     wall_n += 1
                     if not out["ok"]:
                         wall_ok += 1
@@ -291,4 +300,4 @@ class RealMap:
                         if hit_seen:
                             fails.append((k, "wall", "path %.2f m from a seen wall" % d[seen].min()))
         return {"plans": {d: (ok[d], n[d]) for d in goals}, "plans_free_now": {d: (okf[d], nf[d]) for d in goals}, "time": stats_ms(times), "ingest": stats_ms(ing), "fails": fails,
-                "walls": (wall_ok, wall_n, wall_routed, wall_unseen)}
+                "walls": (wall_ok, wall_n, wall_routed, wall_unseen), "pivots": tuple(npiv)}

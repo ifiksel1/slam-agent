@@ -1,0 +1,31 @@
+# QuadRover SITL track lateral friction (2026-10-28, SITL only: applied to a copy on Shannon,
+# ~/sim/ardupilot_dctl, selected per run with sitl_harness.sh's SITL_AP; NOT in the shared ~/sim/ardupilot
+# nor the fork; for the owner to review). On top of sitl_liftoff_fix.patch.
+#
+# SimRover's skid model drives body x only and adds yaw_rate * speed on body y, which exactly cancels
+# the rotating frame: a body-lateral velocity is conserved on the ground. Every Gate L2 run (g7-g10)
+# touched down with 0.17-0.20 m/s of sideways drift and then slid sideways at exactly that speed for
+# the rest of the run, through pivots: the rover never stood still (takeoff refused "not stationary"),
+# orbited its held targets and ran 0.2-0.5 m beside the carrot. Tracks do not slide sideways.
+--- a/libraries/SITL/SIM_QuadRover.cpp
++++ b/libraries/SITL/SIM_QuadRover.cpp
+@@ -128,6 +128,19 @@ void SimQuadRover::update(const struct sitl_input &input)
+     } else {
+         // on the ground - rover kinematics for driving
+         update_ackermann_or_skid(input, delta_time);
++
++        // tracks do not slide sideways. SimRover's skid model drives body x only and adds
++        // yaw_rate * speed on body y, which exactly cancels the rotating frame, so a body-lateral
++        // velocity is conserved on the ground: a touchdown with 0.2 m/s of horizontal drift slid
++        // the vehicle sideways at 0.2 m/s for the rest of the run, through pivots, and it never
++        // stood still (L2 Gate runs g7-g10). Track friction stops it, with the deceleration in
++        // the IMU so the EKF sees it.
++        if (is_positive(delta_time)) {             // 0 on the first step: no 0/0
++            const float lat_decel_mss = 5.0f;       // ~0.5 g of sideways track friction
++            const Vector3f vb = dcm.transposed() * velocity_ef;
++            const float dvy = constrain_float(-vb.y, -lat_decel_mss * delta_time, lat_decel_mss * delta_time);
++            accel_body.y += dvy / delta_time;
++        }
+
+         // check if copter thrust would lift us off
+         Vector3f thrust_earth = dcm * quad_accel_body;

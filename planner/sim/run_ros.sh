@@ -24,8 +24,8 @@ rostopic pub -r 0.1 /mavros/global_position/set_gp_origin geographic_msgs/GeoPoi
 rosparam load /planner_sim/bridge_params.yaml /fastlio_mavros_bridge
 python3 -u /slam/overrides/FAST-LIO/src/fastlio_mavros_bridge.py __name:=fastlio_mavros_bridge > $L/bridge.log 2>&1 &
 
-# FAST-LIO's stand-in
-python3 -u /planner_sim/render_node.py __name:=render_node _map_pcd:=$MAP_PCD \
+# FAST-LIO's stand-in (RENDER_SCRIPT: faults/render_fault.py adds live faults for the failure tests)
+python3 -u ${RENDER_SCRIPT:-/planner_sim/render_node.py} __name:=render_node _map_pcd:=$MAP_PCD \
   _start_x:=${START_X:-0} _start_y:=${START_Y:-0} _start_yaw_deg:=${START_YAW_DEG:-0} \
   _lidar_up:=${LIDAR_UP:-0} _latency_s:=${LATENCY_S:-0.07} _fault:=${FAULT:-none} _fault_start_s:=${FAULT_START_S:-1e9} _fault_rate:=${FAULT_RATE:-0.05} \
   > $L/render.log 2>&1 &

@@ -1,0 +1,64 @@
+{
+ "_comment": "Gate L2 course on hp_1015_carved.pcd (map frame, m; heights above the local floor). Fly: tower (0.6 x 0.6 x 2.5 m) on the straight line (0.11,-4.46)->(-0.40,-9.00), 1.1 m clear of the racks' south end; pole_a on (-0.40,-9.00)->(-3.70,-9.60), the approach to the first landing; pole_b on (-8.50,-9.00)->(-6.50,-5.00). Drive: door, a 2.2 m wall across the west room at x=-5.50 from the south wall to y=-4.60 with a 0.90 m gap (y -9.45..-8.55), 1.8 m west of the east landing spot (-3.70,-9.60) so the robot can line up with it; the straight line from that spot to the drive goal (-8.50,-9.00) passes 0.08 m inside the south jamb (the frame cannot follow it), and crate (0.5 x 0.5 x 0.6 m) sits on that line past the door. History: g1/g2 had pole_a at (0.13,-3.20), mid-way in the 2.15 m corridor between the room wall (x -1.25) and the racks (x 0.9): SUPER routed west of it and stopped 0.35 m from the wall (robot_r 0.44), body clearance -0.05 m in g1. g3/g5 had the door at x=-4.50, 0.8 m from the landing spot: g3 clipped the south jamb (-0.07 m), g5 found no way to line up (no progress). g6 had the tower at (-0.15,-7.10), 0.5 m south of the racks' end: SUPER took the east squeeze round the racks' corner and stalled there (unreachable).",
+ "obstacles": [
+  {
+   "name": "pole_a",
+   "type": "pole",
+   "c": [
+    -1.5,
+    -9.2
+   ],
+   "r": 0.075,
+   "h": 2.5
+  },
+  {
+   "name": "tower",
+   "type": "box",
+   "c": [
+    -0.24,
+    -7.6
+   ],
+   "size": [
+    0.6,
+    0.6,
+    2.5
+   ]
+  },
+  {
+   "name": "door",
+   "type": "wall_gap",
+   "x": -5.5,
+   "y0": -11.7,
+   "y1": -4.6,
+   "gap": [
+    -9.45,
+    -8.55
+   ],
+   "thick": 0.12,
+   "h": 2.2
+  },
+  {
+   "name": "crate",
+   "type": "box",
+   "c": [
+    -7.0,
+    -9.2
+   ],
+   "size": [
+    0.5,
+    0.5,
+    0.6
+   ]
+  },
+  {
+   "name": "pole_b",
+   "type": "pole",
+   "c": [
+    -7.4,
+    -6.8
+   ],
+   "r": 0.075,
+   "h": 2.5
+  }
+ ]
+}

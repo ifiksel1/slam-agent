@@ -1,0 +1,22 @@
+# Failure test 4 (faults/cases.sh goal_obst_drive): a drive goal inside the ~1.2 x 1 x 0.9 m box at map
+# (-2.6, -7.6) of the Hensel Phelps map. Legs 0-5 are example_hp_drive_fly.yaml's (take off, fly south,
+# land at (-6, -9)); leg 6 drives to the box's centre with on_unreachable: next, so the executive should
+# stop the rover in GUIDED with the bridge off, give the goal up and drive leg 7 past the box.
+name: goal_in_box_drive
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [-0.28, -7.61, 1.30]}
+  - {type: fly, goal: [-2.29, -9.57, 1.30]}
+  - {type: land, at: [-6.00, -9.00]}
+  - {type: drive, goal: [-2.60, -7.50], speed: 0.5, accept_radius: 0.4, on_unreachable: next}   # inside the box
+  - {type: drive, goal: [-1.70, -8.60], speed: 0.5, accept_radius: 0.4}

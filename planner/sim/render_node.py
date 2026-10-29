@@ -45,6 +45,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 import sys
 sys.path.insert(0, rospy.get_param("/render_node/raycast_dir", "/marsim"))
 from jt128_raycast import JT128Raycaster  # noqa: E402
+from raycast_surface import SurfaceRaycaster  # noqa: E402  (next to this file)
 
 # raw (x left, y up, z forward) -> body FLU / ENU-like: the bridge's position_matrix
 P = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
@@ -95,7 +96,9 @@ class RenderNode:
         table = np.load(rospy.get_param("~rings", "/marsim/jt128_rings.npy"))
         xyz = load_pcd(rospy.get_param("~map_pcd"))
         t = time.time()
-        self.caster = JT128Raycaster(xyz, table)
+        # ~surface_hits (default true): returns on the surfaces (raycast_surface.py); false: the stock
+        # raycaster, whose returns land 0.05-0.1 m in front of them (the 0.90 m Gate L2 door: 0.75 m)
+        self.caster = (SurfaceRaycaster if rospy.get_param("~surface_hits", True) else JT128Raycaster)(xyz, table)
         rospy.loginfo("render_node: %d map points, distance field %s in %.1f s, %d rays per scan",
                       len(xyz), self.caster.dims, time.time() - t, len(self.caster.rays))
         self.odom_pub = rospy.Publisher("/Odometry", Odometry, queue_size=20)
@@ -126,11 +129,12 @@ class RenderNode:
             # int32 lat_int/lon_int carry full precision
             lat, lon = m.lat_int * 1e-7, m.lon_int * 1e-7
             with self.lock:
-                self.state = (time.time(), lat, lon, m.alt, m.roll, m.pitch, m.yaw, m.vn, m.ve, m.vd)
+                self.state = (time.time(), lat, lon, m.alt, m.roll, m.pitch, m.yaw, m.vn, m.ve, m.vd,
+                              m.xgyro, m.ygyro, m.zgyro)
 
     def map_pose(self, s):
         """true FC position, body rotation and velocity in the map frame"""
-        _, lat, lon, alt, roll, pitch, yaw, vn, ve, vd = s
+        _, lat, lon, alt, roll, pitch, yaw, vn, ve, vd = s[:10]
         if self.origin_ll is None:
             self.origin_ll = (lat, lon, alt)
             # turn ENU so the vehicle's start heading becomes start_yaw in the map
@@ -143,6 +147,12 @@ class RenderNode:
         R_b = Rz @ ned_euler_to_enu_flu(roll, pitch, yaw)
         vel = Rz @ np.array([ve, vn, -vd])
         return pos, R_b, vel
+
+    @staticmethod
+    def map_rates(s, R_b):
+        """the body's angular velocity in the map frame (SIM_STATE's body rates are FRD)"""
+        gx, gy, gz = s[10:13]
+        return R_b @ np.array([gx, -gy, -gz])
 
     def fault_offset(self, t_rel):
         if self.fault in ("drift", "height_bias") and t_rel > self.fault_start:
@@ -157,7 +167,12 @@ class RenderNode:
             return
         stamp = rospy.Time.now()
         pos, R_b, vel = self.map_pose(s)
-        p_s = pos + R_b @ np.array([self.lidar_fwd, 0.0, self.lidar_up])
+        arm = R_b @ np.array([self.lidar_fwd, 0.0, self.lidar_up])
+        p_s = pos + arm
+        # the odometry point's own velocity, as FAST-LIO's twist (the IMU's): SIM_STATE's is the FC's.
+        # The FC takes vision speed at VISO_POS and removes w x VISO_POS itself, so the FC's velocity
+        # sent as the sensor's put -w x 0.178 m (0.19 m/s at a 1.05 rad/s pivot) into the EKF
+        vel = vel + np.cross(self.map_rates(s, R_b), arm)
         R_ws = R_b @ P                         # the sensor (raw axes) in the map
         if self.raw0 is None:
             self.raw0 = (p_s.copy(), R_ws.copy())

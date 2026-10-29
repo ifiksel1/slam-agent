@@ -19,6 +19,11 @@
 #   SITL rover tracks the track planner's path to ~5 cm (cl33, cl36); rover.parm's own calibration
 #   (CRUISE_SPEED 5, CRUISE_THROTTLE 30, ATC_STR_RAT_FF 0.75) drove 1 m arcs off the path (cl38). The
 #   robot's CRUISE values over-drive SITL's motor model: speed peaks ~1 m/s at WP_SPEED 0.5.
+#   SITL's motor model (SimRover's generic: 20 m/s at full throttle, 2 s lag) is not the robot's: ~5 % throttle
+#   per 1 m/s, so the robot's CRUISE_SPEED 0.5 / CRUISE_THROTTLE 50 is a 10x throttle feed-forward in SITL
+#   (0.8-1.9 m/s against a 0.2-0.5 m/s demand, g-runs). SITL's own calibration for the same meaning:
+#   CRUISE_SPEED 1.0;CRUISE_THROTTLE 5 (d6-d13). The track planner gets the run's WP_SPEED as its drive_speed
+#   (its run-out). PLANNER_DIR: another planner/ copy to run (default ~/sim/l2/planner).
 #   DRIVE_PARMS="" drops them. LIDAR_UP (default 0.25 m here): the render node's lidar above SITL's ground, out of the
 #   maps' floor smear (render_node.py). Any other env of sitl_harness.sh up (EXTRA_PARMS, CPUS, ...)
 #   passes through. TRACK_Z_LO (default 0.30 m here, the node's own default 0.15): the track planner's
@@ -26,6 +31,9 @@
 #   also steps 0.15-0.25 m between areas (map drift baked in); at 0.15 the live window's evidence memory
 #   held most of the floor beyond 1.5 m as walls (cl31). 0.30 is what track_core uses on whole maps
 #   for the same smear. Sim only.
+# Failure tests (faults/cases.sh): FAULT_HOOK, a command started in the ROS container just before
+#   fly_mission.py (its output in logs/fault.log); END_HOLD_S, seconds fly_mission.py waits after the
+#   mission ends before it lands SITL (default 0); RECORD_EXTRA, more topics for the bag.
 set -uo pipefail
 name=${1:?name}; map=${2:?map}; sx=${3:?}; sy=${4:?}; syaw=${5:?}; mission=${6:?mission}; cfg=${7:?super config}
 timeout=${8:-900}
@@ -35,9 +43,11 @@ DRIVE_PARMS=${DRIVE_PARMS-WP_SPEED 0.5;WP_RADIUS 0.3;WP_PIVOT_ANGLE 60;CRUISE_SP
 export EXTRA_PARMS="${DRIVE_PARMS};${EXTRA_PARMS:-}"
 export LIDAR_UP=${LIDAR_UP-0.25}
 TRACK_Z_LO=${TRACK_Z_LO-0.30}
+# the track planner's drive_speed (its run-out, track_core.run_out): the run's WP_SPEED
+TRACK_SPEED=$(echo "$DRIVE_PARMS" | tr ';' '\n' | awk '$1=="WP_SPEED" {print $2}')
 
 $H up $name $map $sx $sy $syaw
-docker cp ~/sim/l2/planner $ROS:/planner
+docker cp ${PLANNER_DIR:-$HOME/sim/l2/planner} $ROS:/planner   # PLANNER_DIR: another planner/ copy (a private test)
 docker cp $cfg $ROS:/super_ws/src/SUPER/super_planner/config/super_closed_loop.yaml
 docker cp $mission $ROS:/run/mission_map.yaml
 
@@ -52,7 +62,7 @@ $H exec $name "rosparam load /planner/config/planner_bridge.yaml /planner_bridge
   rosparam set /planner_bridge/speed_cap 1.0; rosparam set /planner_bridge/fc_mount_yaw_deg -0.45; \
   nohup python3 -u /planner/planner_bridge.py __name:=planner_bridge > /run/logs/planner_bridge.log 2>&1 &
   nohup python3 -u /planner/landing_check.py __name:=landing_check > /run/logs/landing_check.log 2>&1 &
-  nohup python3 -u /planner/track_planner.py __name:=track_planner _z_lo:=$TRACK_Z_LO > /run/logs/track_planner.log 2>&1 &
+  nohup python3 -u /planner/track_planner.py __name:=track_planner _z_lo:=$TRACK_Z_LO _drive_speed:=${TRACK_SPEED:-0.5} > /run/logs/track_planner.log 2>&1 &
   nohup bash -c 'stdbuf -oL rosrun super_planner fsm_node _config_name:=super_closed_loop.yaml 2>&1 | python3 -u /planner_sim/stamp_lines.py' > /run/logs/super.log 2>&1 &
   nohup rosbag record -O /run/closed_loop.bag --lz4 \
     /planner/odom /planner/cloud /Odometry /mavros/local_position/pose /mavros/vision_pose/pose \
@@ -64,12 +74,17 @@ $H exec $name "rosparam load /planner/config/planner_bridge.yaml /planner_bridge
     /mavros/statustext/recv /mavros/local_position/velocity_local \
     /fsm_node/visualization/exp_traj /fsm_node/visualization/backup_traj /fsm_node/visualization/committed_traj \
     /fsm_node/visualization/exp_sfc /fsm_node/visualization/backup_sfc /fsm_node/visualization/goal \
+    ${RECORD_EXTRA:-} \
     > /run/logs/record.log 2>&1 &
   sleep 1"
 sleep 15
-$H exec $name "python3 -u /planner_sim/fly_mission.py /run/mission_map.yaml $timeout" > $RUN/logs/fly_mission.log 2>&1
+# failure tests (faults/cases.sh): a fault runner started just before the mission
+[ -n "${FAULT_HOOK:-}" ] && $H exec $name "nohup $FAULT_HOOK > /run/logs/fault.log 2>&1 &
+sleep 1"
+$H exec $name "END_HOLD_S=${END_HOLD_S:-0} python3 -u /planner_sim/fly_mission.py /run/mission_map.yaml $timeout" > $RUN/logs/fly_mission.log 2>&1
 $H exec $name "pkill -INT -f 'rosbag record'; sleep 5; true"
 grep -c "ReplanOnce succeed" $RUN/logs/super.log
 tail -n 3 $RUN/logs/fly_mission.log
+docker logs l2-sitl-$name > $RUN/logs/sitl_stdout.log 2>&1   # SITL's console (watchdog: "GOT SIGALRM")
 $H down $name
 echo "closed loop $name done: $RUN"

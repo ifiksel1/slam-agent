@@ -1,0 +1,20 @@
+# Failure test 4 (faults/cases.sh goal_obst_fly): a fly goal inside the ~1.2 x 1 x 0.9 m box at map
+# (-2.6, -7.6) of the Hensel Phelps map (hp_1015_carved.pcd, start 0, 0, yaw -90.7). The first three
+# legs are example_hp_drive_fly.yaml's; leg 4 is the goal in the box with on_unreachable: next, so the
+# executive should hold (QRLoiter), give it up and go on to the land leg.
+name: goal_in_box_fly
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [-0.28, -7.61, 1.30]}
+  - {type: fly, goal: [-2.60, -7.50, 0.45], on_unreachable: next}   # inside the box
+  - {type: land, at: [-6.00, -9.00]}

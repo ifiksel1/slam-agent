@@ -11,6 +11,15 @@
                                not clear, "no heading"
        /planner/landing_spot   geometry_msgs/PointStamped, planner frame: the spot the executive
                                wants to land on (z = the height it descends from)
+       /mission_executive/ground_spots  std_msgs/String, latched JSON {"frame": "fc", "spots":
+                               [{"event", "xyz", "yaw", "t"}]}: where the robot sat on the ground this
+                               mission (each takeoff spot, each landing), the FC pose (odometry point)
+                               in the fc frame. Their frame footprints are known floor (landing_core:
+                               unobserved cells there count as observed; occupied ones stay occupied)
+       /planner_bridge/anchor  geometry_msgs/TransformStamped, latched, fc <- planner: converts the
+                               ground spots to the planner frame at every evaluation, so a SLAM
+                               re-anchor moves them with the map (no anchor yet: they are not used,
+                               status "known_floor": "no anchor")
   out: /planner/landing_clear  std_msgs/Bool, every tick_s while a spot request is fresh (< spot_timeout_s)
        /planner/landing_status std_msgs/String, JSON: the reason and the numbers behind it
                                ("spot", and "centre": the disc's)
@@ -25,6 +34,8 @@
                                  landing_occupied    CUBE_LIST, 10 cm cells, top at their height
                                                      above the floor (red)
                                  landing_unobserved  CUBE_LIST, flat grey cells at the floor
+                                 landing_known_floor LINE_LIST, light blue: the footprints where
+                                                     the robot sat (known floor) that reach the disc
                                  landing_label       TEXT_VIEW_FACING, decision + reason + layer
 
 Rules in landing_core.py (scan by scan: each scan's floor is fitted to the track planner's local
@@ -37,7 +48,7 @@ import time
 
 import numpy as np
 import rospy
-from geometry_msgs.msg import Point, PointStamped
+from geometry_msgs.msg import Point, PointStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Bool, ColorRGBA, String
@@ -47,6 +58,23 @@ import track_core as tc
 from landing_core import FOOTPRINT, LandingCheck
 
 GREEN, RED, AMBER = (0.1, 0.8, 0.2), (0.9, 0.1, 0.1), (1.0, 0.65, 0.0)
+LIGHT_BLUE = (0.45, 0.75, 1.0)
+
+
+def yaw_of(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+def ground_spots_to_planner(spots, psi, t):
+    """the executive's ground spots (fc frame) -> [(x, y, yaw)] of the odometry point in the planner
+    frame, with the bridge's anchor fc = Rz(psi) * planner + t"""
+    c, s = math.cos(psi), math.sin(psi)
+    out = []
+    for sp in spots:
+        dx, dy = float(sp["xyz"][0]) - t[0], float(sp["xyz"][1]) - t[1]
+        yaw = float(sp["yaw"]) - psi
+        out.append((c * dx + s * dy, -s * dx + c * dy, math.atan2(math.sin(yaw), math.cos(yaw))))
+    return out
 
 
 def decision(clear, reason):
@@ -133,6 +161,17 @@ def build_markers(clear, st, viz, frame, stamp, fallback_z):
         o.action = Marker.DELETE
     out.markers.append(o)
 
+    k = mk("landing_known_floor", Marker.LINE_LIST)
+    k.scale.x = 0.025
+    k.color = ColorRGBA(LIGHT_BLUE[0], LIGHT_BLUE[1], LIGHT_BLUE[2], 0.9)
+    for corners in viz.get("known_floor", ()):
+        for (x0, y0), (x1, y1) in zip(corners, corners[1:] + corners[:1]):
+            k.points.append(Point(x0, y0, fz + a * (x0 - cx) + b * (y0 - cy) + 0.015))
+            k.points.append(Point(x1, y1, fz + a * (x1 - cx) + b * (y1 - cy) + 0.015))
+    if not k.points:
+        k.action = Marker.DELETE
+    out.markers.append(k)
+
     u = mk("landing_unobserved", Marker.CUBE_LIST)
     u.scale.x = u.scale.y = cell * 0.9
     u.scale.z = 0.01
@@ -179,6 +218,8 @@ class LandingCheckNode:
         self.scans = []        # (time, voxelised points, sensor xyz or None)
         self.spot = None       # (time, x, y, z)
         self.odom = None       # (time, xyz)
+        self.ground_spots = [] # the executive's (fc frame)
+        self.anchor = None     # (psi, t xy): fc <- planner
         self.busy = threading.Lock()
         self.pub_clear = rospy.Publisher("/planner/landing_clear", Bool, queue_size=10)
         self.pub_status = rospy.Publisher("/planner/landing_status", String, queue_size=10)
@@ -186,12 +227,31 @@ class LandingCheckNode:
         rospy.Subscriber("/planner/odom", Odometry, self.on_odom, queue_size=20)
         rospy.Subscriber("/planner/cloud", PointCloud2, self.on_cloud, queue_size=5)
         rospy.Subscriber("/planner/landing_spot", PointStamped, self.on_spot, queue_size=5)
+        rospy.Subscriber(g("~ground_spots_topic", "/mission_executive/ground_spots"), String, self.on_ground_spots,
+                         queue_size=5)
+        rospy.Subscriber("/planner_bridge/anchor", TransformStamped, self.on_anchor, queue_size=5)
         rospy.Timer(rospy.Duration(g("~tick_s", 0.25)), self.tick)
+
+    def on_ground_spots(self, m):
+        try:
+            d = json.loads(m.data)
+            spots = [s for s in d.get("spots", []) if len(s["xyz"]) >= 2 and s.get("yaw") is not None]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            rospy.logwarn("landing check: malformed ground spots ignored")
+            return
+        if d.get("frame", "fc") != "fc":
+            rospy.logwarn("landing check: ground spots must be in the fc frame, ignored")
+            return
+        self.ground_spots = spots
+
+    def on_anchor(self, m):
+        tr = m.transform.translation
+        self.anchor = (yaw_of(m.transform.rotation), (tr.x, tr.y))
 
     def on_odom(self, m):
         p = m.pose.pose.position
         q = m.pose.pose.orientation
-        self.yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        self.yaw = yaw_of(q)
         self.odom = (time.monotonic(), np.array([p.x, p.y, p.z]))
 
     def on_cloud(self, m):
@@ -239,8 +299,13 @@ class LandingCheckNode:
             self.check.viz = {}
         else:
             scans = [(s[1], s[2]) if s[2] is not None else s[1] for s in self.scans] or [np.zeros((0, 3))]
-            clear, st = self.check.evaluate(None, (x, y), descend_from=z if z > 0 else None, scans=scans, yaw=yaw)
+            spots, anchor = self.ground_spots, self.anchor
+            known = ground_spots_to_planner(spots, *anchor) if spots and anchor is not None else None
+            clear, st = self.check.evaluate(None, (x, y), descend_from=z if z > 0 else None, scans=scans, yaw=yaw,
+                                            known=known)
             st["scans"] = len(self.scans)
+            if spots:
+                st["known_floor"] = "no anchor" if anchor is None else "%d ground spots" % len(spots)
         st["eval_ms"] = round(1000 * (time.monotonic() - t0), 1)
         self.pub_clear.publish(Bool(data=bool(clear)))
         self.pub_status.publish(String(json.dumps(st)))

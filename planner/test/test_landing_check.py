@@ -134,6 +134,78 @@ class Synthetic(unittest.TestCase):
         self.assertFalse(ok, st)
 
 
+def hide_where_it_sat(P, odom=(0.0, 0.0), yaw=0.0, shadow=0.2):
+    """P without the floor the robot's body hid while it sat with its odometry point at odom, heading
+    yaw: the frame's footprint (centred 0.193 m behind the odometry point) and a shadow `shadow` m
+    deep behind its rear edge"""
+    c, s = np.cos(yaw), np.sin(yaw)
+    d = P[:, :2] - [odom[0] - 0.193 * c, odom[1] - 0.193 * s]
+    u, v = d[:, 0] * c + d[:, 1] * s, -d[:, 0] * s + d[:, 1] * c
+    return P[~((u >= -0.254 - shadow) & (u <= 0.254) & (np.abs(v) <= 0.2285))]
+
+
+class KnownFloor(unittest.TestCase):
+    """owner decision 2026-10-28: where the robot sat on the ground is known floor"""
+
+    def setUp(self):
+        self.lc = LandingCheck()
+
+    def test_hidden_footprint_is_not_observed_without_and_clear_with_the_takeoff_spot(self):
+        P = hide_where_it_sat(floor(r=1.5))
+        ok, st = self.lc.evaluate(P, (0, 0), yaw=0.0)
+        self.assertFalse(ok, st)
+        self.assertIn("not observed", st["reason"])
+        ok, st = self.lc.evaluate(P, (0, 0), yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertTrue(ok, st)
+        self.assertLess(st["observed_measured"], 0.7)
+        self.assertEqual(st["known_floor_cells"], 25)               # the 5 x 5 cells under the frame
+        self.assertGreaterEqual(st["observed"], 0.8)
+        self.assertEqual(len(self.lc.viz["known_cells"]), 25)
+        self.assertEqual(len(self.lc.viz["known_floor"]), 1)
+        # the shadow behind the frame is not known: still unobserved, only it
+        self.assertTrue(all(x < -0.44 for x, _ in self.lc.viz["unobserved"]), self.lc.viz["unobserved"])
+
+    def test_rotated_spot_and_a_landing_heading(self):
+        # sat at (2, 1) heading 90 deg; the landing comes back heading the same way
+        P = hide_where_it_sat(floor(cx=2.0, cy=1.0, r=1.5), odom=(2.0, 1.0), yaw=np.pi / 2)
+        self.assertFalse(self.lc.evaluate(P, (2.0, 1.0), yaw=np.pi / 2)[0])
+        ok, st = self.lc.evaluate(P, (2.0, 1.0), yaw=np.pi / 2, known=[(2.0, 1.0, np.pi / 2)])
+        self.assertTrue(ok, st)
+
+    def test_box_on_the_takeoff_spot_is_occupied(self):
+        P = hide_where_it_sat(floor(r=1.5))
+        ok, st = self.lc.evaluate(np.r_[P, box(-0.19, 0.0, 0.3)], (0, 0), yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertFalse(ok, st)
+        self.assertIn("occupied", st["reason"])
+        low = np.r_[P, box(-0.1, 0.05, 0.12)]
+        ok, st = self.lc.evaluate(low, (0, 0), yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertFalse(ok, st)
+        self.assertIn("occupied", st["reason"])
+
+    def test_a_spot_elsewhere_does_not_help(self):
+        P = hide_where_it_sat(floor(r=1.5))
+        ok, st = self.lc.evaluate(P, (0, 0), yaw=0.0, known=[(3.0, 0.0, 0.0)])
+        self.assertFalse(ok, st)
+        self.assertNotIn("known_footprints", st)
+        self.assertEqual(self.lc.viz["known_floor"], [])
+
+    def test_known_floor_does_not_clear_a_spot_never_seen(self):
+        # nothing around the footprint seen either: no plane, not clear
+        ok, st = self.lc.evaluate(floor(cx=5.0), (0, 0), yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertFalse(ok, st)
+
+    def test_scan_by_scan(self):
+        scans = [hide_where_it_sat(S) for S in drifting_scans()]
+        self.assertFalse(self.lc.evaluate(None, (0, 0), scans=scans, yaw=0.0)[0])
+        ok, st = self.lc.evaluate(None, (0, 0), scans=scans, yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertTrue(ok, st)
+        # a box put on the spot: seen by the last 5 scans (on each scan's own drifted floor)
+        scans = [np.r_[S, box(-0.19, 0.0, 0.3) + [0.0, 0.0, 0.25 * k / 19]] if k >= 15 else S for k, S in enumerate(scans)]
+        ok, st = self.lc.evaluate(None, (0, 0), scans=scans, yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertFalse(ok, st)
+        self.assertIn("occupied", st["reason"])
+
+
 def drifting_scans(n=20, drift=0.25, extra=None, r=2.0):
     """n scans of one flat floor, each seeing it at its own height (z drift between scans, 0..drift),
     each 1 cm thick; extra(k) -> points added to scan k (in that scan's own frame)"""
@@ -202,7 +274,9 @@ class Markers(unittest.TestCase):
         ok, st = lc.evaluate(np.r_[floor(z=0.4), box(0.1, 0.0, 0.3, z0=0.4)], (0, 0), yaw=0.5)
         arr = node.build_markers(ok, st, lc.viz, "world", node.rospy.Time(0), 0.0)
         m = self.ns(arr)
-        self.assertEqual(set(m), {"landing_disc", "landing_footprint", "landing_occupied", "landing_unobserved", "landing_label"})
+        self.assertEqual(set(m), {"landing_disc", "landing_footprint", "landing_occupied", "landing_unobserved",
+                                  "landing_known_floor", "landing_label"})
+        self.assertEqual(m["landing_known_floor"].action, node.Marker.DELETE)
         self.assertTrue(all(x.header.frame_id == "world" for x in arr.markers))
         d = m["landing_disc"]
         self.assertEqual((d.color.r, d.color.g), node.RED[:2])
@@ -237,6 +311,33 @@ class Markers(unittest.TestCase):
         self.assertAlmostEqual(m["landing_disc"].pose.position.z, 0.305)
         self.assertEqual(m["landing_footprint"].action, node.Marker.DELETE)
         self.assertTrue(m["landing_label"].text.startswith("NO HEADING"))
+
+    def test_known_floor_marker(self):
+        lc = LandingCheck()
+        P = hide_where_it_sat(floor(z=0.4, r=1.5))
+        ok, st = lc.evaluate(P, (0, 0), yaw=0.0, known=[(0.0, 0.0, 0.0)])
+        self.assertTrue(ok, st)
+        m = self.ns(node.build_markers(ok, st, lc.viz, "world", node.rospy.Time(0), 0.0))
+        k = m["landing_known_floor"]
+        self.assertEqual(k.type, node.Marker.LINE_LIST)
+        self.assertEqual(k.action, node.Marker.ADD)
+        self.assertEqual(len(k.points), 8)                           # one rectangle
+        self.assertEqual((k.color.r, k.color.g, k.color.b), node.LIGHT_BLUE)
+        xs = sorted(p.x for p in k.points)
+        self.assertAlmostEqual(xs[0], -0.193 - 0.254, places=3)
+        self.assertAlmostEqual(xs[-1], -0.193 + 0.254, places=3)
+        self.assertTrue(all(abs(p.z - 0.415) < 0.04 for p in k.points))
+        self.assertEqual(len(m["landing_unobserved"].points), len(lc.viz["unobserved"]))
+
+    def test_ground_spots_to_the_planner_frame(self):
+        # the bridge's anchor fc = Rz(psi) planner + t; a spot recorded in fc comes back in planner
+        psi, t = 0.6, (2.0, -1.0)
+        planner = (1.5, 0.5, 0.3)
+        c, s = np.cos(psi), np.sin(psi)
+        fc = {"xyz": [c * planner[0] - s * planner[1] + t[0], s * planner[0] + c * planner[1] + t[1], 0.1],
+              "yaw": planner[2] + psi, "event": "takeoff"}
+        (x, y, yaw), = node.ground_spots_to_planner([fc], psi, t)
+        np.testing.assert_allclose([x, y, yaw], planner, atol=1e-9)
 
 
 @unittest.skipUnless(os.environ.get("LANDING_MAPS"), "set LANDING_MAPS to the directory with the map PCDs and flight metas")
@@ -365,6 +466,41 @@ class RealScans(unittest.TestCase):
         ok, st = self.judge(tr, kf, (-3.75, -5.25))
         self.assertFalse(ok, st)
         self.assertIn("occupied", st["reason"])
+
+    def heading(self, kf, k):
+        """the keyframe's heading: the sensor's +z (raw FAST-LIO body: forward) in the map frame"""
+        f = kf.Rk[k][:, 2]
+        return float(np.arctan2(f[1], f[0]))
+
+    def test_spots_where_it_sat_are_known_floor(self):
+        """owner decision 2026-10-28: with the disc on the frame the Hensel Phelps takeoff spot and the
+        20:18:07 landing spot read "not observed" (62%: the body hid the floor); as known floor (the
+        recorded footprint) they are clear, and a box put there is still occupied"""
+        for name, e, k in (("hp_1015", 0, 0), ("20_18_07", -1, -1)):
+            tr, kf = self.run_(name)
+            xy, yaw = tr[e, :2], self.heading(kf, k)
+            scans = kf.scans_near(np.asarray(xy, float))
+            top = tr[0, 2] + 1.5
+            ok, st = self.lc.evaluate(None, xy, descend_from=top, scans=scans, yaw=yaw)
+            self.assertFalse(ok, (name, st))
+            self.assertIn("not observed", st["reason"])
+            ok, st = self.lc.evaluate(None, xy, descend_from=top, scans=scans, yaw=yaw, known=[(xy[0], xy[1], yaw)])
+            print("\n  %s %s: measured %.0f%%, with the footprint %.0f%%, %s" % (
+                name, "takeoff" if e == 0 else "landing", 100 * st.get("observed_measured", 0), 100 * st.get("observed", 0),
+                st["reason"]))
+            self.assertTrue(ok, (name, st))
+            # a 0.3 m box on the spot, under the frame (on each scan's own floor)
+            c = self.lc.centre(xy, yaw)
+            boxed = []
+            for S, sp in scans:
+                near = S[np.hypot(S[:, 0] - c[0], S[:, 1] - c[1]) < 1.0, 2]
+                if len(near) >= 20:
+                    boxed.append((np.r_[S, box(c[0], c[1], 0.30, z0=np.percentile(near, 30), step=0.03)], sp))
+                else:
+                    boxed.append((S, sp))
+            ok, st = self.lc.evaluate(None, xy, descend_from=top, scans=boxed, yaw=yaw, known=[(xy[0], xy[1], yaw)])
+            self.assertFalse(ok, (name, st))
+            self.assertIn("occupied", st["reason"])
 
     def test_house_start_clear_until_someone_stands_there(self):
         """the house drive's start: clear in the first 160 s of scans; later scans (164 s, 329-373 s)

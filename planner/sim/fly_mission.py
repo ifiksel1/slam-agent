@@ -122,6 +122,12 @@ while time.time() - t_start < TIMEOUT and status.get("phase") not in ("DONE", "S
     time.sleep(0.5)
 print("%.1f mission end: %s after %.0f s" % (time.time(), status.get("phase"), time.time() - t_start), flush=True)
 
+# failure tests: leave the vehicle to the FC and the stack for END_HOLD_S before landing it (default 0)
+end_hold = float(__import__("os").environ.get("END_HOLD_S", "0") or 0)
+if end_hold > 0:
+    print("%.1f holding %.0f s before landing (END_HOLD_S)" % (time.time(), end_hold), flush=True)
+    time.sleep(end_hold)
+
 # land and disarm, in SITL only
 mav.mav.command_long_send(1, 1, mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
                           mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, QRLAND, 0, 0, 0, 0, 0)

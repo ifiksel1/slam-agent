@@ -4,7 +4,9 @@ output to SUPER's frame. The core logic is bridge_core.py (ROS-free, unit-tested
 
 In:   /Odometry, /cloud_registered          FAST-LIO, raw frame
       /mavros/vision_pose/pose              the SLAM-to-FC bridge's output (fc frame), for the anchor
-      /mavros/local_position/pose           the FC's EKF pose (fc frame): HOLD position, geofence
+      /mavros/local_position/pose           the FC's EKF pose (fc frame): the vehicle position for the
+                                            caps, the drive target, the HOLD point and the geofence;
+                                            trusted only while fresh (~fc_pose_timeout, see below)
       /mavros/state                         stream only in GUIDED
       /planner_bridge/enable                std_msgs/Bool, latched, from the mission executive: stream
                                             only while true (its fly and drive legs), never during the
@@ -25,8 +27,9 @@ Out:  /planner/odom, /planner/cloud         planner frame, for SUPER and ROG-Map
                                             1 streaming flight targets, 2 streaming drive targets
 
 Modes. flight: SUPER's PositionCommand -> PosVelAccel + yaw, capped (Guided flight). drive: the track
-planner's carrot -> a position-only target within ~drive_lookahead of the vehicle (Rover Guided on the
-ground rejects any target with acceleration). The two planners publish on separate topics (SUPER keeps
+planner's target (its carrot run out along the carrot's bearing, frame-checked: track_core.run_out)
+-> a position-only target within ~drive_lookahead of the vehicle (Rover Guided on the ground rejects any
+target with acceleration; its fast-update path asks ~0.5 m/s per metre to the target, hence 2.5 m). The two planners publish on separate topics (SUPER keeps
 publishing toward its last goal after a landing); the bridge listens only to the one of its mode. A
 mode change drops the last command and holds (latched) until a command from the new mode's planner
 arrives, so a target of one planner is never sent in the other mode.
@@ -39,6 +42,31 @@ mode it streams nothing: Rover Guided drives on to the last target it was sent (
 dead planner stops the rover within the lookahead). A position hold at the vehicle does not stop a
 rover: taken while it moves, the point is soon behind it and Rover Guided orbits it (SITL cl36,
 ~0.28 m/s for 15 s); a zero-speed heading target let SITL's rover lurch into reverse and creep (cl37, cl38).
+(Those runs had SITL's conserved sideways slide after a touchdown, sitl_track_friction.patch.)
+
+Reversing (owner 2026-10-28, dead ends). A track planner command whose velocity points against its yaw
+means: back straight up, holding the yaw, until the FC is at the command's position
+(bridge_core.reverse_speed). It goes out as a Rover Guided velocity + heading target (mask 2503: no
+position; MAVROS turns the ENU velocity (0, -speed) into NED vx -speed, which Rover reads as
+reverse: GCS_MAVLink_Rover speed_dir), speed tapering to 0 at the end point: a Guided setpoint,
+within D5 (no DO_SET_REVERSE, no mode change). Rover's velocity + heading submode keeps the last
+speed for 3 s without targets, so a HOLD after a reverse streams a zero-speed one (a dead bridge:
+Rover stops itself after 3 s, <= 0.75 m at the planner's 0.25 m/s).
+
+A stale FC pose (owner decision 2026-10-28). The FC pose is the bridge's "where the vehicle is now"
+(p_now): every target is capped or placed relative to it. Its age is measured on the receive time.
+  * none received yet: nothing is streamed (status "fc_pose": "never", reason "no FC pose yet");
+  * older than ~fc_pose_timeout (0.3 s; ~50 Hz on the robot): HOLD with reason "fc_pose_stale",
+    whatever the planner says. In flight the hold target is the last pose received while it was
+    fresh (bridge_core.FcPoseGuard.good), streamed at the full rate with zero velocity so Guided does
+    not time out on Q_GUID_TIMEOUT; in drive mode nothing is sent (Rover Guided brakes at its last
+    target), except during a reverse: a zero-speed heading target, as in any drive HOLD then (Rover's
+    velocity + heading target would back up on for 3 s; it needs no pose). A hold that began earlier
+    (say, planner stale) keeps its point;
+  * fresh again: trusted after ~fc_pose_resume_n poses in a row (5, 0.1 s at 50 Hz), each within
+    ~fc_pose_timeout of the one before; then the usual resume (a planner command newer than the hold).
+Status: "fc_pose" ("never" | "stale" | "ok"), "fc_pose_age" (s, null before the first) and the reason.
+"fc_pose_stale" is not a SLAM hold ("slam_hold" false): the executive's leg clock keeps running.
 """
 import json
 import math
@@ -70,6 +98,9 @@ FORCE, IGNORE_YAW, IGNORE_YAW_RATE = 512, 1024, 2048
 MASK_FLIGHT = IGNORE_YAW_RATE
 # driving: position + yaw only (Rover Guided rejects any target with acceleration set)
 MASK_DRIVE = IGNORE_VX | IGNORE_VY | IGNORE_VZ | IGNORE_AFX | IGNORE_AFY | IGNORE_AFZ | IGNORE_YAW_RATE
+# reversing (dead ends): velocity + yaw, no position (Rover Guided HeadingAndSpeed; a negative NED vx
+# backs up holding the yaw; stops by itself 3 s after the last target)
+MASK_REVERSE = IGNORE_PX | IGNORE_PY | IGNORE_PZ | IGNORE_AFX | IGNORE_AFY | IGNORE_AFZ | IGNORE_YAW_RATE
 
 
 def vec(m):
@@ -94,10 +125,11 @@ class PlannerBridge:
         self.speed_cap = float(g("~speed_cap", 0.5))           # 1.0 in sim, 0.5 robot (D10)
         self.max_lead = float(g("~max_lead", 1.0))
         self.fc_pos_p = float(g("~fc_pos_p", 1.0))                # the FC's Q_P_NE_POS_P: the cap bounds the FC's demand
-        self.drive_lookahead = float(g("~drive_lookahead", 0.5))
+        self.drive_lookahead = float(g("~drive_lookahead", 2.5))     # above the track planner's run-out (<= 2.1)
         self.guided_mode = g("~guided_mode", "GUIDED")
         self.fence = bc.Geofence(g("~geofence_min", [-50.0, -50.0, -1.0]), g("~geofence_max", [50.0, 50.0, 10.0]))
         self.hold = bc.HoldLogic(g("~planner_timeout", 0.3), g("~slam_timeout", 0.2))
+        self.fc_guard = bc.FcPoseGuard(g("~fc_pose_timeout", 0.3), g("~fc_pose_resume_n", 5))
         self.tracker = bc.AnchorTracker(g("~anchor_jump_m", 0.1), g("~anchor_jump_deg", 2.0),
                                         g("~anchor_persist", 3), math.radians(g("~fc_mount_yaw_deg", 0.0)))
         self.health = bc.HealthCheck(g("~health_matched_min", 150.0), g("~health_eig_min", 5000.0),
@@ -110,9 +142,10 @@ class PlannerBridge:
         self.cmd = None             # (p, v, a, yaw) planner frame
         self.t_slam = None
         self.last_planner = None    # (p, q) from the newest /Odometry, planner frame
-        self.fc_pose = None         # (p, yaw) from /mavros/local_position/pose
+        self.fc_pose = None         # (p, yaw) from /mavros/local_position/pose, the newest whatever its age
         self.fc_mode = ""
         self.hold_point = None
+        self.reversing = None       # the yaw of a reverse under way (drive mode), else None
         self.n_out = 0
 
         self.pub_odom = rospy.Publisher("/planner/odom", Odometry, queue_size=20)
@@ -192,6 +225,7 @@ class PlannerBridge:
 
     def on_fc_pose(self, m):
         self.fc_pose = (vec(m.pose.position), bc.yaw_of(quat(m.pose.orientation)))
+        self.fc_guard.on_pose(rospy.get_time(), self.fc_pose)
 
     def on_state(self, m):
         self.fc_mode = m.mode
@@ -212,6 +246,7 @@ class PlannerBridge:
         self.cmd = None
         self.t_cmd = None
         self.hold_point = None
+        self.reversing = None
         self.hold.latch("mode changed to %s" % mode, rospy.get_time())
         self.pub_mode.publish(String(data=mode))
         rospy.loginfo("planner bridge: mode %s", mode)
@@ -245,15 +280,28 @@ class PlannerBridge:
             faults = faults + ["vehicle outside the geofence"]
         if anchor is None:
             faults = faults + ["no frame anchor yet (no vision pose)"]
+        fc = self.fc_guard.check(now)
+        if fc == "never":
+            faults = ["no FC pose yet"] + faults
+        elif fc == "stale":
+            faults = ["fc_pose_stale"] + faults     # the reason to report: first
         state = self.hold.step(now, self.t_cmd, self.t_slam, faults)
-        if self.fc_mode != self.guided_mode or not self.enabled or self.fc_pose is None:
+        if self.fc_mode != self.guided_mode or not self.enabled or fc == "never":
             self.hold_point = None
             return                      # never stream outside Guided (the executive owns modes), nor
-                                        # during the FC's own takeoff or landing (not enabled)
-        p_now, yaw_now = self.fc_pose
+                                        # during the FC's own takeoff or landing (not enabled), nor
+                                        # without ever having had the vehicle's position
+        # stale: the last pose received while fresh (the state is HOLD then: nothing is placed on it
+        # but the hold point)
+        p_now, yaw_now = self.fc_guard.good if fc == "stale" else self.fc_pose
         if state == "STREAM" and target is not None:
             self.hold_point = None
             if mode == "drive":
+                rs = bc.reverse_speed(target[0], target[1], target[3], p_now)
+                if rs is not None:
+                    self.send_reverse(rs, target[3])
+                    return
+                self.reversing = None
                 self.send(bc.drive_target(target[0], target[1], p_now, self.drive_lookahead), None, None, target[3], MASK_DRIVE)
             else:
                 p, v, a, _ = bc.cap_command(target[0], target[1], target[2], p_now, self.speed_cap, self.max_lead,
@@ -261,12 +309,22 @@ class PlannerBridge:
                 self.send(p, v, a, target[3], MASK_FLIGHT)
             return
         if mode == "drive":
+            if self.reversing is not None:
+                # a reverse under way: Rover's velocity + heading target would back up on for 3 s
+                self.send_reverse(0.0, self.reversing)
             return                      # HOLD on the ground: Rover Guided stops at the last target
         # HOLD (or WAIT) in flight: stay where the vehicle is, zero velocity and acceleration
         if self.hold_point is None:
             self.hold_point = (self.fence.clamp(p_now), yaw_now)
         hp, hy = self.hold_point
         self.send(hp, np.zeros(3), np.zeros(3), hy, MASK_FLIGHT)
+
+    def send_reverse(self, speed, yaw):
+        """back up at speed (m/s, >= 0) holding yaw (fc frame, ENU): MAVROS turns the ENU velocity
+        (0, -speed) into NED vx = -speed, which Rover Guided reads as reverse (speed_dir -1); at 0 a
+        zero-speed heading hold"""
+        self.reversing = yaw
+        self.send(np.zeros(3), np.array([0.0, -abs(speed), 0.0]), None, yaw, MASK_REVERSE)
 
     def send(self, p, v, a, yaw, mask):
         sp = PositionTarget()
@@ -297,6 +355,7 @@ class PlannerBridge:
             "slam_hold": self.hold.state == "HOLD" and self.hold.reason.startswith(SLAM_HOLD_REASONS),
             "enabled": self.enabled,
             "streaming": streaming, "cmd_age": age(self.t_cmd), "slam_age": age(self.t_slam),
+            "fc_pose": self.fc_guard.check(now), "fc_pose_age": age(self.fc_guard.t),
             "speed_cap": self.speed_cap, "anchor": None if a is None else {"psi_deg": round(math.degrees(a.psi), 2),
                                                                            "t": [round(x, 3) for x in a.t]},
             "anchor_jumps": self.tracker.jumps, "targets_sent": self.n_out})))

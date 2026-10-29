@@ -230,6 +230,23 @@ def drive_target(p_cmd, v_cmd, p_now, lookahead, horizon_s=0.5):
     return out
 
 
+def reverse_speed(p_cmd, v_cmd, yaw, p_now, gain=1.0, stop_tol=0.02):
+    """a reverse from the track planner (owner 2026-10-28, dead ends): a command whose velocity points
+    against its yaw means "back straight up, holding yaw, until the vehicle (the FC) is at p_cmd".
+    -> the speed to back up at (>= 0: |v_cmd| at most, tapering at `gain` per metre left, 0 within
+    stop_tol of the end or past it), or None for an ordinary (forward) command. Rover Guided takes it
+    as a velocity + heading target with a negative speed (GCS_MAVLink_Rover: speed_dir from vx)."""
+    v = np.asarray(v_cmd, dtype=float)[:2]
+    sp = float(np.linalg.norm(v))
+    h = np.array([math.cos(yaw), math.sin(yaw)])
+    if sp < 1e-3 or float(v @ h) >= 0.0:
+        return None
+    left = float((np.asarray(p_now, dtype=float)[:2] - np.asarray(p_cmd, dtype=float)[:2]) @ h)
+    if left <= stop_tol:
+        return 0.0
+    return min(sp, gain * left)
+
+
 class Geofence:
     def __init__(self, lo, hi):
         self.lo = np.asarray(lo, dtype=float)
@@ -241,6 +258,50 @@ class Geofence:
 
     def clamp(self, p):
         return np.minimum(np.maximum(np.asarray(p, dtype=float), self.lo), self.hi)
+
+
+# ---- the FC pose's freshness --------------------------------------------------------------------
+
+class FcPoseGuard:
+    """the FC's EKF pose (/mavros/local_position/pose, ~50 Hz on the robot) is the bridge's p_now
+    (cap, drive target) and its HOLD point. It is trusted while the newest message is younger than
+    `timeout` (its receive time). Stale: the bridge holds at `good`, the last pose received while it
+    was trusted. Fresh again: trusted after `resume_n` poses in a row, each within `timeout` of the
+    one before (a trickle of single poses stays stale).
+
+    check(now) -> "never" (none yet: stream nothing), "stale" or "ok"."""
+
+    def __init__(self, timeout=0.3, resume_n=5):
+        self.timeout = float(timeout)
+        self.resume_n = max(1, int(resume_n))
+        self.pose = None        # the newest pose, whatever its age
+        self.t = None           # its receive time
+        self.good = None        # the last pose received while trusted
+        self.stale = False
+        self.fresh_n = 0
+
+    def on_pose(self, now, pose):
+        if self.t is not None and now - self.t > self.timeout:
+            self.stale = True   # a gap the check did not see yet: the pose before it stays the good one
+            self.fresh_n = 0
+        self.pose, self.t = pose, now
+        if self.stale:
+            self.fresh_n += 1
+            if self.fresh_n >= self.resume_n:
+                self.stale = False
+        if not self.stale:
+            self.good = pose
+
+    def age(self, now):
+        return None if self.t is None else now - self.t
+
+    def check(self, now):
+        if self.t is None:
+            return "never"
+        if now - self.t > self.timeout:
+            self.stale = True
+            self.fresh_n = 0
+        return "stale" if self.stale else "ok"
 
 
 # ---- HOLD ---------------------------------------------------------------------------------------

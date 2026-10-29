@@ -43,9 +43,21 @@ robot an "obstacle"; beyond 1.2 m they agree to ~1 cm. A scan given with its sen
 returns nearer than near_range (1.2 m). So the spot must have been seen from at least that far: hover
 at 1.2 m or more, or approach nose-first so the scans of the approach see it.
 
+Known floor (owner decision 2026-10-28). Where the robot sat on the ground (its takeoff spot, the
+spots it landed on earlier in the mission) its own body hid the floor from the lidar: with the disc on
+the frame such a spot read "not observed" (Hensel Phelps 10/15 takeoff spot and the 07/15 20:18:07
+landing spot: 62%). evaluate(known=[(x, y, yaw), ...]) takes those poses of the odometry point
+(planner frame) and their frame footprints (the 0.508 x 0.457 m rectangle, centred footprint_offset
+behind the odometry point): a disc cell with no ground returns whose centre lies inside one of them
+counts as observed floor, at the floor plane fitted to the floor seen around it (the floor it sat
+on). Only the observed share changes: points in those cells still count, so something put there
+later is still occupied, and the plane, flatness and floor layer come from real returns only. The
+status gives "observed_measured" (without them), "known_floor_cells" and "known_footprints".
+
 For the markers the last evaluation's geometry is kept in self.viz (plain numbers, no ROS): the disc
 centre and radius, the floor height and plane, the occupied cells (centre xy, top height above the
-floor) and the disc's unobserved cells.
+floor), the disc's unobserved cells, and the known-floor footprints that reach the disc (corners)
+with the cells they made observed.
 
 LIMITS: the disc is centred on the frame for the heading at the time of the check: a yaw during the
 descent (QuadRover does not yaw) or a footprint_offset that is not the real IMU offset moves the frame
@@ -128,12 +140,29 @@ class LandingCheck:
             return np.array([sx, sy])
         return np.array([sx - self.footprint_offset * math.cos(yaw), sy - self.footprint_offset * math.sin(yaw)])
 
-    def evaluate(self, points, spot_xy, descend_from=None, scans=None, yaw=None):
+    def footprint_corners(self, odom_xy, yaw):
+        """the frame's rectangle (4 corners, xy) for the odometry point at odom_xy heading yaw"""
+        cx, cy = self.centre(odom_xy, yaw)
+        c, s = math.cos(yaw), math.sin(yaw)
+        hl, hw = FOOTPRINT[0] / 2, FOOTPRINT[1] / 2
+        return [(cx + c * u - s * v, cy + s * u + c * v) for u, v in ((hl, hw), (-hl, hw), (-hl, -hw), (hl, -hw))]
+
+    def in_footprint(self, xy, odom_xy, yaw):
+        """(N, 2) points -> bool (N,): inside the frame's rectangle for that odometry pose"""
+        cx, cy = self.centre(odom_xy, yaw)
+        d = np.asarray(xy, dtype=float).reshape(-1, 2) - [cx, cy]
+        c, s = math.cos(yaw), math.sin(yaw)
+        u, v = d[:, 0] * c + d[:, 1] * s, -d[:, 0] * s + d[:, 1] * c
+        return (np.abs(u) <= FOOTPRINT[0] / 2) & (np.abs(v) <= FOOTPRINT[1] / 2)
+
+    def evaluate(self, points, spot_xy, descend_from=None, scans=None, yaw=None, known=None):
         """points: Nx3 planner frame (one merged cloud), or scans: a list of Nx3 clouds, oldest first
         (points is then ignored), each optionally (cloud, sensor_xyz): returns nearer the sensor than
         near_range are dropped; spot_xy: (x, y) where the odometry point comes down; yaw: the heading
         (rad, planner frame): the disc is centred footprint_offset behind the spot (None: on the spot);
-        descend_from: z the robot comes down from (defaults to ground + descent_top).
+        descend_from: z the robot comes down from (defaults to ground + descent_top); known: poses
+        (x, y, yaw) of the odometry point where the robot sat on the ground: unobserved cells inside
+        those frame footprints count as observed floor (see the module docstring).
         -> (clear: bool, status: dict); the geometry for the markers in self.viz"""
         spot = self.centre(spot_xy, yaw)
         sx, sy = spot
@@ -143,7 +172,15 @@ class LandingCheck:
             st["yaw_deg"] = round(math.degrees(yaw), 1)
             st["footprint_offset_m"] = round(self.footprint_offset, 3)
         viz = self.viz = {"centre": (float(sx), float(sy)), "yaw": yaw, "radius": self.radius, "floor_z": None,
-                          "plane": None, "occupied": [], "unobserved": [], "cell": self.cell}
+                          "plane": None, "occupied": [], "unobserved": [], "cell": self.cell,
+                          "known_floor": [], "known_cells": []}
+        # the known-floor footprints that reach the disc
+        reach = self.radius + math.hypot(*FOOTPRINT) / 2 + self.footprint_offset
+        known = [(float(kx), float(ky), float(kyaw)) for kx, ky, kyaw in (known or ())
+                 if math.hypot(kx - sx, ky - sy) <= reach]
+        viz["known_floor"] = [self.footprint_corners((kx, ky), kyaw) for kx, ky, kyaw in known]
+        if known:
+            st["known_footprints"] = len(known)
         box = self.align_radius + self.gcfg.tile
         raw = [points] if scans is None else list(scans)
         crop = []
@@ -235,6 +272,16 @@ class LandingCheck:
         cells = {(int(round((x - sx) / self.cell)), int(round((y - sy) / self.cell))) for x, y in g[:, :2]}
         want = [(i - n, j - n) for j in range(2 * n + 1) for i in range(2 * n + 1) if inside[j, i]]
         miss = [c for c in want if c not in cells]
+        if known and miss:
+            # cells under a footprint where the robot sat: floor its own body hid
+            xy = np.array([(sx + i * self.cell, sy + j * self.cell) for i, j in miss])
+            under = np.zeros(len(miss), dtype=bool)
+            for kx, ky, kyaw in known:
+                under |= self.in_footprint(xy, (kx, ky), kyaw)
+            viz["known_cells"] = [tuple(p) for p in xy[under]]
+            st["observed_measured"] = round(1.0 - len(miss) / max(1, len(want)), 3)
+            st["known_floor_cells"] = int(under.sum())
+            miss = [c for c, u in zip(miss, under) if not u]
         observed = 1.0 - len(miss) / max(1, len(want))
         viz["unobserved"] = [(sx + i * self.cell, sy + j * self.cell) for i, j in miss]
         st["observed"] = round(observed, 3)

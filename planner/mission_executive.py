@@ -14,9 +14,13 @@ then works through the mission's legs:
   land     at [x, y]: fly there, ask the landing check (/planner/landing_spot) and require it to
            report the spot clear within ~landing_check_s (a not-clear answer is asked again until
            then: a person walking off clears it), then NAV_LAND (lands and drives on in GUIDED)
-  takeoff  height above the liftoff point (NAV_TAKEOFF in GUIDED). After a drive the executive
-           first waits for the vehicle to stop (~takeoff_settle_s: QuadRover refuses a takeoff while
-           moving, MAV_RESULT_TEMPORARILY_REJECTED, and the request is repeated until then)
+  takeoff  height above the liftoff point (NAV_TAKEOFF in GUIDED). The executive first waits for
+           the vehicle to stand still (< 2 cm over 1 s) for up to ~takeoff_settle_s (15 s; after a drive
+           Rover Guided runs on to its last target for a few seconds). Not still by then: the mission
+           stops, "not stationary before takeoff" (owner decision 2026-10-28), in GUIDED with the bridge
+           off, no takeoff sent (QuadRover's own 0.2 m/s guard is not relied on). Still: NAV_TAKEOFF,
+           repeated while QuadRover answers MAV_RESULT_TEMPORARILY_REJECTED, for up to
+           ~takeoff_settle_s
 
 A mission that starts with a fly or land leg gets a takeoff (takeoff_height) first; one that starts
 with a drive leg drives first.
@@ -45,6 +49,16 @@ Failures:
   * landing spot not reported clear within ~landing_check_s -> QRLOITER, mission stopped
   * a takeoff refused or not completed -> mission stopped (no later leg can fly); a refused takeoff
     leaves it on the ground in GUIDED, one that started and did not complete goes to QRLOITER
+  * not standing still within ~takeoff_settle_s before a takeoff -> mission stopped on the ground,
+    GUIDED, bridge off, no takeoff sent
+
+Ground spots (owner decision 2026-10-28): where the vehicle sat on the ground is known floor for the
+landing check (its own body hides the floor under it from the lidar). Each spot is the FC pose
+(/mavros/local_position/pose: the odometry point, fc frame, with its yaw) when standing still on the
+ground in GUIDED just before a NAV_TAKEOFF ("takeoff"), and when a landing completes ("landed"). All of
+the mission's spots so far go out on /mission_executive/ground_spots (std_msgs/String, latched, JSON
+{"frame": "fc", "spots": [{"event", "xyz", "yaw", "t"}]}); landing_check.py converts them to the
+planner frame with /planner_bridge/anchor.
 
 The planner bridge streams targets only while /planner_bridge/enable (latched) is true: this node
 sets it for its fly and drive legs and clears it before every takeoff, landing, mode change and stop,
@@ -72,6 +86,7 @@ MODES = {"MANUAL": 0, "HOLD": 4, "AUTO": 10, "RTL": 11, "SMART_RTL": 12, "GUIDED
          "QRSTABILIZE": 17, "QRALTHOLD": 18, "QRLOITER": 19, "QRRTL": 20, "QRLAND": 21,
          "QRCIRCLE": 22, "QRSMARTRTL": 23}
 ALLOWED_MODES = {"GUIDED", "QRLOITER", "QRLAND", "QRSMARTRTL"}   # D5
+NOT_STATIONARY = "not stationary before takeoff"
 MAV_CMD_DO_SET_MODE = 176
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
 
@@ -162,6 +177,8 @@ class MissionExecutive:
         self.lock = threading.Lock()
         self.state = None
         self.pose = None
+        self.yaw = None           # the FC pose's yaw (fc frame)
+        self.ground_spots = []    # where the vehicle sat on the ground (fc frame), for the landing check
         self.bridge = {"state": "OK", "slam_ok": True}
         self.bridge_ok_since = rospy.get_time()
         self.anchor = Anchor()
@@ -194,6 +211,7 @@ class MissionExecutive:
         self.enable_pub = rospy.Publisher("/planner_bridge/enable", Bool, queue_size=1, latch=True)
         self.enable_pub.publish(Bool(data=False))
         self.mode_pub = rospy.Publisher("/planner_bridge/set_mode", String, queue_size=1, latch=True)
+        self.ground_pub = rospy.Publisher("/mission_executive/ground_spots", String, queue_size=1, latch=True)
         rospy.Service("/mission_executive/start", Trigger, self._on_start)
         self.cmd = rospy.ServiceProxy("/mavros/cmd/command", CommandLong)
         self.takeoff_srv = rospy.ServiceProxy("/mavros/cmd/takeoff", CommandTOL)
@@ -206,8 +224,10 @@ class MissionExecutive:
 
     def _on_pose(self, m):
         p = m.pose.position
+        q = m.pose.orientation
         with self.lock:
             self.pose = np.array([p.x, p.y, p.z])
+            self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _on_text(self, m):
         with self.lock:
@@ -319,6 +339,16 @@ class MissionExecutive:
             rospy.sleep(0.1)
         return False
 
+    def record_ground_spot(self, event):
+        """the vehicle sits here on the ground: known floor for the landing check (see the docstring)"""
+        with self.lock:
+            if self.pose is None or self.yaw is None:
+                return
+            spot = {"event": event, "xyz": [round(float(x), 3) for x in self.pose], "yaw": round(float(self.yaw), 4),
+                    "t": round(rospy.get_time(), 2)}
+        self.ground_spots.append(spot)
+        self.ground_pub.publish(String(data=json.dumps({"frame": "fc", "spots": self.ground_spots})))
+
     def set_mode(self, name):
         if name not in ALLOWED_MODES:
             raise RuntimeError("D5: the executive may not set %s" % name)
@@ -366,15 +396,23 @@ class MissionExecutive:
             # reached its goal the bridge holds (streams nothing) and Rover Guided stops at the last
             # target, at most drive_lookahead ahead
             self.report(phase="TAKEOFF", height=height, waiting="the tracks to stop")
-            self.standstill(self.takeoff_settle_s)
+            still = self.standstill(self.takeoff_settle_s)
+            if not still:
+                self.bridge_enable(False)
+                self.report(phase="TAKEOFF", height=height, refused=True, reason=NOT_STATIONARY)
+                return NOT_STATIONARY
         self.bridge_enable(False)
         self.bridge_mode_now = "flight"
         self.mode_pub.publish(String(data="flight"))   # not streaming: no need to wait for it here
         self.report(phase="TAKEOFF", height=height)
-        # QuadRover refuses a takeoff while the tracks move (> 0.2 m/s): let it stop first, then ask
-        # again while it says "temporarily rejected"
+        # owner decision 2026-10-28: no takeoff unless standing still (QuadRover's own guard refuses
+        # above 0.2 m/s, but a slow creep passes it); not still within takeoff_settle_s: stop here
+        if not self.standstill(self.takeoff_settle_s):
+            self.report(phase="TAKEOFF", height=height, refused=True, reason=NOT_STATIONARY)
+            return NOT_STATIONARY
+        self.record_ground_spot("takeoff")
+        # standing still: ask, and again while QuadRover says "temporarily rejected"
         t0 = rospy.get_time()
-        self.standstill(self.takeoff_settle_s)
         tries = 0
         while True:
             tries += 1
@@ -509,6 +547,7 @@ class MissionExecutive:
             return self.fc_lost() or "landing did not complete"
         self.flying = False          # on the ground in GUIDED, driving (QuadRover's NAV_LAND)
         self.landed_once = True
+        self.record_ground_spot("landed")
         return None
 
     def stop(self, why):
@@ -563,7 +602,7 @@ class MissionExecutive:
                 return self.stop(why)            # the FC's failsafe owns the vehicle now
             if why == "shutdown":
                 return
-            if why == "takeoff refused":
+            if why in ("takeoff refused", NOT_STATIONARY):
                 # still on the ground, driving in GUIDED: QRLOITER there would start the drive-to-fly
                 # transition; stay in GUIDED with the bridge off (Rover Guided stops)
                 return self.stop(why)            # nothing after a failed takeoff can fly

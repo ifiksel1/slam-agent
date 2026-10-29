@@ -1,0 +1,38 @@
+# Gate L2: a mixed drive-and-fly mission through an obstacle course in SITL at 1 m/s with no collision.
+# Map: planner/sim/course/hp_gate_l2.pcd = hp_1015_carved.pcd + the obstacles in hp_gate_l2.json
+# (make_course.py). Start 0.00, 0.00, yaw -90.7 (map x, y, deg): the real takeoff spot.
+#   fly   take off, fly south down the east side; the 0.6 x 0.6 x 2.5 m tower sits on leg 3's straight
+#         line, pole_a (r 0.075, 2.5 m) on the straight line to the first landing spot, east of the door
+#         wall at (-3.70, -9.60) (the rendered course reads it clear from 180-220 deg arrivals, and its
+#         neighbours 0.3 m N/S too)
+#   drive west through the 0.90 m door in the 2.2 m wall at x = -5.50, 1.8 m from the landing spot (the
+#         straight line to the goal passes 0.08 m inside the door's south jamb), past the 0.5 x 0.5 x 0.6 m
+#         crate on that line, to (-8.50, -9.00)
+#   fly   take off there, fly north past pole_b (on the straight line of that fly leg), land on the open floor
+#         at (-6.00, -3.50) (clear from 60-110 deg arrivals; every spot 0.5 m round it too), a clear spot
+#         for the final QRLAND, which goes straight down.
+# Speeds: flight 1.0 m/s is the bridge's speed_cap (closed_loop.sh); driving speed is the FC's
+# WP_SPEED / CRUISE_SPEED (the bridge streams position-only targets in drive mode), raised for this
+# gate in SITL only through closed_loop.sh's DRIVE_PARMS env:
+#   DRIVE_PARMS="WP_SPEED 1.0;WP_RADIUS 0.3;WP_PIVOT_ANGLE 60;CRUISE_SPEED 1.0;CRUISE_THROTTLE 50;ATC_STR_RAT_FF 0.3"
+# (the robot's own are WP_SPEED 0.5, CRUISE_SPEED 0.5). The drive leg's speed below is the executive's
+# record of it, not a command.
+name: gate_l2_hp_course
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [-0.40, -9.00, 1.30]}      # tower at (-0.24, -7.60) on the line
+  - {type: land, at: [-3.70, -9.60]}             # pole_a at (-1.50, -9.20) on the line; landing check, NAV_LAND
+  - {type: drive, goal: [-8.50, -9.00], speed: 1.0, accept_radius: 0.4}   # door, crate
+  - {type: takeoff, height: 1.30}
+  - {type: fly, goal: [-6.50, -5.00, 1.30]}      # pole_b at (-7.40, -6.80) on the line
+  - {type: land, at: [-6.00, -3.50]}             # landing check, NAV_LAND; the final QRLAND lands here too

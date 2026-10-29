@@ -30,6 +30,39 @@ frame's diagonal but wider than the frame passes when the robot goes straight th
 a fixed distance ahead is the driving target (D4: position + yaw only, so a dead planner stops
 within the lookahead).
 
+Pivots (owner-approved 2026-10-28). The robot is a skid-steer: Rover Guided pivots in place when
+the bearing to its target leaves the heading by more than WP_PIVOT_ANGLE (60 on the robot) and
+pivots on until within 5 deg (AR_PivotTurn; the streamed Guided targets take the fast-update path,
+which does not cancel a pivot). Tracks turn about the middle of their contact patches, the frame
+centre; SITL's QuadRover turns about the vehicle origin, the FC, 0.015 m ahead of the frame centre
+(odometry point 0.193 m ahead, FC 0.178 m behind it). A pivot sweeps the circle of the frame's
+half-diagonal, 0.342 m, plus pivot_margin (its own parameter, owner 2026-10-28; the frame's margin
+stays for driving): 0.392 m, 0.78 m across, at 0.05. pivot_pass() makes every turn of more
+than pivot_angle (chord to the point lookahead further on, and the bearing from the frame centre)
+its own step: the carrot holds just past the pivot (follow_plan) so the robot drives straight in
+and stops with its frame centre there (within pivot_tol), the circle about that centre and up to
+pivot_tol either side along the incoming heading must be clear, the robot pivots, and the path
+goes on from where the odometry point is after the pivot. A circle that is not clear moves to the
+nearest centre within pivot_search where it is (reached by driving, frame clear), or the cells
+there leave the search and it runs again (pivot_retries). With the robot's heading the start is
+checked too: a start pivot needs the circle where the robot stands and up to pivot_tol ahead (a
+replan may turn a robot that is still rolling), or the robot drives ahead
+(within pivot_angle of its heading) to a centre where it fits. Turns under pivot_angle are driven
+and checked by the follower's oriented frame as before.
+
+Dead ends (owner 2026-10-28, plan_reverse). With the robot's heading known, the goal behind it
+(beyond pivot_angle) and the start pivot refused where it stands, plan() backs the robot straight
+up along its heading, at most reverse_max, to the nearest spot the start pivot fits and plans on
+from there (the result's 'reverse'). Every frame pose of the reverse must be clear and every cell
+it sweeps observed free (observed_free: floor seen in the cell, or seen through more than hit in
+the live evidence memory): the robot backs up blind. The node streams it as a velocity against the
+heading, which the bridge turns into Rover Guided's velocity + heading target (reverse).
+
+The driving target (run_out). Rover Guided's fast-update path asks ~0.5 m/s per metre to its
+target and steers like pure pursuit on it; the node runs the carrot out along its bearing (up to
+~2 s of WP_SPEED from the FC, frame-checked) on straights, and not at stop points or while the robot
+turns.
+
 LIMITS (recorded maps, 2026-10-28):
 - obstacles lower than z_lo above the local ground are invisible: 0.30 m on whole maps, 0.15 m on
   the live window (kerbs, steps down, cables, low boxes, a pet); above z_hi (0.6 m), on whole maps
@@ -47,9 +80,23 @@ LIMITS (recorded maps, 2026-10-28):
   overstates see-throughs; it works over hundreds of keyframes, not for a few scans;
 - doors seen open and closed equally often stay obstacles in a prior map;
 - the ground model is one level per 0.5 m tile: no steps or ramps, one storey; glass is untested;
-- turning in place is not modelled (the follower's heading changes over the lookahead) and the frame
-  is not checked within start_skip of the start, only a clearance;
+- pivots are checked where the plan puts them; Rover may also pivot elsewhere if its heading lags
+  the carrot by more than 60 deg on a turn under pivot_angle (not seen in the drive-chain model);
+  the follower's frame is not checked within start_skip (0.5 m) of the start, only a clearance (a
+  start pivot's circle is). With replans at 10 Hz that region is always just ahead of the robot: a
+  replan may cut a corner there, as a turn under pivot_angle, and the robot's lagging heading arcs
+  wider than the follower model (synthetic hairpin with a 0.7 m way out: 6 cm into the wall).
+  start_skip_heading 0.15 (used when the heading is known) checks it, but on the house drive's
+  live replay it refused 29 more replans (338 instead of 367 of 490) and put the replan p95 over
+  100 ms, so it stays 0.5 by default;
+- the start pivot is a hard check where the robot stands: on the house drive (tight, the robot
+  pivoted near walls) about 10% of live replans are refused for it (see the 2026-10-28 report);
+- a pivot that cannot be moved within pivot_search blocks the cells within the pivot radius of its
+  vertex for the next search, which also bars driving straight through them;
 - margin 0.05 m: the house drive passes walls with ~5 cm to spare, so 0.10 m refuses it.
+- the reverse only backs straight up the way the robot faces, over cells seen free in the last
+  ~window_s (floor) or the evidence memory (see-throughs, decay mem_tau 10 s): a robot that waited long
+  in a dead end may have forgotten the way out and is refused (never into unknown space).
 """
 import math
 import time
@@ -78,7 +125,8 @@ class Config:
                  prefer_clear=0.8, clear_weight=2.0, pivot_weight=1.0, unknown_free=False,
                  unknown_cost=1.0, known_radius=0.35, pad=3.0, lookahead=0.5, snap_radius=0.5,
                  ray_bins=720, ray_range=8.0, clear_misses=2, clear_ratio=1.0, retries=2,
-                 start_skip=0.5):
+                 start_skip=0.5, start_skip_heading=0.5, pivot_angle=60.0, pivot_done=10.0, pivot_tol=0.2, pivot_tol_start=0.2, pivot_search=0.6,
+                 pivot_tries=12, pivot_retries=2, pivot_margin=0.05, reverse_max=2.0, reverse_tries=4):
         self.res = float(res)                       # grid cell, m
         self.margin = float(margin)                 # clearance kept each side of the frame, m
         self.off = float(footprint_offset)          # odometry point ahead of the frame centre, m
@@ -114,6 +162,26 @@ class Config:
         self.clear_ratio = float(clear_ratio)       # than clear_ratio x its hits) is a moved object
         self.retries = int(retries)                 # searches again after an oriented-check failure
         self.start_skip = float(start_skip)         # follower poses this close to the start: not checked
+        # the same with the robot's heading known (start_yaw); smaller checks the frame closer ahead
+        # of the robot (replans at 10 Hz never check the first start_skip), see LIMITS
+        self.start_skip_heading = float(start_skip_heading)
+        # pivots (see the docstring): a turn over pivot_angle is a pivot in place about the frame
+        # centre, which needs the circle of the frame's half-diagonal plus margin clear
+        self.pivot_angle = math.radians(pivot_angle)   # Rover WP_PIVOT_ANGLE (60 on the robot)
+        self.pivot_done = math.radians(pivot_done)     # a pivot under way goes on until within this
+        # the pivot circle's own margin (owner 2026-10-28: separate from the driving margin above)
+        self.pivot_margin = float(pivot_margin)
+        self.pivot_radius = FOOTPRINT_HALF_DIAGONAL + self.pivot_margin   # 0.342 m + pivot_margin
+        # dead ends (owner 2026-10-28): no room to pivot where the robot stands and the goal behind it:
+        # back straight up at most reverse_max (0: never) over observed free cells, to the nearest spot
+        # a pivot fits (plan_reverse); reverse_tries forward plans are tried from there on back
+        self.reverse_max = float(reverse_max)
+        self.reverse_tries = int(reverse_tries)
+        self.pivot_tol = float(pivot_tol)           # the centre may sit this far before or past the planned one
+        self.pivot_tol_start = float(pivot_tol_start)   # a start pivot: up to this far ahead (still rolling)
+        self.pivot_search = float(pivot_search)     # a blocked pivot: other centres within this, m
+        self.pivot_tries = int(pivot_tries)         # of which this many are checked exactly
+        self.pivot_retries = int(pivot_retries)     # searches again after a pivot with no room
 
 
 def live_config(**kw):
@@ -202,6 +270,7 @@ class HeightGrid:
         self.occ = (self.count >= cfg.min_pts) | ((self.count >= 1) & (tall >= cfg.min_tall)) | (tall >= cfg.min_tall_only)
         self.seen_up = (self.count + tall) > 0    # anything seen from z_lo to z_tall in the cell
         floor = np.bincount(k[(h > -0.15) & (h <= cfg.z_lo)], minlength=n).reshape(ny, nx) > 0
+        self.floor_seen = floor                   # floor points in the cell itself (reverse: observed)
         seen = floor | self.occ
         rr = int(math.ceil(cfg.known_radius / r))
         yy, xx = np.mgrid[-rr:rr + 1, -rr:rr + 1]
@@ -313,6 +382,7 @@ class Window:
         big[si0 - bi0:si1 - bi0, sj0 - bj0:sj1 - bj0] = hg.occ[si0:si1, sj0:sj1]
         self.occ_big = big
         self.start = None
+        self.skip = cfg.start_skip
 
     cell, xy, inside, clearance_at = HeightGrid.cell, HeightGrid.xy, HeightGrid.inside, HeightGrid.clearance_at
 
@@ -373,12 +443,48 @@ class Window:
     def pose_free(self, xy, yaw):
         return bool(self.poses_free(np.asarray(xy, float)[None], [yaw])[0])
 
+    def discs_free(self, xy, radius=None):
+        """(M, 2) centres -> (M,) bool: no obstacle cell centre within radius (default the pivot
+        circle, the frame's half-diagonal plus margin) of the centre. Off the padded box: blocked."""
+        cfg = self.cfg
+        R = cfg.pivot_radius if radius is None else float(radius)
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        if not len(xy):
+            return np.ones(0, bool)
+        r = cfg.res
+        k = int(math.ceil(R / r)) + 1
+        di, dj = np.mgrid[-k:k + 1, -k:k + 1]
+        di, dj = di.ravel(), dj.ravel()
+        ci = np.floor((xy[:, 1] - self.lo[1]) / r).astype(np.int64)
+        cj = np.floor((xy[:, 0] - self.lo[0]) / r).astype(np.int64)
+        ii = ci[:, None] + self.pad + di[None, :]
+        jj = cj[:, None] + self.pad + dj[None, :]
+        H, W = self.occ_big.shape
+        inb = (ii >= 0) & (jj >= 0) & (ii < H) & (jj < W)
+        hit = self.occ_big[np.clip(ii, 0, H - 1), np.clip(jj, 0, W - 1)] & inb
+        ox = self.lo[0] + (jj - self.pad + 0.5) * r
+        oy = self.lo[1] + (ii - self.pad + 0.5) * r
+        d2 = (ox - xy[:, 0:1]) ** 2 + (oy - xy[:, 1:2]) ** 2
+        return inb.all(1) & ~(hit & (d2 < R * R)).any(1)
+
+    def pivot_free(self, centre, yaw_in, tol=None, back=True):
+        """the pivot circle clear about centre and about every point up to tol before (back) or past
+        it along yaw_in (where Rover may stop short of or run past the held carrot)"""
+        tol = self.cfg.pivot_tol if tol is None else float(tol)
+        t0 = -tol if back else 0.0
+        t = np.linspace(t0, tol, int(math.ceil((tol - t0) / (self.cfg.res * 0.5))) + 1) if tol > 0 else np.zeros(1)
+        c = np.asarray(centre, float)[:2] + t[:, None] * _unit(yaw_in)
+        return bool(self.discs_free(c).all())
+
     def follow_free(self, pts, k0=0):
         """the carrot follower's poses along polyline pts from vertex k0 on: every res/2, heading
         toward the point lookahead further along -> index of the first blocked segment, or None.
         Poses within start_skip of self.start skip the frame check (the robot is already there, at
         a heading the plan does not know, and turns toward the carrot from it) but keep a clearance
-        check."""
+        check. At a vertex pivot_pass makes a pivot (pivot_vertices) the carrot holds, so the frame
+        drives straight in; the poses from the vertex to 2 x footprint_offset past it are in the
+        pivot (its circle is checked by pivot_pass, which also checks the leg from where the
+        odometry point is after the pivot)."""
         P = np.asarray(pts, float).reshape(-1, 2)
         if len(P) < 2:
             return None
@@ -391,6 +497,14 @@ class Window:
         f = (s - cum[seg]) / np.maximum(L[seg], 1e-9)
         p = P[seg] + (P[seg + 1] - P[seg]) * f[:, None]
         a = np.minimum(s + self.cfg.lookahead, cum[-1])
+        in_pivot = np.zeros(len(s), bool)
+        pv = pivot_vertices(P, self.cfg)
+        if pv:
+            cp = cum[pv]
+            nx = np.searchsorted(cp, s, side="left")          # the first pivot at or ahead
+            a = np.where(nx < len(cp), np.minimum(a, cp[np.minimum(nx, len(cp) - 1)]), a)
+            pr = np.searchsorted(cp, s, side="right") - 1      # the last pivot at or behind
+            in_pivot = (pr >= 0) & (s - cp[np.maximum(pr, 0)] < 2 * self.cfg.off)
         sa = np.clip(np.searchsorted(cum, a, side="right") - 1, 0, len(P) - 2)
         fa = (a - cum[sa]) / np.maximum(L[sa], 1e-9)
         q = P[sa] + (P[sa + 1] - P[sa]) * fa[:, None]
@@ -398,18 +512,22 @@ class Window:
         short = np.hypot(d[:, 0], d[:, 1]) < 1e-6
         d[short] = (P[seg + 1] - P[seg])[short]
         ok = self.poses_free(p, np.arctan2(d[:, 1], d[:, 0]))
+        ok |= in_pivot
         if self.start is not None:
             # near the start the frame is not checked, but the point may not come nearer an
             # obstacle than the start already is (nor nearer than the bare half-width): no
             # shortcut through a wall next to the start
-            near = np.hypot(p[:, 0] - self.start[0], p[:, 1] - self.start[1]) < self.cfg.start_skip
+            near = np.hypot(p[:, 0] - self.start[0], p[:, 1] - self.start[1]) < self.skip
             if near.any():
                 ci = np.floor((p[near, 1] - self.lo[1]) / self.cfg.res).astype(np.int64)
                 cj = np.floor((p[near, 0] - self.lo[0]) / self.cfg.res).astype(np.int64)
                 inb = (ci >= 0) & (cj >= 0) & (ci < self.shape[0]) & (cj < self.shape[1])
                 cl = np.where(inb, self.clear[np.clip(ci, 0, self.shape[0] - 1), np.clip(cj, 0, self.shape[1] - 1)], 0.0)
                 ok[near] = cl >= min(FOOTPRINT[1] / 2, self.clearance_at(self.start)) - 1e-9
-        return None if ok.all() else int(seg[np.argmin(ok)])
+        if ok.all():
+            return None
+        self.fail_at = p[np.argmin(ok)].copy()     # the first blocked pose (odometry point)
+        return int(seg[np.argmin(ok)])
 
 
 def scan_evidence(hg, pts, sensor_xyz, walls=False, low_sensor=True):
@@ -566,12 +684,293 @@ def prune(win, pts):
     return out, win.follow_free(out)
 
 
-def plan(source, floor_z, start_xy, goal_xy, cfg=None, obs_given=False):
-    """-> dict(ok, reason, path (list of xy), length, min_clearance, grid)
+def _unit(a):
+    return np.array([math.cos(a), math.sin(a)])
+
+
+def _hd(v):
+    return math.atan2(v[1], v[0])
+
+
+def _wrap(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def point_along(pts, dist):
+    """the point dist metres along polyline pts from its first vertex (its last vertex if shorter)"""
+    left = float(dist)
+    for a, b in zip(pts[:-1], pts[1:]):
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        L = float(np.linalg.norm(b - a))
+        if L >= left:
+            return a + (b - a) * (left / L) if L > 0 else a
+        left -= L
+    return np.asarray(pts[-1], float)
+
+
+def _depart(P, k, C, cfg):
+    """the vertex the robot heads for after a pivot about C at vertex k: the first one past k farther
+    from C than the odometry offset plus a cell (nearer ones lie in the pivot) -> its index"""
+    j = k + 1
+    while j < len(P) - 1 and np.linalg.norm(P[j] - C) < cfg.off + cfg.res:
+        j += 1
+    return j
+
+
+def _is_pivot(P, k, h_in, A, cfg, thr):
+    """vertex k (arrived at A with heading h_in) is a pivot: the chord to the point lookahead further
+    along leaves h_in by more than thr, and so does the bearing from the frame centre to the vertex
+    the robot leaves for (_depart) -> (pivot, frame centre, that vertex's index)"""
+    C = A - cfg.off * _unit(h_in)
+    j = _depart(P, k, C, cfg)
+    q = point_along(P[k:], cfg.lookahead)
+    if np.linalg.norm(q - A) <= 1e-6 or abs(_wrap(_hd(q - A) - h_in)) <= thr:
+        return False, C, j
+    return bool(np.linalg.norm(P[j] - C) >= cfg.off + cfg.res and abs(_wrap(_hd(P[j] - C) - h_in)) > thr), C, j
+
+
+def pivot_vertices(P, cfg):
+    """the vertices of polyline P (not its ends) that pivot_pass makes pivots, from the polyline alone"""
+    P = [np.asarray(p, float) for p in P]
+    return [k for k in range(1, len(P) - 1) if _is_pivot(P, k, _hd(P[k] - P[k - 1]), P[k], cfg, cfg.pivot_angle)[0]]
+
+
+def _pivot_fail(reason, block):
+    return {"ok": False, "reason": reason, "block": block}
+
+
+def _move_pivot(win, out, leg0, h_arr, P, k, C, h_in, start):
+    """a pivot whose circle is not clear: the nearest centre within pivot_search where it is, reached
+    from out[-1] by driving (no other pivot) with the frame clear -> (C, A, h_in, j) or None"""
+    cfg = win.cfg
+    prev = out[-1]
+    c0 = win.cell(C)
+    m = int(math.ceil(cfg.pivot_search / cfg.res))
+    i0, j0 = max(0, c0[0] - m), max(0, c0[1] - m)
+    sub = win.clear[i0:c0[0] + m + 1, j0:c0[1] + m + 1]
+    ii, jj = np.nonzero(sub >= cfg.pivot_radius - 0.75 * cfg.res)
+    if not len(ii):
+        return None
+    xy = np.c_[win.lo[0] + (jj + j0 + 0.5) * cfg.res, win.lo[1] + (ii + i0 + 0.5) * cfg.res]
+    d = np.hypot(xy[:, 0] - C[0], xy[:, 1] - C[1])
+    xy = xy[d <= cfg.pivot_search]
+    d = d[d <= cfg.pivot_search]
+    # the arrival heading (from out[-1], twice: the odometry point is footprint_offset ahead of
+    # the centre) and arrival point of each
+    v = xy - prev
+    h = np.arctan2(v[:, 1], v[:, 0])
+    A = xy + cfg.off * np.c_[np.cos(h), np.sin(h)]
+    v = A - prev
+    h = np.arctan2(v[:, 1], v[:, 0])
+    A = xy + cfg.off * np.c_[np.cos(h), np.sin(h)]
+    keep = np.hypot(*(A - prev).T) >= cfg.res
+    # reached without another pivot: from the start, the bearing from the frame centre (what Rover
+    # turns by); elsewhere the turn at the previous vertex
+    if start:
+        fc = prev - cfg.off * _unit(h_arr)
+        keep &= np.abs(_wrap(np.arctan2(A[:, 1] - fc[1], A[:, 0] - fc[0]) - h_arr)) <= cfg.pivot_angle
+    elif h_arr is not None:
+        keep &= np.abs(_wrap(h - h_arr)) <= cfg.pivot_angle
+    # the clearance (cell-centre transform) along the tolerance either side, before the exact check
+    for t in (-cfg.pivot_tol, cfg.pivot_tol):
+        e = xy + t * np.c_[np.cos(h), np.sin(h)]
+        ci = np.floor((e[:, 1] - win.lo[1]) / cfg.res).astype(np.int64)
+        cj = np.floor((e[:, 0] - win.lo[0]) / cfg.res).astype(np.int64)
+        inb = (ci >= 0) & (cj >= 0) & (ci < win.shape[0]) & (cj < win.shape[1])
+        cl = np.where(inb, win.clear[np.clip(ci, 0, win.shape[0] - 1), np.clip(cj, 0, win.shape[1] - 1)], 0.0)
+        keep &= cl >= cfg.pivot_radius - 0.75 * cfg.res
+    idx = np.flatnonzero(keep)
+    for o in idx[np.argsort(d[idx])][:cfg.pivot_tries]:
+        Cn, An, hn = xy[o], A[o], float(h[o])
+        jn = _depart(P, k, Cn, cfg)
+        if abs(_wrap(_hd(P[jn] - Cn) - hn)) <= cfg.pivot_angle:
+            continue      # no pivot there (Rover would drive on, not as planned)
+        if not win.pivot_free(Cn, hn, cfg.pivot_tol):
+            continue
+        if win.follow_free(out[max(leg0, len(out) - 2):] + [An]) is not None:
+            continue
+        if not _departs(win, P, jn, Cn):
+            continue
+        return Cn, An, hn, jn
+    return None
+
+
+def _departs(win, P, j, C):
+    """the frame can drive off from a pivot about C toward P[j] (the leg's first two segments)"""
+    V = C + win.cfg.off * _unit(_hd(P[j] - C))
+    return win.follow_free([V] + list(P[j:j + 2])) is None
+
+
+def pivot_pass(win, path, start_yaw=None, start_pivoting=False):
+    """turns over pivot_angle as pivots, each its own step -> dict(ok, path, pivots, reason, block).
+
+    Vertex k turns when the chord to the point lookahead further along leaves the incoming heading
+    by more than pivot_angle. The robot drives straight into the vertex (the carrot holds), so it
+    stops with its odometry point at A = P[k] and its frame centre at C = A - footprint_offset along
+    the incoming heading, pivots about C toward the next vertex past the pivot, and leaves with its
+    odometry point at V = C + footprint_offset along the new heading: the path gets V after A, and
+    pivots[n] = {i: index of A (V is i + 1), centre: C, yaw_in, yaw_out, turn, start}. A turn under
+    pivot_angle seen from C is not a pivot (Rover only pivots past WP_PIVOT_ANGLE). The pivot
+    circle about C (and up to pivot_tol before or past it) must be clear; else the nearest centre
+    within pivot_search where it is, reached by driving; else the pivot fails with the cells to
+    block (block: list of cells) for another search.
+
+    With start_yaw (the robot's heading) the start is a pivot too when the bearing from the frame
+    centre to the carrot leaves it by more than pivot_angle (pivot_done when start_pivoting, a pivot
+    under way); the start circle is checked where the robot stands and up to pivot_tol ahead."""
+    cfg = win.cfg
+    P = [np.asarray(p, float)[:2] for p in path]
+    n = len(P)
+    out = [P[0]]
+    pivots = []
+    if n < 2:
+        return {"ok": True, "path": out, "pivots": pivots, "reason": ""}
+    leg0 = 0              # index in out where the current driving leg starts
+    h_arr = start_yaw     # heading arriving at out[-1]
+    k = 0 if start_yaw is not None else 1
+    while k < n - 1:
+        start = k == 0
+        prev = out[-1]
+        if start:
+            h_in, A, tol = float(start_yaw), P[0], cfg.pivot_tol_start
+            thr = cfg.pivot_done if start_pivoting else cfg.pivot_angle
+        else:
+            h_in, A, tol, thr = _hd(P[k] - prev), P[k], cfg.pivot_tol, cfg.pivot_angle
+        if start:
+            # what Rover turns by from a standstill: the bearing from the frame centre to the carrot
+            C = A - cfg.off * _unit(h_in)
+            j = _depart(P, k, C, cfg)
+            q = point_along(P, cfg.lookahead)
+            turning = abs(_wrap(_hd(q - C) - h_in)) > thr and np.linalg.norm(P[j] - C) >= cfg.off + cfg.res \
+                and abs(_wrap(_hd(P[j] - C) - h_in)) > thr
+        else:
+            turning, C, j = _is_pivot(P, k, h_in, A, cfg, thr)
+        if not turning:
+            if not start:
+                out.append(A)
+                h_arr = h_in
+            k += 1
+            continue
+        # the start: where the robot stands and up to pivot_tol ahead (a replan can turn the robot
+        # on the spot while it moves; Rover brakes, then pivots)
+        room = win.pivot_free(C, h_in, tol, back=not start)
+        if not (room and _departs(win, P, j, C)):
+            mv = _move_pivot(win, out, leg0, h_arr, P, k, C, h_in, start)
+            if mv is None:
+                where = "at the start" if start else "at (%.2f, %.2f), a %.0f deg turn" % (
+                    C[0], C[1], math.degrees(abs(_wrap(_hd(P[j] - C) - h_in))))
+                why = "no room to pivot " if room is False else "the frame cannot drive off the pivot "
+                return _pivot_fail(why + where, ("start", P[0], start_yaw) if start else ("vertex", P[k]))
+            C, A, h_in, j = mv
+            out.append(A)      # driven to the moved pivot, then a pivot there
+            start = False
+        elif not start:
+            out.append(A)
+        h_out = _hd(P[j] - C)
+        pivots.append({"i": len(out) - 1, "centre": C, "yaw_in": h_in, "yaw_out": h_out,
+                       "turn": abs(_wrap(h_out - h_in)), "start": start})
+        out.append(C + cfg.off * _unit(h_out))
+        leg0 = len(out) - 1
+        h_arr = h_out
+        k = j
+    out.append(P[-1])
+    if pivots:
+        # each driving leg on its own: the carrot holds at a pivot, so the frame drives straight in
+        starts = [0] + [p["i"] + 1 for p in pivots]
+        ends = [p["i"] for p in pivots] + [len(out) - 1]
+        for a, b in zip(starts, ends):
+            leg = out[a:b + 1]
+            if len(leg) < 2:
+                continue
+            bad = win.follow_free(leg)
+            if bad is not None:
+                return _pivot_fail("no path the oriented frame can follow", ("segment", leg[bad:bad + 2], win.fail_at))
+    return {"ok": True, "path": out, "pivots": pivots, "reason": ""}
+
+
+def sharpen(win, route, bad, max_skip=4):
+    """a route the frame cannot follow at segment bad: the cells' staircase round a corner (45 deg
+    steps the robot would arc through) as one sharp corner instead, where the incoming line (the
+    segment bad or the one before) meets the line of one of the next max_skip segments; a corner
+    over pivot_angle is a pivot (pivot_pass checks its circle) -> the first such route the frame
+    can follow, or None"""
+    R = [np.asarray(p, float)[:2] for p in route]
+    n = len(R)
+    for b in (bad, bad - 1):
+        if b < 0 or b + 2 >= n:
+            continue
+        u = R[b + 1] - R[b]
+        Lu = float(np.linalg.norm(u))
+        if Lu < 1e-9:
+            continue
+        u = u / Lu
+        for m in range(b + 1, min(b + 1 + max_skip, n - 1)):
+            v = R[m + 1] - R[m]
+            Lv = float(np.linalg.norm(v))
+            if Lv < 1e-9:
+                continue
+            v = v / Lv
+            den = u[0] * v[1] - u[1] * v[0]
+            if abs(den) < 0.2:          # nearly parallel
+                continue
+            w = R[m] - R[b]
+            t = (w[0] * v[1] - w[1] * v[0]) / den     # along the incoming line from R[b]
+            s = (w[0] * u[1] - w[1] * u[0]) / den     # along segment m from R[m]
+            if t <= 0.05 or t > Lu + 1.5 or s >= Lv - 0.05:
+                continue
+            cand = R[:b + 1] + [R[b] + t * u] + R[m + 1:]
+            if win.follow_free(cand) is None:
+                return cand
+    return None
+
+
+def _block(win, blk, sc, gc):
+    """take cells out of the search after a failed pivot or leg (never the start or goal cell)"""
+    cfg = win.cfg
+    kind = blk[0]
+    if kind == "segment":
+        # the segment's cells within half a frame length of its first blocked pose (all of a long
+        # segment's cells would close a corridor two cells wide)
+        at = blk[2] if len(blk) > 2 and blk[2] is not None else None
+        cells = {win.cell(p) for p in densify(blk[1], cfg.res * 0.5)
+                 if at is None or np.hypot(*(np.asarray(p) - at)) <= cfg.half_len}
+    else:
+        if kind == "vertex":
+            centre, R = blk[1], cfg.pivot_radius
+        else:
+            # no room to pivot where the robot stands: leave it ahead (within pivot_angle of its heading)
+            centre, R = blk[1], cfg.off + cfg.lookahead + cfg.res
+        c0 = win.cell(centre)
+        m = int(math.ceil(R / cfg.res))
+        cells = set()
+        for di in range(-m, m + 1):
+            for dj in range(-m, m + 1):
+                c = (c0[0] + di, c0[1] + dj)
+                p = win.xy(c)
+                if np.hypot(*(p - centre)) > R:
+                    continue
+                if kind == "start":
+                    fc = np.asarray(blk[1], float) - cfg.off * _unit(blk[2])
+                    if np.hypot(*(p - fc)) > 1e-9 and abs(_wrap(_hd(p - fc) - blk[2])) <= cfg.pivot_angle:
+                        continue
+                cells.add(c)
+    for c in cells:
+        if c != sc and c != gc and win.inside(c):
+            win.free[c] = False
+
+
+REVERSE_REASONS = ("no room to pivot at the start", "the frame cannot drive off the pivot at the start")
+
+
+def plan(source, floor_z, start_xy, goal_xy, cfg=None, obs_given=False, start_yaw=None, start_pivoting=False):
+    """-> dict(ok, reason, path (list of xy), pivots, route, length, min_clearance, grid)
 
     source: a HeightGrid (a prior map, built once) or an (N, 3) cloud (a grid is built over the
     search box, the ground at floor_z, or estimated locally when floor_z is None). obs_given (an
-    (N, 2) obstacle list, the first version's) is gone."""
+    (N, 2) obstacle list, the first version's) is gone. start_yaw: the robot's heading, for the
+    start pivot (pivot_pass); start_pivoting: a pivot is under way there. path has each pivot's
+    leaving point after its arrival point (pivots); route is the path before that (pivot_pass's
+    input, for checking what is left of it later: check_route)."""
     if obs_given:
         raise ValueError("plan() takes a cloud or a HeightGrid; obstacle xy lists are gone")
     s, gxy = np.asarray(start_xy, float)[:2], np.asarray(goal_xy, float)[:2]
@@ -586,41 +985,348 @@ def plan(source, floor_z, start_xy, goal_xy, cfg=None, obs_given=False):
         if len(pts):
             pts = pts[np.all((pts[:, :2] >= lo) & (pts[:, :2] <= hi), axis=1)]
         hg = HeightGrid(pts, cfg, lo, hi, floor_z)
+    out = _plan_grid(hg, s, gxy, start_yaw, start_pivoting)
+    # a dead end only: no room for the start pivot where the robot stands, the goal behind (not any
+    # failed plan with the goal off the nose: a flaky one backed the SITL rover up in the open, d8)
+    if out["ok"] or start_yaw is None or start_pivoting or cfg.reverse_max <= 0 \
+            or abs(_wrap(_hd(gxy - s) - start_yaw)) <= cfg.pivot_angle \
+            or not out["reason"].startswith(REVERSE_REASONS):
+        return out
+    rev = plan_reverse(hg, s, gxy, start_yaw)
+    if rev["ok"]:
+        return rev
+    out["reverse_reason"] = rev["reason"]
+    return out
+
+
+def _plan_grid(hg, s, gxy, start_yaw=None, start_pivoting=False):
+    """plan()'s search on a grid (see plan())"""
+    cfg = hg.cfg
     win = hg.crop(np.minimum(s, gxy) - cfg.pad, np.maximum(s, gxy) + cfg.pad)
     win.start = s
+    win.skip = cfg.start_skip if start_yaw is None else cfg.start_skip_heading
     sc = win.nearest_free(win.cell(s), cfg.snap_radius)
     gc = win.nearest_free(win.cell(gxy), cfg.snap_radius)
     if sc is None:
         return {"ok": False, "reason": "start inside the footprint inflation", "grid": win}
     if gc is None:
         return {"ok": False, "reason": "goal blocked or unknown", "grid": win}
-    tm = {"search": 0.0, "prune": 0.0}
-    for attempt in range(cfg.retries + 1):
+    tm = {"search": 0.0, "prune": 0.0, "pivot": 0.0}
+    n_follow = n_pivot = 0
+    why = "no path"
+    attempt = 0
+    while True:
+        attempt += 1
         t0 = time.perf_counter()
         cells = search(win, sc, gc)
         tm["search"] += time.perf_counter() - t0
         if cells is None:
-            why = "no path" if attempt == 0 else "no path the oriented frame can follow"
-            return {"ok": False, "reason": why, "grid": win, "t": tm, "attempts": attempt + 1}
+            return {"ok": False, "reason": why, "grid": win, "t": tm, "attempts": attempt}
         g_end = gxy if (win.inside(win.cell(gxy)) and win.free[win.cell(gxy)]) else win.xy(gc)
         pts = [s] + [win.xy(c) for c in cells[1:-1]] + [g_end]
         t0 = time.perf_counter()
-        path, bad = prune(win, pts)
+        route, bad = prune(win, pts)
+        fail_at = getattr(win, "fail_at", None) if bad is not None else None
+        if bad is not None:
+            sharp = sharpen(win, route, bad)
+            if sharp is not None:
+                route, bad = sharp, None
         tm["prune"] += time.perf_counter() - t0
-        if bad is None:
+        if bad is not None:
+            # the frame cannot follow this cell path (a corner in a tight spot): block the cells of
+            # the blocked segment and search again
+            why = "no path the oriented frame can follow"
+            if n_follow >= cfg.retries:
+                return {"ok": False, "reason": why, "grid": win, "t": tm, "attempts": attempt}
+            n_follow += 1
+            _block(win, ("segment", route[bad:bad + 2], fail_at), sc, gc)
+            continue
+        t0 = time.perf_counter()
+        pv = pivot_pass(win, route, start_yaw, start_pivoting)
+        tm["pivot"] += time.perf_counter() - t0
+        if pv["ok"]:
             break
-        # the frame cannot follow this cell path (a corner in a tight spot): block the cells of the
-        # blocked segment and search again
-        for p in densify(path[bad:bad + 2], win.cfg.res):
-            c = win.cell(p)
-            if c != sc and c != gc and win.inside(c):
-                win.free[c] = False
-    else:
-        return {"ok": False, "reason": "no path the oriented frame can follow", "grid": win, "t": tm, "attempts": attempt + 1}
+        # a pivot with no room (or a leg the frame cannot drive straight into it): block there and
+        # search again
+        why = pv["reason"]
+        if n_pivot >= cfg.pivot_retries:
+            return {"ok": False, "reason": why, "grid": win, "t": tm, "attempts": attempt}
+        n_pivot += 1
+        _block(win, pv["block"], sc, gc)
+    path = pv["path"]
+    pivots = [{"i": p["i"], "centre": [float(p["centre"][0]), float(p["centre"][1])], "yaw_in": float(p["yaw_in"]),
+               "yaw_out": float(p["yaw_out"]), "turn": float(p["turn"]), "start": bool(p["start"])} for p in pv["pivots"]]
     dense = densify(path, cfg.res * 0.5)
-    return {"ok": True, "reason": "", "path": path, "grid": win, "t": tm, "attempts": attempt + 1,
+    return {"ok": True, "reason": "", "path": path, "pivots": pivots, "route": route, "grid": win, "t": tm, "attempts": attempt,
             "length": float(sum(np.linalg.norm(np.diff(np.array(path), axis=0), axis=1))),
             "min_clearance": float(min(win.clearance_at(p) for p in dense[1:-1])) if len(dense) > 2 else 1e3}
+
+
+def observed_free(hg):
+    """cells a reverse may sweep: floor seen in the cell itself (the window's scans) or seen through
+    more often than hit lately (the live evidence memory), grown by one cell (a 0.1 m cell between
+    sparse floor returns); never unknown space: the JT128 dome sees nothing behind the robot"""
+    o = hg.floor_seen | getattr(hg, "seen_free", np.zeros_like(hg.floor_seen))
+    return ndimage.binary_dilation(o, structure=np.ones((3, 3), bool)) if o.any() else o
+
+
+def _frame_cells(hg, xy, yaw, step=None):
+    """the grid cells under the frame plus margin at odometry-point pose (xy, yaw) -> set of (i, j)"""
+    cfg = hg.cfg
+    step = step or cfg.res * 0.5
+    c = np.asarray(xy, float)[:2] - cfg.off * _unit(yaw)
+    a = np.arange(-cfg.half_len, cfg.half_len + 1e-9, step)
+    b = np.arange(-cfg.half_wid, cfg.half_wid + 1e-9, step)
+    A, B = np.meshgrid(a, b)
+    u, n = _unit(yaw), _unit(yaw + math.pi / 2)
+    P = c + A.reshape(-1, 1) * u + B.reshape(-1, 1) * n
+    i = np.floor((P[:, 1] - hg.lo[1]) / cfg.res).astype(int)
+    j = np.floor((P[:, 0] - hg.lo[0]) / cfg.res).astype(int)
+    return set(zip(i.tolist(), j.tolist()))
+
+
+def _disc_observed(hg, obs, centre, radius):
+    """every grid cell whose centre lies within radius of centre is observed free (observed_free)"""
+    r = hg.cfg.res
+    k = int(math.ceil(radius / r)) + 1
+    ci, cj = hg.cell(centre)
+    for di in range(-k, k + 1):
+        for dj in range(-k, k + 1):
+            i, j = ci + di, cj + dj
+            x, y = hg.xy((i, j))
+            if (x - centre[0]) ** 2 + (y - centre[1]) ** 2 > radius * radius:
+                continue
+            if not (0 <= i < hg.shape[0] and 0 <= j < hg.shape[1]) or not obs[i, j]:
+                return False
+    return True
+
+
+def plan_reverse(hg, s, gxy, yaw):
+    """a dead end (owner 2026-10-28): the goal is behind the robot (beyond pivot_angle) and the
+    forward plan failed (no room to pivot where it stands). Back straight up along the heading, the
+    way it came, to the nearest point (every res/2, at most cfg.reverse_max) from which the forward
+    plan (a start pivot there, then on) succeeds. The robot backs up blind, so every frame pose of
+    the reverse (the oriented frame plus margin) must be free of obstacle cells and every cell it
+    sweeps outside the frame's own footprint now must be observed free (observed_free); the first
+    pose that fails either ends the search (never into unknown space, never past an obstacle). The
+    pivot spot it stops at needs its whole circle observed free too.
+    -> plan()'s dict for the forward part from the reverse's end, plus reverse: {from, to (odometry
+    points), dist, yaw}, or ok False with the reason."""
+    cfg = hg.cfg
+    s = np.asarray(s, float)[:2]
+    back = -_unit(yaw)
+    win = hg.crop(np.minimum(s, s + back * cfg.reverse_max) - cfg.r_out - cfg.res * 2,
+                  np.maximum(s, s + back * cfg.reverse_max) + cfg.r_out + cfg.res * 2)
+    obs = observed_free(hg)
+    here = _frame_cells(hg, s, yaw)
+    step = cfg.res * 0.5
+    tried = 0
+    last = "no room to pivot within %.1f m behind" % cfg.reverse_max
+    for k in range(1, int(math.floor(cfg.reverse_max / step + 1e-9)) + 1):
+        r = k * step
+        q = s + back * r
+        if not win.pose_free(q, yaw):
+            return {"ok": False, "reason": "reverse blocked %.2f m behind (%s)" % (r, last)}
+        cells = _frame_cells(hg, q, yaw) - here
+        if any(not (0 <= i < hg.shape[0] and 0 <= j < hg.shape[1]) or not obs[i, j] for i, j in cells):
+            return {"ok": False, "reason": "reverse into unobserved space %.2f m behind (%s)" % (r, last)}
+        C = q - cfg.off * _unit(yaw)
+        if not win.pivot_free(C, yaw, tol=cfg.pivot_tol_start, back=False) or not _disc_observed(hg, obs, C, cfg.pivot_radius):
+            continue        # no start pivot here (pivot_pass's check: the circle and up to
+                            # pivot_tol_start ahead), or its circle not all observed free: in a
+                            # corridor the walls beside the robot leave the live window (seen from
+                            # under mem_min_range, not held) and a pivot there looked free (d16):
+                            # back up further
+        out = _plan_grid(hg, q, np.asarray(gxy, float)[:2], yaw, False)
+        tried += 1
+        if out["ok"]:
+            out["reverse"] = {"from": [float(s[0]), float(s[1])], "to": [float(q[0]), float(q[1])], "dist": float(r),
+                              "yaw": float(yaw)}
+            return out
+        last = out["reason"]
+        if tried >= cfg.reverse_tries:
+            return {"ok": False, "reason": "no plan after reversing (%s)" % last}
+    return {"ok": False, "reason": last}
+
+
+def reverse_left(rev, pos_xy):
+    """how far the odometry point still has to back up for a reverse (plan_reverse's dict), m"""
+    return float((np.asarray(pos_xy, float)[:2] - np.asarray(rev["to"], float)) @ _unit(rev["yaw"]))
+
+
+def check_route(win, route, start_yaw=None, start_pivoting=False):
+    """what is left of a route (remaining()) checked again in a new window: the frame along it and
+    its pivots -> pivot_pass's dict (ok, path, pivots)"""
+    route = [np.asarray(p, float)[:2] for p in route]
+    if len(route) >= 2 and win.follow_free(route) is not None:
+        return {"ok": False, "reason": "no path the oriented frame can follow", "path": None, "pivots": []}
+    out = pivot_pass(win, route, start_yaw, start_pivoting)
+    out["pivots"] = [{"i": p["i"], "centre": [float(p["centre"][0]), float(p["centre"][1])], "yaw_in": float(p["yaw_in"]),
+                      "yaw_out": float(p["yaw_out"]), "turn": float(p["turn"]), "start": bool(p["start"])} for p in out.get("pivots", [])]
+    return out
+
+
+def follow_plan(path, pivots, pos_xy, yaw, cfg, lead=0.15):
+    """the carrot with pivots as their own step -> (carrot xy, carrot yaw, phase, pivot index or None).
+
+    phase 'drive': the carrot lookahead ahead on the path (carrot()); 'approach': the next pivot is
+    ahead on this leg, and the carrot stops lead past its centre along the incoming heading (Rover
+    Guided counts a target within WP_RADIUS, 0.3 m on the robot, reached and stops: the frame centre
+    stops within lead - 0.3 .. lead of the centre, inside pivot_tol); 'pivot': the frame centre has
+    arrived (pivot_tol before the centre or past it) and the heading is more than pivot_done off
+    the leaving heading: the carrot is on the leaving ray from the centre, so the bearing Rover
+    pivots by is the planned one. A start pivot has arrived already. Without a heading (yaw None)
+    pivots are not tracked."""
+    P = np.asarray(path, float)
+    p = np.asarray(pos_xy, float)[:2]
+    if not pivots or yaw is None:
+        c, y = carrot(P, p, cfg.lookahead)
+        return c, y, "drive", None
+    F = p - cfg.off * _unit(yaw)
+    starts = [0] + [pv["i"] + 1 for pv in pivots]
+    ends = [pv["i"] for pv in pivots] + [len(P) - 1]
+    # the leg of the nearest driving segment (pivot steps excluded): pivots before it are behind
+    best, leg = 1e18, 0
+    for L, (a, b) in enumerate(zip(starts, ends)):
+        for s in range(a, b):
+            u = P[s + 1] - P[s]
+            L2 = float(u @ u)
+            t = 0.0 if L2 == 0 else float(np.clip((p - P[s]) @ u / L2, 0, 1))
+            d = float(np.linalg.norm(P[s] + u * t - p))
+            if d < best:
+                best, leg = d, L
+    j = 0
+    while j < len(pivots):
+        pv = pivots[j]
+        C = np.asarray(pv["centre"], float)
+        e = F - C
+        along = float(e @ _unit(pv["yaw_in"]))
+        near = float(np.linalg.norm(e)) <= cfg.pivot_tol + 0.1
+        arrived = pv["start"] or (along >= -cfg.pivot_tol and near)
+        if j >= leg and not arrived:
+            break
+        if near and abs(_wrap(yaw - pv["yaw_out"])) > cfg.pivot_done:
+            c = C + (cfg.off + cfg.lookahead) * _unit(pv["yaw_out"])
+            return c, _hd(c - p), "pivot", j
+        j += 1
+    pts = P[starts[j]:ends[j] + 1]
+    if j < len(pivots):
+        pv = pivots[j]
+        H = np.asarray(pv["centre"], float) + lead * _unit(pv["yaw_in"])
+        pts = np.vstack([pts[:-1], H]) if len(pts) > 1 else np.vstack([pts, H])
+        c, y = carrot(pts, p, cfg.lookahead)
+        return c, y, "approach", j
+    c, y = carrot(pts, p, cfg.lookahead) if len(pts) > 1 else (pts[-1], _hd(pts[-1] - p))
+    return c, y, "drive", None
+
+
+def _stop_leg(path, pivots, yaw, phase, j, lead):
+    """the polyline from the current leg's start to the point the robot stops at next, as
+    follow_plan drives it: the next pivot's hold point (approach) or the goal (drive)"""
+    P = np.asarray(path, float)
+    if phase == "approach" and j is not None:
+        pv = pivots[j]
+        a = 0 if j == 0 else pivots[j - 1]["i"] + 1
+        H = np.asarray(pv["centre"], float) + lead * _unit(pv["yaw_in"])
+        pts = P[a:pv["i"] + 1]
+        return np.vstack([pts[:-1], H]) if len(pts) > 1 else np.vstack([pts, H])
+    a = pivots[-1]["i"] + 1 if (pivots and yaw is not None) else 0
+    return P[min(a, len(P) - 1):]
+
+
+def _along_to_end(pts, xy):
+    """path length from xy's projection on polyline pts to its last vertex"""
+    pts = np.asarray(pts, float)
+    if len(pts) < 2:
+        return float(np.linalg.norm(pts[-1] - xy)) if len(pts) else 0.0
+    best, k, t = 1e18, 0, 0.0
+    for s in range(len(pts) - 1):
+        u = pts[s + 1] - pts[s]
+        L2 = float(u @ u)
+        ts = 0.0 if L2 == 0 else float(np.clip((xy - pts[s]) @ u / L2, 0, 1))
+        d = float(np.linalg.norm(pts[s] + u * ts - xy))
+        if d < best:
+            best, k, t = d, s, ts
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    return float(seg[k] * (1 - t) + seg[k + 1:].sum())
+
+
+def _to_turn(pts, xy, turn):
+    """path length from xy's projection on polyline pts to its first later vertex where the path
+    turns by more than `turn` (rad), or to its end"""
+    pts = np.asarray(pts, float)
+    if len(pts) < 3:
+        return _along_to_end(pts, xy)
+    best, k, t = 1e18, 0, 0.0
+    for s in range(len(pts) - 1):
+        u = pts[s + 1] - pts[s]
+        L2 = float(u @ u)
+        ts = 0.0 if L2 == 0 else float(np.clip((xy - pts[s]) @ u / L2, 0, 1))
+        d = float(np.linalg.norm(pts[s] + u * ts - xy))
+        if d < best:
+            best, k, t = d, s, ts
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    acc = seg[k] * (1 - t)
+    for v in range(k + 1, len(pts) - 1):
+        if seg[v - 1] > 1e-9 and seg[v] > 1e-9 and abs(_wrap(_hd(pts[v + 1] - pts[v]) - _hd(pts[v] - pts[v - 1]))) > turn:
+            return float(acc)
+        acc += seg[v]
+    return float(acc)
+
+
+def run_out(path, pivots, pos_xy, yaw, carrot_xy, phase, j, cfg, reach=1.2, fc_behind=0.178, lead=0.15, win=None,
+            aligned_deg=10.0, turning_deg=30.0, corner_deg=20.0):
+    """the driving target the planner publishes: the carrot (follow_plan) moved on along the bearing
+    from the FC to it, so the FC's target is up to `reach` metres away -> (target xy, run-out m).
+
+    Why: Rover Guided's fast-update path (AR_WPNav input shaping, the bridge's position-only targets)
+    closes on its target with a speed set by the distance left: k_v = WP_JERK / accel = 1/s with
+    the robot's WP_JERK 0, ~0.5 m/s per metre measured (SITL d10: 0.58 m/s at 1.15 m). A target at
+    the carrot (0.5 m ahead of the odometry point, ~0.7 m from the FC) held the SITL rover to
+    0.15-0.25 m/s with WP_SPEED 1.0 (d6); 1 m/s needs ~2 m (the node: reach = runout_s 2.1 x its
+    drive_speed). The bearing is the carrot's, so Rover steers exactly as before; only the distance
+    it sees grows. The run-out is
+      * none while pivoting (phase 'pivot': the carrot on the leaving ray is the bearing to pivot by);
+      * at most the path length from the carrot to the next stop point (the pivot's hold point in
+        'approach', the goal in 'drive'): it shrinks to nothing as the robot arrives, so Rover's
+        shaped target slows to a stop there (no overshoot past a stop point);
+      * truncated before the first spot where the frame (the FC on the ray, heading along it) would
+        touch an obstacle cell of `win` (the last plan's window); none without a window. A dead
+        planner leaves Rover on the last target the bridge sent: a checked point.
+      * scaled down while the robot turns: in full with its heading within aligned_deg of the
+        bearing to the carrot, none beyond turning_deg. Rover's fast-update path steers like pure
+        pursuit on the distance to its target (curvature ~ 2 sin(error) / distance): a 2 m target
+        turned it a third as hard as the carrot, so on an angled approach it held its heading and met
+        the Gate L2 door's jamb (d11: 47 deg off the bearing at 0.07 rad/s);
+      * never past the next path vertex that turns by more than corner_deg (the chord past it
+        leaves the path), so the robot reaches a corner on the carrot alone;
+    WP_SPEED still caps the speed."""
+    c = np.asarray(carrot_xy, float)[:2]
+    p = np.asarray(pos_xy, float)[:2]
+    if phase == "pivot" or win is None or reach <= 0:
+        return c, 0.0
+    fc = p - fc_behind * _unit(yaw) if yaw is not None else p
+    d = c - fc
+    n = float(np.linalg.norm(d))
+    if n < 1e-6:
+        return c, 0.0
+    leg = _stop_leg(path, pivots, yaw, phase, j, lead)
+    e = min(reach - n, _along_to_end(leg, c), _to_turn(leg, c, math.radians(corner_deg)))
+    if yaw is not None:
+        err = abs(math.degrees(_wrap(_hd(d) - yaw)))
+        e *= float(np.clip((turning_deg - err) / max(turning_deg - aligned_deg, 1e-6), 0.0, 1.0))
+    if e <= cfg.res * 0.5:
+        return c, 0.0
+    u = d / n
+    t = np.arange(cfg.res * 0.5, e + 1e-9, cfg.res * 0.5)
+    if not len(t) or t[-1] < e - 1e-9:
+        t = np.append(t, e)
+    # the FC at c + t u, heading u: the odometry point fc_behind ahead of it
+    ok = win.poses_free(c + (t[:, None] + fc_behind) * u, np.full(len(t), _hd(u)))
+    bad = np.flatnonzero(~ok)
+    if len(bad):
+        e = float(t[bad[0] - 1]) if bad[0] > 0 else 0.0
+    return c + e * u, e
 
 
 class EvidenceMemory:
@@ -746,11 +1452,12 @@ class LiveWindow:
         self.done = self.recent[-1][3]
         h, m, w = self.mem.read(hg, now)
         moved = hg.occ & (m >= 1.0) & (m > self.mem_clear_ratio * h)
+        hg.seen_free = (m >= 1.0) & (m > h)       # seen through more than hit lately (a reverse may use it)
         held = (w >= self.mem_hits) & (h > m)
         hg.occ = (hg.occ & ~moved) | held
         hg._edt()
 
-    def plan(self, start_xy, goal_xy):
+    def plan(self, start_xy, goal_xy, start_yaw=None, start_pivoting=False):
         cfg = self.cfg
         s, g = np.asarray(start_xy, float)[:2], np.asarray(goal_xy, float)[:2]
         if not self.recent:
@@ -764,7 +1471,7 @@ class LiveWindow:
         t1 = time.perf_counter()
         self._correct(hg)
         t2 = time.perf_counter()
-        out = plan(hg, None, s, g)
+        out = plan(hg, None, s, g, start_yaw=start_yaw, start_pivoting=start_pivoting)
         out["hg"] = hg
         out.setdefault("t", {}).update(grid=t1 - t0, evidence=t2 - t1)
         return out

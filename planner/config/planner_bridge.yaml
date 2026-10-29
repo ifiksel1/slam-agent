@@ -8,12 +8,19 @@ rate_hz: 50.0                # D4: targets at 50 Hz
 speed_cap: 0.5               # m/s, D10 (0.5 until Gate L4 passes, then 1.0); sim: 1.0
 max_lead: 1.0                # m the position target may run ahead of the vehicle
 fc_pos_p: 1.0                # the FC's Q_P_NE_POS_P: the speed cap bounds feed-forward + this x position error
-drive_lookahead: 0.5         # m, D4: a dead planner stops the rover within this
+drive_lookahead: 2.5         # m, D4: a dead planner stops the rover within this (at the last target sent).
+                             # Above the track planner's run-out (runout_s 2.1 x drive_speed: 1.05 m at the
+                             # robot's WP_SPEED 0.5, 2.1 m at 1.0), which it frame-checks: Rover Guided's
+                             # fast-update path asks ~0.5 m/s per metre to its target, so 0.5 here held the
+                             # SITL rover to ~0.2-0.3 m/s (d6)
 guided_mode: GUIDED          # /mavros/state mode string for QuadRover Guided (flight and driving)
 
 # HOLD triggers
 planner_timeout: 0.3         # s since the mode's planner command
 slam_timeout: 0.2            # s since /Odometry
+fc_pose_timeout: 0.3         # s since /mavros/local_position/pose (receive time, ~50 Hz): older -> HOLD
+                             # "fc_pose_stale" at the last fresh FC position (flight) / nothing sent (drive)
+fc_pose_resume_n: 5          # fresh FC poses in a row before it is trusted again
 anchor_jump_m: 0.1           # re-anchor / SLAM reset detection (D7)
 anchor_jump_deg: 2.0
 anchor_persist: 3            # vision-pose pairs a change must last (one odd pair is a pairing glitch)

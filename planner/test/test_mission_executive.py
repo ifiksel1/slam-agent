@@ -8,8 +8,9 @@ bridge (/planner_bridge/anchor, /planner_bridge/status; it moves only while /pla
 toward the target of the planner its mode (/planner_bridge/set_mode, reported back in its status) listens
 to), SUPER (flies toward each /planning/click_goal converted planner -> fc with the current anchor) and the
 track planner (drives toward /planning/drive_goal on the ground, /track_planner/status). Like QuadRover
-it refuses a takeoff while the tracks move (MAV_RESULT_TEMPORARILY_REJECTED). Each scenario runs the real
-executive as a child process.
+it refuses a takeoff while the tracks move faster than 0.2 m/s (MAV_RESULT_TEMPORARILY_REJECTED); a
+slower creep (creep) passes that guard, and the executive must not take off then. It records the
+executive's /mission_executive/ground_spots. Each scenario runs the real executive as a child process.
 
 Run with ROS Noetic and mavros_msgs sourced:  python3 planner/test/test_mission_executive.py
 """
@@ -66,6 +67,7 @@ class FakeWorld:
         rospy.Subscriber("/mission_executive/status", String, lambda m: self.status.append(json.loads(m.data)))
         rospy.Subscriber("/planner_bridge/enable", Bool, self.on_enable)
         rospy.Subscriber("/planner_bridge/set_mode", String, self.on_set_mode)
+        rospy.Subscriber("/mission_executive/ground_spots", String, lambda m: setattr(self, "ground", json.loads(m.data)))
         self.track_pub = rospy.Publisher("/track_planner/status", String, queue_size=10)
         rospy.Timer(rospy.Duration(0.05), self.step)
 
@@ -97,6 +99,8 @@ class FakeWorld:
         self.coast = 0                    # steps the tracks keep moving after the stream stops
         self.takeoff_calls = []           # (speed at the call, result)
         self.on_ground_since_landing = False
+        self.creep = 0.0                  # m/s the tracks creep on the ground whatever is commanded
+        self.ground = None                # the executive's latest ground spots
         self.forbidden.clear(); self.mode_cmds.clear(); self.goals.clear(); self.drive_goals.clear(); self.status.clear()
 
     # ---- services ---------------------------------------------------------------------------
@@ -197,6 +201,9 @@ class FakeWorld:
             elif self.target_kind == "drive":
                 self.speed = 0.0
                 self.track_pub.publish(String(data=json.dumps({"state": "REACHED", "reason": ""})))
+        elif self.creep > 0 and self.pos[2] < 0.05:
+            self.pos[0] += self.creep * dt
+            self.speed = self.creep
         elif self.coast > 0 and self.pos[2] < 0.05:
             self.coast -= 1      # the tracks run on for a second after the stream stops
             self.pos[0] += 0.5 * dt
@@ -266,8 +273,16 @@ def run_executive(world, legs, setup=None, during=None, timeout=40, start=True, 
             time.sleep(0.05)
         return [s["phase"] for s in world.status]
     finally:
+        # rospy race: a SIGTERM that lands inside the executive's loginfo (rosout asks the master for a
+        # parameter over XMLRPC) deadlocks its shutdown hook's own XMLRPC call. Let the last report's
+        # log finish first, and kill a child that still hangs
+        time.sleep(0.5)
         proc.terminate()
-        proc.wait(timeout=10)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
         time.sleep(1.0)
 
 
@@ -405,6 +420,13 @@ def main():
     check("second takeoff re-seeds SUPER at its hover point", len(hover) >= 1, str([g.round(2).tolist() for _, g in w.goals]))
     check("modes commanded: GUIDED only (drive and fly)", modes == [15], str(modes))
     check("never arms or touches parameters (drive and fly)", not w.forbidden, str(w.forbidden))
+    spots = (w.ground or {}).get("spots", [])
+    ev = [s["event"] for s in spots]
+    ok = ev == ["takeoff", "landed", "takeoff", "landed"] and (w.ground or {}).get("frame") == "fc" \
+        and all(abs(s["xyz"][2]) < 0.05 for s in spots) and np.allclose(spots[0]["xyz"][:2], [0, 0], atol=0.05) \
+        and np.allclose(spots[2]["xyz"][:2], [4.0, -1.0], atol=0.6)     # the fake's tracks coast 0.5 m
+    check("ground spots: each takeoff spot and each landing, on the ground, fc frame", ok,
+          json.dumps([(s["event"], s["xyz"]) for s in spots]))
     check("bridge not enabled during the second takeoff and landing", w.enabled_during_fc_move == 0,
           "%d steps" % w.enabled_during_fc_move)
 
@@ -447,6 +469,35 @@ def main():
     ph = run_executive(w, [{"type": "takeoff", "height": 1.0}])
     check("takeoff refused on the ground -> stays GUIDED", ph[-1:] == ["STOPPED"] and [m for _, m in w.mode_cmds] == [15],
           str([m for _, m in w.mode_cmds]))
+
+    # 14. the tracks creep at 0.1 m/s (under QuadRover's 0.2 m/s guard) and never stand still: no
+    # takeoff, STOPPED "not stationary before takeoff" on the ground in GUIDED, bridge off
+    w.reset()
+    w.creep = 0.1
+    ph = run_executive(w, [{"type": "takeoff", "height": 1.0}, {"type": "fly", "goal": [1.0, 0.0, 1.0]}])
+    last = w.status[-1] if w.status else {}
+    modes = [m for _, m in w.mode_cmds]
+    check("not standing still before a takeoff -> STOPPED, no takeoff sent",
+          ph[-1:] == ["STOPPED"] and last.get("reason") == "not stationary before takeoff" and not w.takeoff_calls,
+          "%s takeoffs %s" % (json.dumps(last), w.takeoff_calls))
+    check("not stationary: stays GUIDED (no QR mode on the ground), bridge off, no goal",
+          modes == [15] and not w.enabled and not w.goals and not w.forbidden, "modes %s goals %d" % (modes, len(w.goals)))
+    check("not stationary: no ground spot recorded", not (w.ground or {}).get("spots"), json.dumps(w.ground))
+
+    # 15. a drive, then the tracks creep on once the bridge is off (the fake holds the rover on its
+    # target while the bridge is on): no takeoff, STOPPED on the ground
+    w.reset()
+
+    def creep_after_drive(t):
+        if any(s.get("type") == "drive" for s in w.status) and w.drive_steps > 5:
+            w.creep = 0.1
+    ph = run_executive(w, [{"type": "drive", "goal": [1.0, 0.0]}, {"type": "takeoff", "height": 1.0}],
+                       during=creep_after_drive)
+    last = w.status[-1] if w.status else {}
+    modes = [m for _, m in w.mode_cmds]
+    check("creeping after a drive -> STOPPED not stationary, GUIDED only, no takeoff",
+          ph[-1:] == ["STOPPED"] and last.get("reason") == "not stationary before takeoff" and not w.takeoff_calls
+          and modes == [15] and not w.enabled, "%s modes %s takeoffs %s" % (json.dumps(last), modes, w.takeoff_calls))
 
     failed = [n for n, ok, _ in RESULTS if not ok]
     print("\n%d of %d checks passed" % (len(RESULTS) - len(failed), len(RESULTS)))

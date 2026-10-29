@@ -4,13 +4,16 @@
 # container joins it), so nothing reaches the host network, the revolute-gcs SITL on 5760-5763, or a
 # real flight controller.
 #
-#   sitl_harness.sh up <name> <map.pcd> [start_x start_y start_yaw_deg]   (env LIDAR_UP, LATENCY_S, FAULT, FAULT_START_S, FAULT_RATE, HW_DROP, HW_KEEP, HOME_YAW, EXTRA_PARMS)
+#   sitl_harness.sh up <name> <map.pcd> [start_x start_y start_yaw_deg]   (env LIDAR_UP, LATENCY_S, FAULT, FAULT_START_S, FAULT_RATE, HW_DROP, HW_KEEP, HOME_YAW, EXTRA_PARMS,
+#                                                                          RENDER_SCRIPT, SITL_ARGS: the failure tests, faults/cases.sh)
 #   sitl_harness.sh down <name>
 #   sitl_harness.sh status <name>
 #   sitl_harness.sh exec <name> <command...>        run inside the ROS container (ROS env sourced)
 #
 # Paths (Shannon): SLAM repo copy ~/sim/l2/slam (config/, overrides/), this folder ~/sim/l2/planner_sim,
 # SITL build ~/sim/ardupilot, raycaster ~/sim/marsim, runs ~/sim/l2/runs/<name>.
+# SITL_AP: another ardupilot tree to run SITL from (its build/sitl/bin/ardurover; default ~/sim/ardupilot),
+# e.g. ~/sim/ardupilot_dctl with the track lateral-friction fix (sitl_track_friction.patch).
 set -uo pipefail
 cmd=${1:?up|down|status|exec}; name=${2:?run name}
 ROS=l2-ros-$name; SITL=l2-sitl-$name
@@ -46,15 +49,15 @@ up)
   docker run -d --name $ROS --network none --cpus ${CPUS:-6} \
     -e ROS_HOSTNAME=localhost -e ROS_MASTER_URI=http://localhost:11311 \
     -e MAP_PCD=/map/$(basename $map) -e START_X=$sx -e START_Y=$sy -e START_YAW_DEG=$syaw \
-    -e LIDAR_UP=${LIDAR_UP:-0} -e LATENCY_S=${LATENCY_S:-0.07} -e FAULT=${FAULT:-none} -e FAULT_START_S=${FAULT_START_S:-1e9} -e FAULT_RATE=${FAULT_RATE:-0.05} \
+    -e RENDER_SCRIPT=${RENDER_SCRIPT:-/planner_sim/render_node.py} -e LIDAR_UP=${LIDAR_UP:-0} -e LATENCY_S=${LATENCY_S:-0.07} -e FAULT=${FAULT:-none} -e FAULT_START_S=${FAULT_START_S:-1e9} -e FAULT_RATE=${FAULT_RATE:-0.05} \
     -v $(realpath $map):/map/$(basename $map):ro -v $BASE/slam:/slam:ro -v $BASE/planner_sim:/planner_sim:ro \
     -v ~/sim/marsim:/marsim:ro -v $RUN:/run \
     --entrypoint bash l4-sim-l2:latest -c "sleep infinity" >/dev/null
   # SITL needs glibc 2.34 (built on Shannon's 22.04): its own container, in the ROS container's network
   docker run -d --name $SITL --network container:$ROS --cpus 2 -w /run/sitl \
-    -v $AP:/ap:ro -v $BASE/planner_sim:/planner_sim:ro -v $RUN:/run ubuntu:22.04 \
+    -v ${SITL_AP:-$AP}:/ap:ro -v $BASE/planner_sim:/planner_sim:ro -v $RUN:/run ubuntu:22.04 \
     /ap/build/sitl/bin/ardurover --model quadrover --home 42.56335,12.64329,163,${HOME_YAW:-0} -I0 -w \
-    --defaults /run/sitl/defaults.parm \
+    --defaults /run/sitl/defaults.parm ${SITL_ARGS:-} \
     >/dev/null
   sleep 2
   docker exec -d $ROS bash /planner_sim/run_ros.sh

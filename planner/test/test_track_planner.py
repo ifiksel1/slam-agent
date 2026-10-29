@@ -209,6 +209,384 @@ def synthetic():
     check("drive chain (carrot -> bridge target -> skid-steer) around the wall, frame clear", ok and reached,
           "reached %s in %.0f s, worst intrusion %.3f m" % (reached, t, worst))
 
+    pivots(cfg)
+    runouts(cfg)
+    reverses(cfg)
+
+
+def disc_clear(centre, obs, r=tc.FOOTPRINT_HALF_DIAGONAL):
+    """independent check: no obstacle point within the bare frame's half-diagonal of a pivot centre
+    -> (ok, nearest obstacle m)"""
+    d = float(np.min(np.hypot(*(obs - np.asarray(centre)).T))) if len(obs) else 1e3
+    return d >= r, d
+
+
+def legs_clear(out, obs, cfg):
+    """independent check of a plan with pivots: each driving leg on its own (frame_clear), each pivot
+    circle (disc_clear) -> (ok, worst intrusion, nearest obstacle to a pivot centre)"""
+    P = [np.asarray(p) for p in out["path"]]
+    starts = [0] + [p["i"] + 1 for p in out["pivots"]]
+    ends = [p["i"] for p in out["pivots"]] + [len(P) - 1]
+    worst, near, ok = 0.0, 1e3, True
+    for k, (a, b) in enumerate(zip(starts, ends)):
+        if b - a < 1:
+            continue
+        leg = P[a:b + 1]
+        if k > 0:
+            # the start skip of frame_clear is for the plan's start only
+            c = cfg.start_skip
+            cfg.start_skip = 0.0
+            o, w = frame_clear(leg, obs, cfg)
+            cfg.start_skip = c
+        else:
+            o, w = frame_clear(leg, obs, cfg)
+        ok &= o
+        worst = max(worst, w)
+    for p in out["pivots"]:
+        o, d = disc_clear(p["centre"], obs)
+        ok &= o
+        near = min(near, d)
+    return ok, worst, near
+
+
+def pivots(cfg):
+    """pivots in place (WP_PIVOT_ANGLE 60): the circle of the frame's half-diagonal (+ margin) about
+    the frame centre must be clear where the plan turns by more than 60 deg"""
+    fl = floor(-5, 5, -5, 5)
+    # walls and points 0.025 m off the 0.1 m cell boundaries: a wall on a boundary falls in the
+    # cell on either side depending on the grid's origin (float rounding)
+    e = 0.025
+
+    def w(x0, y0, x1, y1):
+        return wall(x0 + e, y0 + e, x1 + e, y1 + e)
+
+    def at(x, y):
+        return (x + e, y + e)
+
+    # a 90 deg corner of two 0.7 m corridors: the frame fits along each, the pivot circle (0.78 m
+    # across) fits nowhere near the corner
+    L = np.vstack([w(-4, -0.35, 0, -0.35), w(-4, 0.35, -0.7, 0.35), w(0, -0.35, 0, 4), w(-0.7, 0.35, -0.7, 4),
+                   w(-4, -0.35, -4, 0.35), w(-0.7, 4, 0, 4)])
+    out = tc.plan(np.vstack([fl, L]), None, at(-3, 0), at(-0.35, 3), cfg, start_yaw=0.0)
+    check("pivot: a 90 deg corner of 0.7 m corridors is refused", not out["ok"], out.get("reason", ""))
+
+    # in a 0.7 m corridor at the door of a 1.5 m x 2 m room, facing in, the goal behind: no room to
+    # pivot where it stands, so the robot drives into the room, pivots there and comes back
+    cor = np.vstack([w(-4, -0.35, 0.5, -0.35), w(-4, 0.35, 0.5, 0.35), w(-4, -0.35, -4, 0.35),
+                     w(0.5, 0.35, 0.5, 1.0), w(0.5, -0.35, 0.5, -1.0), w(0.5, 1.0, 2.0, 1.0), w(0.5, -1.0, 2.0, -1.0),
+                     w(2.0, -1.0, 2.0, 1.0)])
+    cl = np.vstack([fl, cor])
+    out = tc.plan(cl, None, at(0.7, 0), at(-2.5, 0), cfg, start_yaw=0.0)
+    obs = band_xy(cor, cfg)
+    ok, worst, near = legs_clear(out, obs, cfg) if out["ok"] else (False, 0, 0)
+    pv = out.get("pivots", [])
+    moved = len(pv) == 1 and not pv[0]["start"] and pv[0]["centre"][0] > 0.6
+    check("pivot: no room where it stands -> moved ahead into the room, frame and circle clear", out["ok"] and moved and ok,
+          "pivots %s, worst intrusion %.3f m, circle %.2f m from a wall" % (
+              [(round(p["centre"][0], 2), round(p["centre"][1], 2), p["start"]) for p in pv], worst, near) if out["ok"] else out["reason"])
+
+    # a U-turn in a dead-end 0.7 m corridor: refused (without the robot's heading it is planned,
+    # as before)
+    dead = np.vstack([w(-4, -0.35, 1.0, -0.35), w(-4, 0.35, 1.0, 0.35), w(1.0, -0.35, 1.0, 0.35), w(-4, -0.35, -4, 0.35)])
+    dc = np.vstack([fl, dead])
+    out = tc.plan(dc, None, at(0, 0), at(-2.5, 0), cfg, start_yaw=0.0)
+    back = tc.plan(dc, None, at(0, 0), at(-2.5, 0), cfg, start_yaw=math.pi)
+    blind = tc.plan(dc, None, at(0, 0), at(-2.5, 0), cfg)
+    check("pivot: U-turn in a 0.7 m corridor refused; facing the goal it drives", not out["ok"] and back["ok"] and not back["pivots"] and blind["ok"],
+          "facing away: %s; facing the goal: %s; no heading: %s" % (
+              out.get("reason") or "planned", "planned, %d pivots" % len(back.get("pivots", [])) if back["ok"] else back["reason"],
+              "planned" if blind["ok"] else blind["reason"]))
+
+    # a hairpin through a 1.2 m x 2.5 m room, in by a 0.7 m corridor, out by a 0.9 m one: pivots in
+    # the room (the way out is wider so that the drive chain's arcs, a turn under 60 deg after a
+    # replan, do not touch it: those are the follower's, see LIMITS)
+    hp = np.vstack([w(-4, -0.35, 0, -0.35), w(-4, 0.35, 0, 0.35), w(-4, 0.95, 0, 0.95), w(-4, 1.85, 0, 1.85),
+                    w(0, -0.35, 0, -0.5), w(0, 1.85, 0, 2.0), w(0, -0.5, 1.2, -0.5), w(0, 2.0, 1.2, 2.0),
+                    w(1.2, -0.5, 1.2, 2.0), w(0, 0.35, 0, 0.95), w(-4, -0.35, -4, 0.35), w(-4, 0.95, -4, 1.85)])
+    hc = np.vstack([fl, hp])
+    out = tc.plan(hc, None, at(-1.5, 0), at(-1.5, 1.4), cfg, start_yaw=0.0)
+    obs = band_xy(hp, cfg)
+    ok, worst, near = legs_clear(out, obs, cfg) if out["ok"] else (False, 0, 0)
+    pv = out.get("pivots", [])
+    check("pivot: hairpin through a 1.2 m room is planned with pivots there, frame and circles clear",
+          out["ok"] and len(pv) >= 1 and all(p["centre"][0] > 0.0 for p in pv) and ok,
+          "%d pivots %s, turns %s deg, worst intrusion %.3f m, circles >= %.2f m from a wall" % (
+              len(pv), [(round(p["centre"][0], 2), round(p["centre"][1], 2)) for p in pv],
+              [round(math.degrees(p["turn"])) for p in pv], worst, near) if out["ok"] else out["reason"])
+    ok, worst, reached, t, seen = drive_chain_pivots(cfg, hp, hc, at(-1.5, 0.0), 0.0, np.array(at(-1.5, 1.4)))
+    check("pivot: drive chain with pivots through the hairpin, frame clear, each pivot circle clear",
+          ok and reached and len(seen) > 0 and all(d >= tc.FOOTPRINT_HALF_DIAGONAL for _, d in seen),
+          "reached %s in %.0f s, worst intrusion %.3f m, %d pivots driven, circles >= %s m from a wall" % (
+              reached, t, worst, len(seen), round(min(d for _, d in seen), 2) if seen else "-"))
+
+    # the start pivot in the open: about the frame centre, footprint_offset behind the odometry point
+    out = tc.plan(fl, None, (0, 0), (-3, 0), cfg, start_yaw=0.0)
+    pv = out.get("pivots", [])
+    ok = out["ok"] and len(pv) == 1 and pv[0]["start"] and np.allclose(pv[0]["centre"], [-cfg.off, 0], atol=1e-6) \
+        and np.allclose(out["path"][1], [-2 * cfg.off, 0], atol=1e-6) and abs(abs(pv[0]["yaw_out"]) - math.pi) < 0.05
+    same = tc.plan(fl, None, (0, 0), (-3, 0), cfg, start_yaw=math.pi)
+    small = tc.plan(fl, None, (0, 0), (3, 1.5), cfg, start_yaw=0.0)     # 27 deg: driven, no pivot
+    check("pivot: start pivot about the frame centre; none facing the goal or for a 27 deg turn",
+          ok and same["ok"] and not same["pivots"] and small["ok"] and not small["pivots"],
+          "centre %s, leaves at %s, yaw_out %.0f deg" % (np.round(pv[0]["centre"], 3), np.round(out["path"][1], 3), math.degrees(pv[0]["yaw_out"])) if pv else out.get("reason", ""))
+
+    # the carrot as its own step: holds pivot_lead past the centre, then the leaving ray, then drives
+    path = [np.array([0.0, 0.0]), np.array([2.0, 0.0]), np.array([2.0 - cfg.off, cfg.off]), np.array([2.0 - cfg.off, 2.0])]
+    piv = [{"i": 1, "centre": [2.0 - cfg.off, 0.0], "yaw_in": 0.0, "yaw_out": math.pi / 2, "turn": math.pi / 2, "start": False}]
+    c1, _, ph1, _ = tc.follow_plan(path, piv, (1.0, 0.0), 0.0, cfg, 0.15)
+    c2, _, ph2, _ = tc.follow_plan(path, piv, (1.7, 0.0), 0.0, cfg, 0.15)
+    c3, _, ph3, _ = tc.follow_plan(path, piv, (2.0, 0.0), 0.0, cfg, 0.15)
+    c4, _, ph4, _ = tc.follow_plan(path, piv, (2.0 - cfg.off, cfg.off), math.pi / 2, cfg, 0.15)
+    check("pivot: carrot drives, holds at the pivot, turns on the leaving ray, drives on",
+          ph1 == "approach" and np.allclose(c1, [1.5, 0]) and ph2 == "approach" and np.allclose(c2, [2.0 - cfg.off + 0.15, 0])
+          and ph3 == "pivot" and np.allclose(c3, [2.0 - cfg.off, cfg.off + cfg.lookahead]) and ph4 == "drive" and c4[1] > 0.6,
+          "%s %s | %s %s | %s %s | %s %s" % (ph1, np.round(c1, 2), ph2, np.round(c2, 2), ph3, np.round(c3, 2), ph4, np.round(c4, 2)))
+
+
+def drive_chain_pivots(cfg, obs_pts, cloud, start, yaw, goal, fc_behind=0.178, lookahead=0.5, speed=0.5, turn_rate=1.0,
+                       dt=0.1, wp_radius=0.3, lead=0.15):
+    """the drive leg with pivots: replan every second from the odometry point with its heading,
+    follow_plan's carrot, the bridge's target from the FC, Rover Guided as a skid-steer about the FC:
+    a pivot starts when the bearing to the target is over 60 deg and runs until within 5 deg, a
+    target within wp_radius is reached (stop). -> (frame clear, worst intrusion, reached, time,
+    [(FC at each pivot, nearest obstacle to the frame centre there)])"""
+    import bridge_core as bc
+    obs = band_xy(obs_pts, cfg)
+    hg = tc.HeightGrid(cloud, cfg)
+    odom = np.array(start, float)
+    worst, t, out, phase, piv, seen = 0.0, 0.0, None, "drive", False, []
+    while t < 180.0:
+        if out is None or int(round(t / dt)) % 10 == 0:
+            new = tc.plan(hg, None, odom, goal, start_yaw=yaw, start_pivoting=phase == "pivot")
+            if not new["ok"]:
+                return False, worst, False, t, seen
+            if phase == "pivot" and out is not None:
+                # as the node: a pivot under way finishes on its route while that still checks
+                rest = tc.remaining(out["route"], odom)
+                kept = tc.check_route(new["grid"], rest, yaw, True)
+                if kept["ok"]:
+                    new = {"path": kept["path"], "pivots": kept["pivots"], "route": rest}
+            out = new
+        if np.linalg.norm(odom - goal) < 0.3:
+            return worst == 0.0, worst, True, t, seen
+        c, _, phase, _ = tc.follow_plan(out["path"], out["pivots"], odom, yaw, cfg, lead)
+        h = np.array([math.cos(yaw), math.sin(yaw)])
+        fc = odom - fc_behind * h
+        tgt = bc.drive_target([c[0], c[1], 0.0], [0, 0, 0], [fc[0], fc[1], 0.0], lookahead)[:2]
+        d = tgt - fc
+        err = bc.wrap_pi(math.atan2(d[1], d[0]) - yaw) if np.linalg.norm(d) > 1e-6 else 0.0
+        if not piv and abs(err) > math.radians(60):
+            piv = True
+            centre = odom - cfg.off * h
+            seen.append((fc.copy(), disc_clear(centre, obs)[1]))
+        elif piv and abs(err) < math.radians(5):
+            piv = False
+        yaw += max(-turn_rate * dt, min(turn_rate * dt, err))
+        if not piv and np.linalg.norm(d) >= wp_radius:
+            v = min(speed, float(np.linalg.norm(d)) / dt)
+            fc = fc + v * dt * np.array([math.cos(yaw), math.sin(yaw)])
+        odom = fc + fc_behind * np.array([math.cos(yaw), math.sin(yaw)])
+        cs, sn = math.cos(yaw), math.sin(yaw)
+        o = obs - (odom - cfg.off * np.array([cs, sn]))
+        lon, lat = np.abs(o[:, 0] * cs + o[:, 1] * sn), np.abs(-o[:, 0] * sn + o[:, 1] * cs)
+        inside = (lon < tc.FOOTPRINT[0] / 2) & (lat < tc.FOOTPRINT[1] / 2)
+        if inside.any():
+            worst = max(worst, float(np.max(np.minimum(tc.FOOTPRINT[0] / 2 - lon[inside], tc.FOOTPRINT[1] / 2 - lat[inside]))))
+        t += dt
+    return worst == 0.0, worst, False, t, seen
+
+
+def drive_chain_rover(cfg, obs_pts, cloud, start, yaw, goal, runout=2.1, wp_speed=1.0, kv=0.5, accel=1.0, fc_behind=0.178,
+                      lookahead=2.5, turn_rate=1.0, dt=0.05, wp_radius=0.3, lead=0.15, settle=4.0):
+    """the drive leg with Rover Guided's fast-update speed law: the track planner (replans every
+    second, follow_plan, run_out with `runout`), the bridge (drive_target, ~drive_lookahead), and a
+    skid-steer about the FC steering by pure pursuit on its target (curvature 2 sin(error) /
+    distance, at most turn_rate) whose speed goes, at `accel`, to min(WP_SPEED, kv x distance to its
+    target) (AR_WPNav input shaping: kv 0.5/s measured in SITL d10, WP_JERK 0), stops within
+    wp_radius of the target, pivots over 60 deg (until within 5). After the planner's REACHED (odometry
+    point within 0.3 m of the goal) it streams nothing and Rover runs on to the last target for
+    `settle` s. -> dict(reached, worst intrusion, vmax, time, final odometry point, final speed)"""
+    import bridge_core as bc
+    obs = band_xy(obs_pts, cfg)
+    hg = tc.HeightGrid(cloud, cfg)
+    odom = np.array(start, float)
+    goal = np.asarray(goal, float)
+    worst, t, out, phase, piv, v, vmax, t_reached, tgt = 0.0, 0.0, None, "drive", False, 0.0, 0.0, None, None
+    k = 0
+    while t < 150.0:
+        h = np.array([math.cos(yaw), math.sin(yaw)])
+        fc = odom - fc_behind * h
+        if t_reached is None:
+            if np.linalg.norm(odom - goal) < 0.3:
+                t_reached = t
+            else:
+                if out is None or k % int(round(1.0 / dt)) == 0:
+                    new = tc.plan(hg, None, odom, goal, cfg, start_yaw=yaw, start_pivoting=phase == "pivot")
+                    if not new["ok"]:
+                        return {"reached": False, "worst": worst, "vmax": vmax, "t": t, "final": odom, "v": v, "why": new["reason"]}
+                    if phase == "pivot" and out is not None:
+                        rest = tc.remaining(out["route"], odom)
+                        kept = tc.check_route(new["grid"], rest, yaw, True)
+                        if kept["ok"]:
+                            new = {"path": kept["path"], "pivots": kept["pivots"], "route": rest, "grid": new["grid"]}
+                    out = new
+                c, _, phase, j = tc.follow_plan(out["path"], out["pivots"], odom, yaw, cfg, lead)
+                c, _ = tc.run_out(out["path"], out["pivots"], odom, yaw, c, phase, j, cfg, runout, fc_behind, lead, out["grid"])
+                tgt = bc.drive_target([c[0], c[1], 0.0], [0, 0, 0], [fc[0], fc[1], 0.0], lookahead)[:2]
+        elif t - t_reached > settle:
+            break
+        d = tgt - fc
+        dist = float(np.linalg.norm(d))
+        err = bc.wrap_pi(math.atan2(d[1], d[0]) - yaw) if dist > 1e-6 else 0.0
+        if not piv and abs(err) > math.radians(60) and dist >= wp_radius:
+            piv = True
+        elif piv and abs(err) < math.radians(5):
+            piv = False
+        v_des = 0.0 if (piv or dist < wp_radius) else min(wp_speed, kv * dist)
+        v += max(-accel * dt, min(accel * dt, v_des - v))
+        if piv and abs(v) < 0.05:
+            yaw += max(-turn_rate * dt, min(turn_rate * dt, err))
+        elif not piv and dist >= wp_radius:
+            # Rover's fast-update steering: pure pursuit on the target (curvature 2 sin(err) / dist)
+            w_ = 2.0 * max(abs(v), 0.1) * math.sin(err) / dist
+            yaw += max(-turn_rate * dt, min(turn_rate * dt, w_ * dt))
+        fc = fc + v * dt * np.array([math.cos(yaw), math.sin(yaw)])
+        odom = fc + fc_behind * np.array([math.cos(yaw), math.sin(yaw)])
+        vmax = max(vmax, abs(v))
+        cs, sn = math.cos(yaw), math.sin(yaw)
+        o = obs - (odom - cfg.off * np.array([cs, sn]))
+        lon, lat = np.abs(o[:, 0] * cs + o[:, 1] * sn), np.abs(-o[:, 0] * sn + o[:, 1] * cs)
+        inside = (lon < tc.FOOTPRINT[0] / 2) & (lat < tc.FOOTPRINT[1] / 2)
+        if inside.any():
+            worst = max(worst, float(np.max(np.minimum(tc.FOOTPRINT[0] / 2 - lon[inside], tc.FOOTPRINT[1] / 2 - lat[inside]))))
+        t += dt
+        k += 1
+    return {"reached": t_reached is not None, "worst": worst, "vmax": vmax, "t": t_reached if t_reached is not None else t,
+            "final": odom, "v": v, "why": ""}
+
+
+def runouts(cfg):
+    """the run-out (track_core.run_out): the planner's target moved on along the carrot's bearing so
+    Rover Guided's fast-update path (speed ~ 1/s x distance to the target) reaches WP_SPEED; none at
+    stop points or while pivoting, never into an obstacle"""
+    e = 0.025
+
+    def w(x0, y0, x1, y1):
+        return wall(x0 + e, y0 + e, x1 + e, y1 + e)
+
+    fl = floor(-5, 5, -5, 5)
+    win = tc.plan(fl, None, (0.0 + e, 0.0 + e), (4.0 + e, 0.0 + e), cfg)["grid"]
+    path = [np.array([0.0, 0.0]), np.array([4.0, 0.0])]
+    c, y, ph, j = tc.follow_plan(path, [], (1.0, 0.0), 0.0, cfg)
+    t1, e1 = tc.run_out(path, [], (1.0, 0.0), 0.0, c, ph, j, cfg, 1.2, 0.178, 0.15, win)
+    c2, _, ph2, j2 = tc.follow_plan(path, [], (3.5, 0.0), 0.0, cfg)
+    t2, e2 = tc.run_out(path, [], (3.5, 0.0), 0.0, c2, ph2, j2, cfg, 1.2, 0.178, 0.15, win)
+    t3, e3 = tc.run_out(path, [], (1.0, 0.0), 0.0, c, ph, j, cfg, 1.2, 0.178, 0.15, None)
+    check("run-out: the target 1.2 m from the FC on the carrot's bearing; never past the goal; none without a window",
+          abs(np.linalg.norm(t1 - [1.0 - 0.178, 0.0]) - 1.2) < 1e-6 and abs(t1[1]) < 1e-9 and e1 > 0.5
+          and np.allclose(t2, [4.0, 0.0]) and e2 == 0.0 and np.allclose(t3, c) and e3 == 0.0,
+          "open: %s (+%.2f m); 0.5 m from the goal: %s; no window: %s" % (np.round(t1, 3), e1, np.round(t2, 3), np.round(t3, 3)))
+
+    # a pivot ahead: approach runs out at most to the hold point; pivoting: none
+    path = [np.array([0.0, 0.0]), np.array([2.0, 0.0]), np.array([2.0 - cfg.off, cfg.off]), np.array([2.0 - cfg.off, 2.0])]
+    piv = [{"i": 1, "centre": [2.0 - cfg.off, 0.0], "yaw_in": 0.0, "yaw_out": math.pi / 2, "turn": math.pi / 2, "start": False}]
+    H = np.array([2.0 - cfg.off + 0.15, 0.0])
+    out = []
+    for x in (0.5, 1.0, 1.5):
+        c, _, ph, j = tc.follow_plan(path, piv, (x, 0.0), 0.0, cfg, 0.15)
+        tt, _ = tc.run_out(path, piv, (x, 0.0), 0.0, c, ph, j, cfg, 1.2, 0.178, 0.15, win)
+        out.append((ph, tt))
+    c, _, ph, j = tc.follow_plan(path, piv, (2.0, 0.0), 0.0, cfg, 0.15)
+    tp, ep = tc.run_out(path, piv, (2.0, 0.0), 0.0, c, ph, j, cfg, 1.2, 0.178, 0.15, win)
+    check("run-out: approaching a pivot never past its hold point; none while pivoting",
+          all(p == "approach" and tt[0] <= H[0] + 1e-9 for p, tt in out) and ph == "pivot" and ep == 0.0 and np.allclose(tp, c),
+          "approach targets x %s (hold %.3f); pivot carrot %s" % ([round(float(tt[0]), 3) for _, tt in out], H[0], np.round(tp, 3)))
+
+    # a wall across the bearing past the carrot (a path that turns away before it): cut short of it
+    wl = w(2.3, -2.0, 2.3, 1.0)
+    win = tc.plan(np.vstack([fl, wl]), None, (0.0 + e, 0.0 + e), (-1.0 + e, 1.0 + e), cfg)["grid"]
+    path = [np.array([0.0, 0.0]), np.array([4.0, 0.0])]       # (the run-out checks the frame, not the path)
+    c, _, ph, j = tc.follow_plan(path, [], (1.2, 0.0), 0.0, cfg)
+    tw, ew = tc.run_out(path, [], (1.2, 0.0), 0.0, c, ph, j, cfg, 1.2, 0.178, 0.15, win)
+    front = tw[0] + 0.178 - cfg.off + tc.FOOTPRINT[0] / 2       # the bare frame's nose with the FC at the target
+    # (the grid checks obstacle cell centres against the frame + margin: the bare frame is clear,
+    # the margin absorbs the half-cell rounding, as poses_free)
+    check("run-out: cut short of a wall across the bearing (bare frame clear, within a cell of it)",
+          ew < 1.2 - 0.678 and 2.3 + e - cfg.margin - cfg.res <= front < 2.3 + e and tw[0] >= c[0],
+          "target %s (+%.2f m), frame nose at %.3f m, wall at %.3f m" % (np.round(tw, 3), ew, front, 2.3 + e))
+
+    # the drive chain with Rover's speed law through a 0.90 m door, approached at an angle (Gate L2)
+    door = np.vstack([w(0.0, -5.0, 0.0, -0.45), w(0.0, 0.45, 0.0, 5.0)])
+    cloud = np.vstack([fl, door])
+    # (the bare carrot only for its speed: the model's low-speed steering is cruder than Rover's)
+    bare = drive_chain_rover(cfg, door, cloud, (-2.5 + e, 1.2 + e), 0.0, (2.5 + e, -0.8 + e), runout=0.0)
+    ro = drive_chain_rover(cfg, door, cloud, (-2.5 + e, 1.2 + e), 0.0, (2.5 + e, -0.8 + e), runout=2.1)
+    past = float(np.linalg.norm(ro["final"] - [2.5 + e, -0.8 + e]))
+    check("run-out: drive chain at WP_SPEED 1.0 through a 0.90 m door: ~1 m/s (bare carrot ~0.35), frame clear, stops at the goal",
+          ro["reached"] and ro["worst"] == 0.0 and ro["vmax"] >= 0.9 and bare["vmax"] < 0.45
+          and past < 0.4 and abs(ro["v"]) < 0.02,
+          "run-out: %.1f s, vmax %.2f m/s, worst intrusion %.3f m, odometry point %.2f m from the goal at rest (v %.2f); "
+          "bare carrot: reached %s %.1f s, vmax %.2f m/s %s %s" % (ro["t"], ro["vmax"], ro["worst"], past, ro["v"], bare["reached"], bare["t"], bare["vmax"], ro["why"], bare["why"]))
+
+
+def reverses(cfg):
+    """dead ends (owner 2026-10-28): the goal behind, no room to pivot where the robot stands -> back
+    straight up the way it came (observed free cells only, the oriented frame clear, at most
+    reverse_max) to the nearest spot the pivot circle fits, pivot there, drive on"""
+    e = 0.025
+
+    def w(x0, y0, x1, y1):
+        return wall(x0 + e, y0 + e, x1 + e, y1 + e)
+
+    # a 0.70 m dead-end corridor along +x (x -2..0, closed at 0) off an open room (x < -2)
+    corr = np.vstack([w(-2.0, -0.35, 0.0, -0.35), w(-2.0, 0.35, 0.0, 0.35), w(0.0, -0.35, 0.0, 0.35),
+                      w(-2.0, -3.0, -2.0, -0.35), w(-2.0, 0.35, -2.0, 3.0)])
+    start, goal = (-0.6 + e, 0.0 + e), (-3.5 + e, 1.5 + e)
+    fl = floor(-5, 0.5, -3, 3)
+    out = tc.plan(np.vstack([fl, corr]), None, start, goal, cfg, start_yaw=0.0)
+    rv = out.get("reverse")
+    ok = out["ok"] and rv is not None and out["pivots"] and out["pivots"][0]["start"]
+    worst = 0.0
+    if ok:
+        # independent: the bare frame along the reverse (heading kept) and the pivot circle at its end
+        obs = band_xy(corr, cfg)
+        for r in np.arange(0.0, rv["dist"] + 1e-9, 0.02):
+            q = np.array(start) - r * np.array([1.0, 0.0])
+            o = obs - (q - cfg.off * np.array([1.0, 0.0]))
+            inside = (np.abs(o[:, 0]) < tc.FOOTPRINT[0] / 2) & (np.abs(o[:, 1]) < tc.FOOTPRINT[1] / 2)
+            if inside.any():
+                worst = max(worst, float(np.max(np.minimum(tc.FOOTPRINT[0] / 2 - np.abs(o[inside, 0]), tc.FOOTPRINT[1] / 2 - np.abs(o[inside, 1])))))
+        circ, near = disc_clear(out["pivots"][0]["centre"], obs)
+        lc, lworst, _ = legs_clear(out, obs, cfg)
+        ok = ok and worst == 0.0 and circ and lc and rv["dist"] <= cfg.reverse_max
+    check("reverse: dead-end 0.7 m corridor, goal behind -> back up to the opening, pivot, drive (frame and circle clear)",
+          ok, "reverse %.2f m to %s, then pivots %s; worst intrusion %.3f m" % (
+              rv["dist"], np.round(rv["to"], 2), [(round(p["centre"][0], 2), round(p["centre"][1], 2), round(math.degrees(p["turn"])))
+                                                   for p in out["pivots"]], worst) if rv else out.get("reason", "") + " | " + out.get("reverse_reason", ""))
+
+    # a box in the corridor behind the robot: refused, not backed into
+    box = np.vstack([w(-1.6, -0.3, -1.6, 0.3), w(-1.4, -0.3, -1.4, 0.3)])
+    cl = np.vstack([fl, corr, box])
+    out = tc.plan(cl, None, start, goal, cfg, start_yaw=0.0)
+    m = cfg.r_out + cfg.res * 2 + cfg.pad
+    hg = tc.HeightGrid(cl, cfg, np.minimum(start, goal) - m, np.maximum(start, goal) + m)
+    rb = tc.plan_reverse(hg, start, goal, 0.0)       # the reverse's own check (plan() fails the search first here)
+    check("reverse: an obstacle behind in the corridor -> refused (plan, and the reverse sweep itself)",
+          not out["ok"] and out.get("reverse") is None and not rb["ok"] and "blocked" in rb["reason"],
+          out.get("reason", "") + " | plan_reverse: " + rb["reason"])
+
+    # the corridor's floor behind the robot never seen (no returns): refused, never reversed into
+    seen = fl[~((fl[:, 0] > -1.6) & (fl[:, 0] < -1.0) & (np.abs(fl[:, 1]) < 0.6))]
+    out = tc.plan(np.vstack([seen, corr]), None, start, goal, cfg, start_yaw=0.0)
+    check("reverse: unobserved floor behind -> refused (never into unknown space)",
+          not out["ok"] and "unobserved" in out.get("reverse_reason", ""), out.get("reason", "") + " | " + out.get("reverse_reason", ""))
+
+    # beyond reverse_max: refused
+    c2 = tc.Config(reverse_max=0.8)
+    out = tc.plan(np.vstack([fl, corr]), None, start, goal, c2, start_yaw=0.0)
+    check("reverse: no room within reverse_max -> refused", not out["ok"] and out.get("reverse") is None,
+          out.get("reason", "") + " | " + out.get("reverse_reason", ""))
+
 
 def drive_chain(cfg, obs_pts, cloud, start, goal, fc_behind=0.178, lookahead=0.5, speed=0.5, turn_rate=1.0, dt=0.1):
     """simulate the drive leg: replan from the odometry point every second (the track planner, at
@@ -278,7 +656,10 @@ def real(label, spec, live_step, gate):
     pf = sum(v[0] for v in lv["plans_free_now"].values())
     tf = sum(v[1] for v in lv["plans_free_now"].values())
     check("%s live window: goals along the driven path planned" % label, total and planned >= 0.85 * total,
-          "%d/%d (%s); where the scan of the moment shows the driven stretch free: %d/%d" % (planned, total, per, pf, tf))
+          "%d/%d (%s); where the scan of the moment shows the driven stretch free: %d/%d; plans with a pivot %d (start pivots %d, pivots %d)" % (
+              planned, total, per, pf, tf, *lv["pivots"]))
+    for f in [f for f in lv["fails"] if f[1] != "wall"][:8]:
+        print("        fail at keyframe %d, goal %g m ahead: %s" % f)
     w = lv["walls"]
     check("%s live window: goal behind a seen wall ahead refused or routed around" % label, w[0] == w[1],
           "%d/%d (%d routed around; %d of those through space the window had not seen, nothing seen there from z_lo to 2 m, where the map has a wall)" % w)
