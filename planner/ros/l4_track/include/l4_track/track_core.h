@@ -292,6 +292,26 @@ std::pair<V2, double> run_out(const Path& path, const std::vector<Pivot>& pivots
                               double lead = 0.15, const Window* win = nullptr, double aligned_deg = 10.0,
                               double turning_deg = 30.0, double corner_deg = 20.0);
 
+// ---- the drive slow-down near obstacles (owner request 2026-10-30, after Gate L2 s8: 0.03 m from the crate
+// at 1.0 m/s). See track_core.cpp (slow_reach) for the why.
+struct SlowDown {
+  bool on = true;
+  double clear_slow = 0.10;   // frame clearance (m, to obstacle cell centres) at or under which the reach is reach_min
+  double clear_full = 0.35;   // ... at or over which it is the full run-out reach
+  double reach_min = 0.8;     // the FC-to-target distance when slowest (m): Rover ~0.4 m/s
+  double ahead = 1.0;         // the path ahead of the robot checked (m)
+};
+// the bare frame's (no margin) distance to the nearest obstacle cell centre of `win` at odometry pose
+// (p, yaw), at most cap (0: a cell centre inside it); cells off the window's padded box count as free
+double frame_clearance(const Window& win, const V2& p, double yaw, double cap = 1.0);
+// the least frame_clearance of the robot where it stands (its heading, when known) and of the path's poses
+// (segment heading, every res/2) over the next `ahead` metres from it, at most cap
+double drive_clearance(const Window& win, const Path& path, const V2& pos, std::optional<double> yaw, double ahead,
+                       double cap = 1.0);
+// the run-out reach (FC to target, m) for a drive clearance: reach_min at clear_slow or nearer, the full
+// reach at clear_full or farther, linear between; never over reach (off: reach)
+double slow_reach(double clear, double reach, const SlowDown& s);
+
 Path densify(const Path& path, double step);
 Path remaining(const Path& path, const V2& pos);
 std::pair<V2, double> carrot(const Path& path, const V2& pos, double lookahead);

@@ -235,7 +235,8 @@ ChainR drive_chain_rover(const tc::Config& cfg, const Cloud& obs_pts, const Clou
                          double runout = 2.1, double wp_speed = 1.0, double kv = 0.5, double accel = 1.0,
                          double fc_behind = FCB, double lookahead = 2.5, double turn_rate = 1.0, double dt = 0.05,
                          double wp_radius = 0.3, double lead = 0.15, double settle = 4.0,
-                         double steer_dist = 0.0, int* pivots_driven = nullptr) {
+                         double steer_dist = 0.0, int* pivots_driven = nullptr, const tc::SlowDown* slow = nullptr,
+                         std::vector<std::pair<V2, double>>* trace = nullptr) {
   auto obs = band_xy(obs_pts, cfg);
   auto hg = std::make_shared<tc::HeightGrid>(cloud, std::make_shared<const tc::Config>(cfg));
   double worst = 0, t = 0, v = 0, vmax = 0;
@@ -272,7 +273,10 @@ ChainR drive_chain_rover(const tc::Config& cfg, const Cloud& obs_pts, const Clou
         }
         auto f = tc::follow_plan(out.path, out.pivots, odom, yaw, cfg, lead);
         phase = f.phase;
-        V2 c = tc::run_out(out.path, out.pivots, odom, yaw, f.c, f.phase, f.j, cfg, runout, fc_behind, lead, out.grid.get())
+        double reach = runout;
+        if (slow && f.phase != "pivot")
+          reach = tc::slow_reach(tc::drive_clearance(*out.grid, out.path, odom, yaw, slow->ahead), runout, *slow);
+        V2 c = tc::run_out(out.path, out.pivots, odom, yaw, f.c, f.phase, f.j, cfg, reach, fc_behind, lead, out.grid.get())
                    .first;
         tgt = drive_target(c, fc, lookahead);
       }
@@ -301,6 +305,7 @@ ChainR drive_chain_rover(const tc::Config& cfg, const Cloud& obs_pts, const Clou
     odom = fc + fc_behind * tc::unit(yaw);
     vmax = std::max(vmax, std::abs(v));
     worst = std::max(worst, intrusion(odom, yaw, obs, cfg.off));
+    if (trace) trace->push_back({fc, v});
     t += dt;
     k++;
   }
@@ -734,6 +739,67 @@ TEST(RunOut, DriveChainThroughA090mDoorAt1mps) {
   EXPECT_TRUE(ro.reached && ro.worst == 0.0 && ro.vmax >= 0.9 && bare.vmax < 0.45 && past < 0.4 && std::abs(ro.v) < 0.02)
       << "run-out " << ro.t << " s vmax " << ro.vmax << " worst " << ro.worst << " past " << past << " v " << ro.v
       << " " << ro.why << "; bare vmax " << bare.vmax << " " << bare.why;
+}
+
+// ---- the slow-down near obstacles (2026-10-30, Gate L2 s8)
+TEST(SlowDown, FrameClearanceToAWallCellCentre) {
+  Cloud fl = floor_(-5, 5, -5, 5);
+  auto win = tc::plan(cat({fl, w(2.3, -2.0, 2.3, 2.0)}), std::nullopt, V2(0 + E, 0 + E), V2(-1 + E, 1 + E), CFG).grid;
+  // the wall's cells: x in [2.3, 2.4), centre 2.35. Nose ahead: odometry x + (L/2 - off)
+  double nose = 1.5 + tc::FOOTPRINT_LEN / 2 - CFG.off;
+  double c0 = tc::frame_clearance(*win, V2(1.5, 0.0), 0.0);
+  // side on (heading +y, the wall to the right), the frame centre at x 1.8: half-width to the side
+  double c1 = tc::frame_clearance(*win, V2(1.8, 0.3), M_PI / 2);
+  double c2 = tc::frame_clearance(*win, V2(-2.0, 0.0), 0.0, 0.5);    // far: the cap
+  double c3 = tc::frame_clearance(*win, V2(2.3, 0.0), 0.0);          // nose through the wall: 0
+  EXPECT_NEAR(c0, 2.35 - nose, 1e-9);
+  EXPECT_NEAR(c1, 2.35 - (1.8 + tc::FOOTPRINT_WID / 2), 1e-9);
+  EXPECT_EQ(c2, 0.5);
+  EXPECT_EQ(c3, 0.0);
+  // along the path: the least over the robot and the next metre (heading along each segment)
+  Path path{V2(0, 0), V2(1.5, 0), V2(1.5, 3)};
+  double d0 = tc::drive_clearance(*win, path, V2(0.0, 0.0), 0.0, 1.0, 2.0);   // up to x 1.0: nose 1.06
+  double d1 = tc::drive_clearance(*win, path, V2(1.0, 0.0), 0.0, 1.0);    // to the corner, then up beside the wall
+  EXPECT_NEAR(d0, 2.35 - (1.0 + tc::FOOTPRINT_LEN / 2 - CFG.off), 1e-9);
+  EXPECT_NEAR(d1, std::min(2.35 - nose, 2.35 - (1.5 + tc::FOOTPRINT_WID / 2)), 1e-9);
+}
+
+TEST(SlowDown, ReachFromClearance) {
+  tc::SlowDown s;
+  EXPECT_EQ(tc::slow_reach(0.0, 2.1, s), s.reach_min);
+  EXPECT_EQ(tc::slow_reach(s.clear_slow, 2.1, s), s.reach_min);
+  EXPECT_EQ(tc::slow_reach(s.clear_full, 2.1, s), 2.1);
+  EXPECT_EQ(tc::slow_reach(1.0, 2.1, s), 2.1);
+  double mid = tc::slow_reach(0.5 * (s.clear_slow + s.clear_full), 2.1, s);
+  EXPECT_NEAR(mid, 0.5 * (s.reach_min + 2.1), 1e-12);
+  EXPECT_EQ(tc::slow_reach(0.0, 0.5, s), 0.5);   // never over the reach
+  s.on = false;
+  EXPECT_EQ(tc::slow_reach(0.0, 2.1, s), 2.1);
+}
+
+TEST(SlowDown, DriveChainSlowsThroughA090mDoorFullSpeedAway) {
+  Cloud fl = floor_(-5, 5, -5, 5);
+  Cloud dr = cat({w(0.0, -5.0, 0.0, -0.45), w(0.0, 0.45, 0.0, 5.0)});
+  Cloud cloud = cat({fl, dr});
+  tc::SlowDown sd;
+  std::vector<std::pair<V2, double>> tr_s, tr_f;
+  V2 s0(-3.5 + E, 1.2 + E), g(3.5 + E, -0.8 + E);
+  auto fast = drive_chain_rover(CFG, dr, cloud, s0, 0.0, g, 2.1, 1.0, 0.5, 1.0, FCB, 2.5, 1.0, 0.05, 0.3, 0.15, 4.0, 0.0,
+                                nullptr, nullptr, &tr_f);
+  auto slow = drive_chain_rover(CFG, dr, cloud, s0, 0.0, g, 2.1, 1.0, 0.5, 1.0, FCB, 2.5, 1.0, 0.05, 0.3, 0.15, 4.0, 0.0,
+                                nullptr, &sd, &tr_s);
+  // the speed with the frame in the door (the FC within half a frame length of the wall)
+  auto door_v = [](const std::vector<std::pair<V2, double>>& tr) {
+    double vm = 0;
+    for (auto& [fc, v] : tr)
+      if (std::abs(fc.x()) < tc::FOOTPRINT_LEN / 2) vm = std::max(vm, std::abs(v));
+    return vm;
+  };
+  double vf = door_v(tr_f), vs = door_v(tr_s);
+  EXPECT_TRUE(fast.reached && slow.reached && slow.worst == 0.0 && vs <= 0.6 && vf >= 0.8 && slow.vmax >= 0.9 &&
+              slow.t < fast.t + 6.0)
+      << "door v " << vs << " (without " << vf << "); vmax " << slow.vmax << " t " << slow.t << " (" << fast.t << ") worst "
+      << slow.worst << " " << slow.why << fast.why;
 }
 
 // ---- dead ends

@@ -56,7 +56,12 @@
 // ~runout_s (2.1) x ~drive_speed (the FC's WP_SPEED) of target on straights, and none at stop points
 // or while it turns. ~drive_lookahead on the bridge must cover it. ~drive_speed defaults to 1.0 and
 // is capped at 1.0 m/s, the robot's driving speed cap (owner 2026-10-29: WP_SPEED 1.0 on the robot);
-// a higher value is clamped with a warning.
+// a higher value is clamped with a warning. Near obstacles the run-out is shortened (l4_track::slow_reach,
+// 2026-10-30, after Gate L2 s8 passed the crate at 0.03 m at 1 m/s; SITL's skid-steer turns at a rate,
+// not a curvature, so its heading lag costs less distance when slower): the bare frame's clearance to
+// obstacle cells where the robot stands and on the next ~slow_ahead (1.0 m) of the path sets the reach,
+// ~slow_reach_min (0.8 m, ~0.4 m/s) at ~slow_clear (0.10 m) or less, the full run-out from
+// ~slow_clear_full (0.35 m); ~slow_down false turns it off.
 //
 // The map is the last ~window_s seconds of scans (l4_track::LiveWindow), not an ever-growing union:
 // z drift between visits and moved objects (people, doors) made whole maps block the robot's own
@@ -174,6 +179,14 @@ class TrackPlanner {
       drive_speed_ = MAX_DRIVE_SPEED;
     }
     runout_ = getd(pnh_, "runout_s", 2.1) * drive_speed_;
+    // the slow-down near obstacles (l4_track::slow_reach, 2026-10-30, Gate L2 s8): the run-out's reach
+    // from ~slow_clear_full (full) down to ~slow_reach_min at ~slow_clear (the bare frame's clearance to
+    // obstacle cells where the robot is and on the next ~slow_ahead m of the path); ~slow_down false: off
+    pnh_.param("slow_down", slow_.on, true);
+    slow_.clear_slow = getd(pnh_, "slow_clear", slow_.clear_slow);
+    slow_.clear_full = getd(pnh_, "slow_clear_full", slow_.clear_full);
+    slow_.reach_min = getd(pnh_, "slow_reach_min", slow_.reach_min);
+    slow_.ahead = getd(pnh_, "slow_ahead", slow_.ahead);
     cfg_.arc_reach = runout_;   // the arc check steers toward the node's own target
     // the FC (Rover's position) behind the odometry point, m: the FC sits at the frame centre (owner
     // 2026-10-29), so footprint_offset (the Python node had 0.178, an FC 0.015 m ahead of the centre)
@@ -200,6 +213,7 @@ class TrackPlanner {
   ros::NodeHandle nh_, pnh_;
   tc::Config cfg_;
   double pivot_lead_, drive_speed_, runout_, fc_behind_, reverse_speed_, accept_;
+  tc::SlowDown slow_;
   std::unique_ptr<tc::LiveWindow> win_;
   ros::Publisher pub_cmd_, pub_path_, pub_status_;
   ros::Subscriber sub_cloud_, sub_odom_, sub_goal_;
@@ -427,7 +441,10 @@ class TrackPlanner {
       auto f = tc::follow_plan(*cur_.path, cur_.pivots, p2, yaw_, cfg_, pivot_lead_);
       yaw = f.yaw;
       phase = f.phase;
-      c = tc::run_out(*cur_.path, cur_.pivots, p2, yaw_, f.c, f.phase, f.j, cfg_, runout_, fc_behind_, pivot_lead_,
+      double reach = runout_;
+      if (cur_.grid && slow_.on && f.phase != "pivot")
+        reach = tc::slow_reach(tc::drive_clearance(*cur_.grid, *cur_.path, p2, yaw_, slow_.ahead), runout_, slow_);
+      c = tc::run_out(*cur_.path, cur_.pivots, p2, yaw_, f.c, f.phase, f.j, cfg_, reach, fc_behind_, pivot_lead_,
                       cur_.grid.get())
               .first;
     }

@@ -69,7 +69,8 @@
 // The driving target (run_out). Rover Guided's fast-update path asks ~0.5 m/s per metre to its
 // target and steers like pure pursuit on it; the node runs the carrot out along its bearing (up to
 // ~2 s of WP_SPEED from the FC, frame-checked) on straights, and not at stop points or while the robot
-// turns.
+// turns. Near obstacles the node shortens it (slow_reach, 2026-10-30): ~0.4 m/s where the frame comes
+// within 0.10 m of an obstacle cell, here or on the next metre of the path, full speed from 0.35 m.
 //
 // LIMITS (recorded maps, 2026-10-28):
 // - obstacles lower than z_lo above the local ground are invisible: 0.30 m on whole maps, 0.15 m on
@@ -2174,6 +2175,66 @@ std::pair<V2, double> run_out(const Path& path, const std::vector<Pivot>& pivots
       break;
     }
   return {c + e * u, e};
+}
+
+// The drive slow-down near obstacles (owner request 2026-10-30). Gate L2 s8, leg 5: the robot passed the
+// crate at 0.03 m (s6 0.11, s7 0.14) at 1.0-1.1 m/s. The paths of those runs pass the crate's corner at
+// 0.04-0.10 m (exact geometry: the frame plus margin 0.05 is checked against obstacle cell centres; within
+// start_skip of each 10 Hz replan only the bare-frame arc check applies); in s8 the replans switched
+// route four times in 0.4 s beside it (a pivot of ~62 deg, at the pivot_angle threshold, moved and was
+// dropped), and the last route turned 18-35 deg off the robot's heading. SITL's skid-steer turns at
+// ~5-10 deg/s whatever its speed (s8: ~10 deg/s at 0.25 m/s and at 1 m/s), so its heading lags the path
+// for a distance proportional to its speed: at 1 m/s the lagging frame swept 0.03-0.07 m nearer the crate
+// than the plan. Slower near obstacles, the heading catches up in a shorter distance and each replan
+// moves the robot less. Rover's fast-update path sets the speed from the distance to its target (~0.5 m/s
+// per metre), so the node shortens the run-out: the FC-to-target reach goes from the full run-out at a
+// clearance of clear_full down to reach_min at clear_slow, the clearance being the bare frame's to the
+// obstacle cells where the robot stands and along the next `ahead` metres of the path (the robot slows
+// before the gap, not in it). WP_SPEED still caps the speed; the arc check's model (arc_steer 3 m, at
+// least the target's distance) does not change: a slower robot turns tighter than it assumes.
+double frame_clearance(const Window& win, const V2& p, double yaw, double cap) {
+  const Config& c = *win.cfg;
+  const double r = c.res, hl = FOOTPRINT_LEN / 2, hw = FOOTPRINT_WID / 2;
+  const double cs = std::cos(yaw), sn = std::sin(yaw);
+  const double fx = p.x() - c.off * cs, fy = p.y() - c.off * sn;
+  const int ci = int(std::floor((fy - win.lo.y()) / r)), cj = int(std::floor((fx - win.lo.x()) / r));
+  const int k = int(std::ceil((std::hypot(hl, hw) + cap) / r)) + 1;
+  double best = cap;
+  for (int di = -k; di <= k; ++di)
+    for (int dj = -k; dj <= k; ++dj) {
+      long ii = long(ci) + win.pad + di, jj = long(cj) + win.pad + dj;
+      if (ii < 0 || jj < 0 || ii >= win.bny || jj >= win.bnx) continue;
+      if (!win.occ_big[size_t(ii) * win.bnx + jj]) continue;
+      double dx = win.lo.x() + (cj + dj + 0.5) * r - fx, dy = win.lo.y() + (ci + di + 0.5) * r - fy;
+      double lon = std::max(std::abs(dx * cs + dy * sn) - hl, 0.0), lat = std::max(std::abs(-dx * sn + dy * cs) - hw, 0.0);
+      best = std::min(best, std::hypot(lon, lat));
+    }
+  return best;
+}
+
+double drive_clearance(const Window& win, const Path& path, const V2& pos, std::optional<double> yaw, double ahead,
+                       double cap) {
+  double best = cap;
+  if (yaw) best = std::min(best, frame_clearance(win, pos, *yaw, cap));
+  if (path.size() < 2 || ahead <= 0) return best;
+  const Path rest = remaining(path, pos);
+  const double step = win.cfg->res * 0.5;
+  double s = 0;
+  for (size_t k = 0; k + 1 < rest.size() && s < ahead; ++k) {
+    V2 a = rest[k], ab = rest[k + 1] - rest[k];
+    double L = norm2(ab);
+    if (L < 1e-9) continue;
+    double h = hd(ab);
+    for (double t = 0; t <= L + 1e-9 && s + t <= ahead + 1e-9; t += step) best = std::min(best, frame_clearance(win, a + ab * (t / L), h, cap));
+    s += L;
+  }
+  return best;
+}
+
+double slow_reach(double clear, double reach, const SlowDown& s) {
+  if (!s.on || reach <= s.reach_min) return reach;
+  double f = std::clamp((clear - s.clear_slow) / std::max(s.clear_full - s.clear_slow, 1e-6), 0.0, 1.0);
+  return s.reach_min + (reach - s.reach_min) * f;
 }
 
 Path densify(const Path& path, double step) {
