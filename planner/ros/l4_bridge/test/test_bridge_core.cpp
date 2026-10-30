@@ -348,6 +348,209 @@ TEST(Hold, AKnownPlannerDeadAfterAModeChange) {
   EXPECT_EQ(h.reason, PLANNER_DEAD);
 }
 
+TEST(Hold, SlamFrozenLatchesAheadOfEverythingUntilANewLeg) {
+  HoldLogic h(0.3, 0.2);
+  EXPECT_EQ(h.step(10.0, 9.99, 9.99, {}, true), "STREAM");
+  EXPECT_EQ(h.step(10.1, 10.09, 10.09, {}, true, true), "HOLD");
+  EXPECT_EQ(h.reason, SLAM_FROZEN);
+  EXPECT_TRUE(h.frozen);
+  // fresh commands, the pose moving again, even a dead planner: still SLAM_FROZEN, the first reason
+  for (double t : {10.5, 11.0, 12.0}) {
+    EXPECT_EQ(h.step(t, t - 0.01, t - 0.01, {"vehicle outside the geofence"}, false), "HOLD");
+    EXPECT_EQ(h.reason, SLAM_FROZEN);
+  }
+  h.new_leg();
+  EXPECT_FALSE(h.frozen);
+  EXPECT_EQ(h.step(12.1, 12.09, 12.09, {}, true, true), "HOLD");   // still frozen: again at once
+  EXPECT_EQ(h.reason, SLAM_FROZEN);
+  h.new_leg();
+  EXPECT_EQ(h.reason, "waiting for a fresh planner command");
+  EXPECT_EQ(h.step(12.2, 12.19, 12.19, {}, true), "STREAM");
+}
+
+// ---- a frozen SLAM pose (L2 faults 2b, 2d) -----------------------------------------------------------
+
+namespace {
+// FAST-LIO at 10 Hz from t0 for n frames: repeated (frozen) or with a 0.1 mm jitter (real FAST-LIO never
+// repeats: the smallest step in 4 recordings was 0.075 mm)
+void poses(FrozenPoseCheck& f, double t0, int n, bool repeat, const Vec3& twist = Vec3::Zero()) {
+  for (int i = 0; i < n; ++i) {
+    const Vec3 p = repeat ? Vec3(1, 2, 3) : Vec3(1 + 1e-4 * std::sin(0.7 * (t0 + i)), 2 + 1e-4 * std::cos(0.3 * i), 3);
+    f.on_pose(t0 + 0.1 * i, p, Quat{0, 0, 0.2, std::sqrt(1 - 0.04)}, twist);
+  }
+}
+// run the check at 50 Hz over [t0, t1) with an extra input per tick -> the first time it says frozen (the
+// poses are fed ahead: the newest is never older than max_age while they last)
+template <class F>
+std::optional<double> ticks(FrozenPoseCheck& f, double t0, double t1, F each) {
+  for (double t = t0; t < t1; t += 0.02) {
+    each(t);
+    if (f.check(t)) return t;
+  }
+  return std::nullopt;
+}
+}  // namespace
+
+TEST(Frozen, AMovingPoseIsNeverFrozen) {
+  FrozenPoseCheck f;
+  // poses and commands interleaved at 10 Hz / 50 Hz for 5 s, the vehicle commanded at 1 m/s
+  for (int i = 0; i < 50; ++i) {
+    const double t = 0.1 * i;
+    f.on_pose(t, Vec3(1e-4 * i, 0, 0), Quat{}, Vec3(1, 0, 0));
+    for (int k = 0; k < 5; ++k) {
+      f.on_command(t + 0.02 * k, 1.0);
+      f.on_gyro(t + 0.02 * k, 1.0);
+      EXPECT_FALSE(f.check(t + 0.02 * k));
+    }
+  }
+  EXPECT_EQ(f.repeats, 0);
+}
+
+TEST(Frozen, ARepeatWithoutEvidenceIsNotFrozen) {
+  // SITL's parked or hovering pose (f2: repeated runs up to 47 s): no command, a still IMU, no twist
+  FrozenPoseCheck f;
+  poses(f, 0.0, 100, true);
+  EXPECT_EQ(f.repeats, 99);
+  for (double t = 9.9; t < 9.99; t += 0.02) {
+    f.on_command(t, 0.1);   // under freeze_cmd_speed
+    f.on_gyro(t, 0.05);     // under freeze_gyro_min
+    EXPECT_FALSE(f.check(t));
+  }
+  EXPECT_EQ(f.evidence(9.95), "");
+}
+
+TEST(Frozen, RepeatedWhileCommandedIsFrozenAfterHoldS) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4);
+  poses(f, 0.0, 10, false);   // moving until 0.9
+  // frozen from 1.0 on: the pose of 0.9 repeated each 0.1 s, the bridge streaming 1 m/s at 50 Hz
+  std::optional<double> at;
+  for (int i = 0; i < 30 && !at; ++i) {
+    const double t = 1.0 + 0.1 * i;
+    f.on_pose(t, Vec3(1, 2, 3), Quat{}, Vec3::Zero());
+    if (i == 0) f.on_pose(t + 1e-3, Vec3(1, 2, 3), Quat{}, Vec3::Zero());   // a duplicate to start the run
+    for (int k = 0; k < 5 && !at; ++k) {
+      const double tk = t + 0.002 + 0.02 * k;
+      f.on_command(tk, 1.0);
+      if (auto e = f.check(tk)) {
+        at = tk;
+        EXPECT_EQ(*e, "command");
+      }
+    }
+  }
+  ASSERT_TRUE(at);
+  EXPECT_NEAR(*at, 1.0 + 0.8, 0.03);   // freeze_hold_s after the evidence began with the run
+}
+
+TEST(Frozen, DrivingWaitsDriveHoldS) {
+  // flying: hold_s 0.4; driving: drive_hold_s 0.8 (SITL's rover from rest)
+  FrozenPoseCheck f(1e-5, 1e-6, 0.4, 4, 0.2, 0.5, 0.2, 0.2, 0.25, 0.5, 0.8);
+  poses(f, 0.0, 80, true);
+  auto fly = ticks(f, 2.0, 4.0, [&](double t) { f.on_command(t, 1.0); });
+  ASSERT_TRUE(fly);
+  EXPECT_NEAR(*fly, 2.4, 0.03);
+  FrozenPoseCheck g(1e-5, 1e-6, 0.4, 4, 0.2, 0.5, 0.2, 0.2, 0.25, 0.5, 0.8);
+  poses(g, 0.0, 80, true);
+  std::optional<double> drv;
+  for (double t = 2.0; t < 4.0 && !drv; t += 0.02) {
+    g.on_drive_target(t, 2.0);
+    if (g.check(t, true)) drv = t;
+  }
+  ASSERT_TRUE(drv);
+  EXPECT_NEAR(*drv, 2.8, 0.03);
+}
+
+TEST(Frozen, NeedsMinNRepeats) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.1, 4);
+  f.on_command(0.0, 1.0);
+  f.on_pose(0.0, Vec3(1, 2, 3), Quat{}, Vec3::Zero());
+  f.on_pose(0.1, Vec3(1, 2, 3), Quat{}, Vec3::Zero());   // 1 repeat
+  f.on_command(0.2, 1.0);
+  EXPECT_FALSE(f.check(0.2));
+  EXPECT_FALSE(f.check(0.25));   // 0.1 s of evidence, but 1 repeat
+  for (int i = 2; i <= 4; ++i) f.on_pose(0.1 * i, Vec3(1, 2, 3), Quat{}, Vec3::Zero());
+  f.on_command(0.4, 1.0);
+  EXPECT_TRUE(f.check(0.4));
+}
+
+TEST(Frozen, NearIdenticalWithinEpsRepeatsAndARealStepDoesNot) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4);
+  f.on_pose(0.0, Vec3(1, 2, 3), Quat{0, 0, 0, 1}, Vec3::Zero());
+  f.on_pose(0.1, Vec3(1 + 5e-6, 2, 3), Quat{0, 0, 5e-7, 1}, Vec3::Zero());
+  EXPECT_EQ(f.repeats, 1);
+  f.on_pose(0.2, Vec3(1 + 5e-6 + 7.5e-5, 2, 3), Quat{0, 0, 5e-7, 1}, Vec3::Zero());   // the smallest real step
+  EXPECT_EQ(f.repeats, 0);
+  f.on_pose(0.3, Vec3(1 + 5e-6 + 7.5e-5, 2, 3), Quat{0, 0, 1.6e-5, 1}, Vec3::Zero());  // a real rotation step
+  EXPECT_EQ(f.repeats, 0);
+}
+
+TEST(Frozen, EvidenceMustLastWithoutABreak) {
+  // SITL's rover from rest: the carrot comes, the pose repeats until it moves; a short burst is not enough
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4);
+  poses(f, 0.0, 80, true);
+  EXPECT_FALSE(ticks(f, 2.9, 3.4, [&](double t) { f.on_drive_target(t, 2.0); }));   // 0.5 s commanded
+  EXPECT_FALSE(ticks(f, 3.4, 4.0, [&](double) {}));                                  // a break: no evidence
+  EXPECT_FALSE(f.evidence_from);
+  // a carrot too close to the vehicle (pivoting on the spot) is not evidence
+  EXPECT_FALSE(ticks(f, 4.0, 5.0, [&](double t) { f.on_drive_target(t, 0.3); }));
+  // from here a carrot 2 m ahead without a break: frozen 0.8 s later
+  auto at = ticks(f, 5.0, 7.0, [&](double t) { f.on_drive_target(t, 2.0); });
+  ASSERT_TRUE(at);
+  EXPECT_NEAR(*at, 5.8, 0.03);
+}
+
+TEST(Frozen, GyroAndTwistAreEvidenceAndAnOldGyroIsNot) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4, 0.2, 0.5, 0.2, 0.2, 0.25);
+  poses(f, 0.0, 80, true);
+  auto at = ticks(f, 2.9, 4.0, [&](double t) { f.on_gyro(t, 0.5); });
+  ASSERT_TRUE(at);
+  EXPECT_EQ(*f.check(*at), "gyro");
+  // the IMU stopped arriving: its last sample is not evidence after evidence_age
+  FrozenPoseCheck g(1e-5, 1e-6, 0.8, 4);
+  poses(g, 0.0, 80, true);
+  g.on_gyro(2.9, 1.0);
+  EXPECT_EQ(g.evidence(3.0), "gyro");
+  EXPECT_EQ(g.evidence(3.2), "");
+  // a pose that says it moves (its own twist) but repeats
+  FrozenPoseCheck h(1e-5, 1e-6, 0.8, 4);
+  poses(h, 0.0, 80, true, Vec3(0.5, 0, 0));
+  EXPECT_EQ(h.evidence(2.95), "twist");
+  EXPECT_TRUE(ticks(h, 2.9, 4.0, [&](double) {}));
+}
+
+TEST(Frozen, AStalledFcIsNotEvidence) {
+  // SITL stalled under load (fz13): MAVROS silent 0.6 s, the pose repeating with its last twist, the bridge
+  // still streaming the last command. The FC's IMU stream stopped with it: no evidence while it is stale
+  FrozenPoseCheck f(1e-5, 1e-6, 0.4, 4);
+  poses(f, 0.0, 80, true, Vec3(0.31, 0, 0));
+  f.on_gyro(2.0, 0.0);   // the last IMU sample before the stall
+  EXPECT_FALSE(ticks(f, 2.0, 2.8, [&](double t) { f.on_command(t, 1.0); }));
+  // the stream back (a burst), the pose still repeating: the evidence clock starts again from here
+  auto at = ticks(f, 2.8, 4.0, [&](double t) {
+    f.on_gyro(t, 0.0);
+    f.on_command(t, 1.0);
+  });
+  ASSERT_TRUE(at);
+  EXPECT_NEAR(*at, 3.2, 0.03);
+}
+
+TEST(Frozen, AStoppedFeedIsTheStaleHoldsNotThis) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4);
+  poses(f, 0.0, 30, true);   // the last pose at 2.9
+  EXPECT_FALSE(ticks(f, 3.5, 6.0, [&](double t) { f.on_command(t, 1.0); }));   // the newest pose older than max_age 0.5: none
+}
+
+TEST(Frozen, AMovingPoseEndsTheRun) {
+  FrozenPoseCheck f(1e-5, 1e-6, 0.8, 4);
+  poses(f, 0.0, 30, true);
+  ticks(f, 2.9, 3.3, [&](double t) { f.on_command(t, 1.0); });
+  EXPECT_TRUE(f.evidence_from);
+  f.on_pose(3.0, Vec3(1.001, 2, 3), Quat{0, 0, 0.2, std::sqrt(1 - 0.04)}, Vec3::Zero());
+  EXPECT_EQ(f.repeats, 0);
+  EXPECT_FALSE(f.run_start);
+  EXPECT_FALSE(f.evidence_from);
+  EXPECT_FALSE(f.check(3.01));
+}
+
 // ---- FcPose (the FC pose's freshness, owner decision 2026-10-28) ------------------------------------
 
 TEST(FcPose, NeverThenOk) {

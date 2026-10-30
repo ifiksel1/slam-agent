@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>l4_click</name>
+  <version>1.0.0</version>
+  <description>Click and run: clicks in a 3D view (Foxglove 3D panel publish tool) -> goals for the mission
+    executive's interactive mode (/mission_executive/goal), with a goal marker. Commands nothing on the
+    vehicle: the executive runs each goal with its own checks.</description>
+  <maintainer email="idan@revoluterobotics.com">idan</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>l4_common</depend>
+  <build_depend>eigen</build_depend>
+  <test_depend>rosunit</test_depend>
+</package>

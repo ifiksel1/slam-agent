@@ -466,7 +466,7 @@ void check(const std::string& name, bool ok, const std::string& detail = "") {
 std::string mission_file(const std::vector<ojson>& legs, ojson defaults = ojson::object()) {
   ojson d = {{"speed", 1.0}, {"accept_radius", 0.3}, {"leg_timeout_s", 30}, {"no_progress_s", 3}};
   for (auto it = defaults.begin(); it != defaults.end(); ++it) d[it.key()] = it.value();
-  std::string text = "name: test\nframe: fc\ntakeoff_height: 1.0\ndefaults: " + l4::dumps(d) + "\nlegs:\n";
+  std::string text = "name: test\nframe: fc\ntakeoff_height: 1.0\ndefaults: " + l4::dumps(d) + "\nlegs:" + std::string(legs.empty() ? " []\n" : "\n");   // none: interactive
   for (const auto& l : legs) text += "  - " + l4::dumps(l) + "\n";
   char path[] = "/tmp/l4_mission_XXXXXX.yaml";
   int fd = mkstemps(path, 5);
@@ -543,6 +543,10 @@ std::vector<std::string> run_executive(const std::vector<ojson>& legs, std::func
 
 const ojson dead_state = {{"state", "HOLD"}, {"reason", "planner_dead"}, {"slam_hold", false}, {"enabled", true},
                           {"planner_age", 0.41}, {"planner_node", "/fsm_node"}, {"planner_alive", false}};
+
+// the bridge's status after a frozen SLAM pose (FrozenPoseCheck): HOLD "slam_frozen", latched
+const ojson frozen_state = {{"state", "HOLD"}, {"reason", "slam_frozen"}, {"slam_hold", false}, {"enabled", true},
+                            {"slam_frozen", {{"repeats", 9}, {"for_s", 0.91}, {"evidence", "command"}, {"latched", true}}}};
 
 ojson fly(double x, double y, double z) { return {{"type", "fly"}, {"goal", {x, y, z}}}; }
 ojson drive(double x, double y) { return {{"type", "drive"}, {"goal", {x, y}}}; }
@@ -917,6 +921,77 @@ TEST_F(Executive, S17_PlannerDiesDriving) {
         "modes " + join(modes) + " drive goals " + std::to_string(W->drive_goals.size()) + " phases " + join(ph));
 }
 
+// 16b-17b. a frozen SLAM pose mid-leg (L2 faults 2b, 2d): the bridge reports HOLD "slam_frozen"; STOPPED "SLAM
+// pose frozen" at once, no next leg. In the air QRLAND (21: the FC's position follows the frozen pose, nothing
+// that holds a position can be trusted); on the ground GUIDED, bridge off. Never arms
+static std::function<void(double)> slam_freezes(double at_x, std::optional<double>& froze) {
+  return [at_x, &froze](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!froze && W->enabled && W->pos[0] > at_x) {
+      froze = wall();
+      W->bridge_state = frozen_state;
+    }
+  };
+}
+
+TEST_F(Executive, S16b_SlamFreezesFlying) {
+  std::optional<double> froze;
+  auto ph = run_executive({fly(4.0, 0.0, 1.0), fly(0.0, 2.0, 1.0)}, nullptr, slam_freezes(1.0, froze), 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}});
+  auto last = W->last_status();
+  auto dt = stopped_after(froze);
+  auto modes = W->modes();
+  check("SLAM freezes flying -> STOPPED 'SLAM pose frozen' at once",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "SLAM pose frozen" && dt && *dt < 2.0,
+        l4::dumps(last) + ", " + (dt ? std::to_string(*dt) : "None") + " s after");
+  std::lock_guard<std::mutex> g(W->m);
+  check("SLAM freezes flying -> no next leg, no UNREACHABLE", W->goals.size() == 1 && !contains(ph, "UNREACHABLE"),
+        "goals " + std::to_string(W->goals.size()) + " phases " + join(ph));
+  check("SLAM freezes flying -> QRLAND (21), bridge off, never arms",
+        modes == std::vector<int>{15, 21} && !W->enabled && W->forbidden.empty(), "modes " + join(modes));
+}
+
+TEST_F(Executive, S17b_SlamFreezesDriving) {
+  std::optional<double> froze;
+  auto ph = run_executive({drive(4.0, 0.0), drive(0.0, 1.0)}, nullptr, slam_freezes(1.0, froze), 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}});
+  auto last = W->last_status();
+  auto dt = stopped_after(froze);
+  auto modes = W->modes();
+  check("SLAM freezes driving -> STOPPED 'SLAM pose frozen' at once",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "SLAM pose frozen" && dt && *dt < 2.0,
+        l4::dumps(last) + ", " + (dt ? std::to_string(*dt) : "None") + " s after");
+  std::lock_guard<std::mutex> g(W->m);
+  check("SLAM freezes driving -> GUIDED only (no QR mode on the ground), bridge off, no next leg, no takeoff",
+        modes == std::vector<int>{15} && !W->enabled && W->drive_goals.size() == 1 && !contains(ph, "UNREACHABLE") &&
+            W->takeoff_calls.empty(),
+        "modes " + join(modes) + " drive goals " + std::to_string(W->drive_goals.size()) + " phases " + join(ph));
+}
+
+// 17c. a frozen pose reported while hovering at a waypoint (the executive's yaw settle): QRLAND too
+TEST_F(Executive, S17c_SlamFreezesAtAWaypoint) {
+  std::optional<double> froze;
+  bool armed_freeze = false;
+  auto ph = run_executive({fly(3.0, 0.0, 1.0), fly(3.0, 3.0, 1.0)}, nullptr,
+                          [&](double) {
+                            std::lock_guard<std::mutex> g(W->m);
+                            bool at_wp = false;
+                            for (const auto& s : W->status)
+                              if (l4::get(s, "phase") == "WAYPOINT_YAW") at_wp = true;
+                            if (!armed_freeze && at_wp) {
+                              armed_freeze = true;
+                              froze = wall();
+                              W->bridge_state = frozen_state;
+                            }
+                          },
+                          40);
+  auto last = W->last_status();
+  auto modes = W->modes();
+  check("SLAM freezes at a waypoint -> STOPPED 'SLAM pose frozen', QRLAND",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "SLAM pose frozen" && modes == std::vector<int>{15, 21},
+        l4::dumps(last) + " modes " + join(modes));
+}
+
 // 18. a planner_dead status from a bridge not enabled (left over from before the leg) is not acted on
 TEST_F(Executive, S18_PlannerDeadWhileBridgeOff) {
   {
@@ -1153,6 +1228,134 @@ TEST_F(Executive, S30_SeedCappedBelowTheCeiling) {
     if (l4::get(s, "phase") == "PLANNER_SEED" && l4::get(s, "capped") == true && l4::get(s, "ceiling_above") == 0.65)
       capped = true;
   check("reported: capped by the ceiling", capped);
+}
+
+// ---- interactive mode ("click and run", ~interactive true): goals on /mission_executive/goal -------------
+static ros::Publisher& goal_pub() {
+  static ros::NodeHandle nh;
+  static ros::Publisher p = nh.advertise<std_msgs::String>("/mission_executive/goal", 10);
+  return p;
+}
+static void send_goal(const ojson& g) {
+  std_msgs::String s;
+  s.data = l4::dumps(g);
+  goal_pub().publish(s);
+}
+// the executive's statuses with this phase (and goal number, when given)
+static int count_status(const char* phase, int goal = -1) {
+  std::lock_guard<std::mutex> g(W->m);
+  int n = 0;
+  for (const auto& s : W->status)
+    if (l4::get(s, "phase") == phase && (goal < 0 || l4::get(s, "goal") == goal)) ++n;
+  return n;
+}
+static const std::vector<std::string> INTERACTIVE = {"_interactive:=true"};
+
+// I1. drive, fly (with a yaw), drive again: the takeoff and the landing come from the goals; no DONE, no landing
+// at the end; GUIDED only; never arms
+TEST_F(Executive, I1_InteractiveDriveFlyDrive) {
+  goal_pub();
+  int sent = 0;
+  auto during = [&](double t) {
+    if (sent == 0 && t > 1.0) {
+      send_goal({{"type", "drive"}, {"goal", {2.0, 0.0}}});
+      sent = 1;
+    } else if (sent == 1 && count_status("REACHED", 1)) {
+      send_goal({{"type", "fly"}, {"goal", {2.0, 2.0, 1.0}}, {"yaw", 90}});
+      sent = 2;
+    } else if (sent == 2 && count_status("REACHED", 2)) {
+      send_goal({{"type", "drive"}, {"goal", {0.0, 2.0}}});
+      sent = 3;
+    }
+  };
+  auto ph = run_executive({}, nullptr, during, 45, true, ojson::object(), INTERACTIVE);
+  auto modes = W->modes();
+  check("interactive: three goals reached in turn", count_status("REACHED", 1) && count_status("REACHED", 2) && count_status("REACHED", 3),
+        join(ph));
+  check("interactive: never DONE or STOPPED, ends IDLE", !contains(ph, "DONE") && !contains(ph, "STOPPED") && last_is(ph, "IDLE"), join(ph));
+  check("interactive: the drive in the air lands first (landing check, NAV_LAND)", contains(ph, "LAND_CHECK") && contains(ph, "LAND"), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("interactive: one takeoff, for the fly goal", W->takeoff_calls.size() == 1, std::to_string(W->takeoff_calls.size()));
+  check("interactive: the fly goal's yaw held at its end", W->yaw_at_land && ang(*W->yaw_at_land, M_PI) < 0.2,
+        W->yaw_at_land ? std::to_string(deg(*W->yaw_at_land)) : "no landing");   // over the spot it faces the drive west
+  check("interactive: on the ground at the end", W->pos[2] < 0.05 && (W->pos.head<2>() - Eigen::Vector2d(0.0, 2.0)).norm() < 0.5,
+        vstr(W->pos));
+  check("interactive: GUIDED only", modes == std::vector<int>{15}, join(modes));
+  check("interactive: never arms or touches parameters", W->forbidden.empty(), join(W->forbidden));
+  check("interactive: bridge never in the wrong mode", W->mode_mismatch == 0, std::to_string(W->mode_mismatch));
+}
+
+// I2. a new goal mid-leg replaces the running one, in the air and on the ground
+TEST_F(Executive, I2_InteractiveGoalReplaced) {
+  goal_pub();
+  int sent = 0;
+  auto during = [&](double t) {
+    Vec3 pos;
+    {
+      std::lock_guard<std::mutex> g(W->m);
+      pos = W->pos;
+    }
+    if (sent == 0 && t > 1.0) {
+      send_goal({{"type", "drive"}, {"goal", {5.0, 0.0}}});
+      sent = 1;
+    } else if (sent == 1 && pos[0] > 1.0) {
+      send_goal({{"type", "drive"}, {"goal", {1.5, 1.5}}});   // replaces the drive mid-leg
+      sent = 2;
+    } else if (sent == 2 && count_status("REACHED", 2)) {
+      send_goal({{"type", "fly"}, {"goal", {5.0, 1.5, 1.0}}});
+      sent = 3;
+    } else if (sent == 3 && pos[0] > 2.8 && pos[2] > 0.5) {
+      send_goal({{"type", "fly"}, {"goal", {3.0, 3.5, 1.0}}});   // replaces the fly goal mid-leg
+      sent = 4;
+    }
+  };
+  auto ph = run_executive({}, nullptr, during, 45, true, ojson::object(), INTERACTIVE);
+  check("interactive: the replaced drive and fly goals end PREEMPTED", count_status("PREEMPTED", 1) == 1 && count_status("PREEMPTED", 3) == 1,
+        join(ph));
+  check("interactive: the replacing goals are reached", count_status("REACHED", 2) && count_status("REACHED", 4), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("interactive: never went on to the replaced goals", W->pos[0] < 4.0 && (W->pos - Vec3(3.0, 3.5, 1.0)).norm() < 0.5, vstr(W->pos));
+  check("interactive: replaced: never arms", W->forbidden.empty(), join(W->forbidden));
+}
+
+// I3. unreachable goals: on the ground no QR mode, in the air QRLOITER then GUIDED; the next goal still runs;
+// a malformed goal is rejected
+TEST_F(Executive, I3_InteractiveUnreachableThenNext) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->block = {0, 2};   // the first drive goal and the first fly goal (the track planner and SUPER count together)
+  }
+  goal_pub();
+  int sent = 0;
+  auto during = [&](double t) {
+    if (sent == 0 && t > 1.0) {
+      send_goal({{"type", "land"}, {"at", {1.0, 1.0}}});   // not an interactive goal
+      send_goal({{"type", "drive"}, {"goal", {3.0, 0.0}}});
+      sent = 1;
+    } else if (sent == 1 && count_status("UNREACHABLE", 1)) {
+      send_goal({{"type", "drive"}, {"goal", {0.0, 1.0}}});
+      sent = 2;
+    } else if (sent == 2 && count_status("REACHED", 2)) {
+      send_goal({{"type", "fly"}, {"goal", {0.0, 4.0, 1.0}}});
+      sent = 3;
+    } else if (sent == 3 && count_status("UNREACHABLE", 3) && count_status("IDLE") >= 4) {
+      send_goal({{"type", "fly"}, {"goal", {1.0, 1.0, 1.0}}});
+      sent = 4;
+    }
+  };
+  auto ph = run_executive({}, nullptr, during, 50, true, ojson::object(), INTERACTIVE);
+  bool rejected = false;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& s : W->status)
+      if (l4::get(s, "goal_rejected").is_string()) rejected = true;
+  }
+  check("interactive: a land goal is rejected", rejected);
+  check("interactive: unreachable drive, then the next goal reached", count_status("UNREACHABLE", 1) && count_status("REACHED", 2), join(ph));
+  check("interactive: unreachable fly, then the next goal reached", count_status("UNREACHABLE", 3) && count_status("REACHED", 4), join(ph));
+  auto modes = W->modes();
+  check("interactive: QRLOITER only in the air (GUIDED, QRLOITER, GUIDED)", modes == std::vector<int>{15, 19, 15}, join(modes));
+  check("interactive: unreachable: never STOPPED", !contains(ph, "STOPPED"), join(ph));
 }
 
 int main(int argc, char** argv) {

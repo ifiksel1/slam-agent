@@ -42,6 +42,12 @@
 //     ground: GUIDED, bridge off (its last target, the zero-speed stop, stays Rover's)
 //   * bridge HOLD for a SLAM reset or an anchor jump -> stop sending goals, wait for the bridge to report
 //     OK plus ~map_rebuild_s, re-convert the goal with the new anchor and resend it (D7)
+//   * the SLAM pose froze (L2 faults 2b, 2d, 2026-10-30): the bridge reports HOLD "slam_frozen" (FAST-LIO's
+//     pose repeated while the vehicle moves or is made to move; the EKF follows the frozen pose, so the FC's
+//     position is not known) -> the mission stops at once, STOPPED "SLAM pose frozen". In the air:
+//     ~slam_frozen_flight_mode (QRLAND; QRLOITER and QRSMARTRTL hold or retrace a position the EKF no longer
+//     has, GUIDED would hover on it). On the ground: GUIDED, bridge off (its last target, the zero-speed
+//     stop, stays Rover's). Watched during legs and waypoint hovers
 //   * on the ground (driving) nothing is held in QRLOITER: entering a QR mode armed on the ground starts
 //     QuadRover's drive-to-fly transition (props spool up). There an unreachable drive goal, a refused
 //     takeoff or a stop leaves the vehicle in GUIDED with the bridge disabled
@@ -104,6 +110,25 @@
 // been silent ~planner_stuck_s (3 s; "planner_age") with the goal sent at least that long ago: re-seed, send
 // the goal again, the no-progress clock restarted; at most ~planner_stuck_max (2) times a leg.
 //
+// Interactive mode (~interactive true, "click and run", 2026-10-30): no legs from the file (its defaults, name
+// and takeoff_height are used), goals one at a time from /mission_executive/goal (std_msgs/String, JSON, fc
+// frame): {"type": "drive", "goal": [x, y]} or {"type": "fly", "goal": [x, y, z], "yaw": deg (optional)},
+// filled with the file's defaults and checked like a mission leg (a bad one: "goal_rejected" in the status).
+// After /mission_executive/start it waits in GUIDED (IDLE) for a goal; each goal gets a number ("goal").
+//   drive  on the ground: a drive leg. In the air: a land leg where the vehicle is (fly there, face the goal,
+//          settle, the landing check, NAV_LAND), then the drive leg
+//   fly    on the ground: the bridge off, the takeoff (~takeoff_height of the file, the same standstill
+//          rule), then the fly leg; at the goal the waypoint yaw (the goal's "yaw", or the yaw it has) and a
+//          hover holding it until the next goal. From a hover the next fly leg first faces its goal
+// A goal that comes while one runs replaces it (PREEMPTED) at the next check: during a fly / drive leg, a
+// waypoint hover or the landing check; not during a takeoff or a landing descent (taken right after). Ends:
+// REACHED, then IDLE. Unreachable (the same no-progress / timeout tests), a refused takeoff, a landing spot
+// not reported clear, a yaw that did not settle: UNREACHABLE / REFUSED, in the air QRLOITER for
+// ~unreachable_hold_s then GUIDED (bridge off), on the ground GUIDED with the bridge off; then IDLE. The FC
+// leaving GUIDED, a dead planner, a frozen SLAM pose, a takeoff that did not complete and a bridge that
+// did not switch stop for good (STOPPED), as in a mission. Nothing ends with a landing: the vehicle hovers
+// or stands until the next goal.
+//
 // One difference from the Python node: a MAVROS service that cannot be called (MAVROS gone) counts as a
 // refused command here (success false); the Python node raised ServiceException and died (RESULTS.md 7c).
 #include <atomic>
@@ -128,6 +153,7 @@
 #include <std_msgs/Float64.h>
 #include <std_msgs/String.h>
 #include <std_srvs/Trigger.h>
+#include <yaml-cpp/yaml.h>
 
 #include <l4_common/params.h>
 #include <l4_common/pyjson.h>
@@ -138,6 +164,9 @@ namespace l4_executive {
 
 using Vec3 = Eigen::Vector3d;
 using Why = std::optional<std::string>;
+
+// interactive: a newer goal replaced the running one
+const char* const PREEMPTED = "preempted by a new goal";
 
 bool starts_with(const std::string& s, const std::string& p) { return s.rfind(p, 0) == 0; }
 
@@ -171,6 +200,9 @@ class MissionExecutive {
     std::string path;
     if (!pnh_.getParam("mission", path)) throw std::invalid_argument("~mission is required");
     mission_ = load_mission(path);
+    mission_path_ = path;
+    // interactive ("click and run"): goals from /mission_executive/goal, not the file's legs
+    interactive_ = l4::param_bool(pnh_, "interactive", false);
     on_unreachable_ = l4::param_string(pnh_, "on_unreachable", "next");
     unreachable_hold_s_ = l4::param_double(pnh_, "unreachable_hold_s", 5.0);
     map_rebuild_s_ = l4::param_double(pnh_, "map_rebuild_s", 3.0);
@@ -206,6 +238,10 @@ class MissionExecutive {
     // the seed at most this far below the bridge's local ceiling ("ceiling_above"): SUPER's inflation (0.5 m)
     // and a cell
     seed_ceiling_clear_ = l4::param_double(pnh_, "seed_ceiling_clear", 0.6);
+    // the mode for a frozen SLAM pose in the air (D5: QRLAND, QRLOITER, QRSMARTRTL or GUIDED)
+    frozen_flight_mode_ = l4::param_string(pnh_, "slam_frozen_flight_mode", "QRLAND");
+    if (!allowed_mode(frozen_flight_mode_))
+      throw std::invalid_argument("~slam_frozen_flight_mode: D5 allows GUIDED, QRLOITER, QRLAND, QRSMARTRTL only");
     bridge_ = {{"state", "OK"}, {"slam_ok", true}};
     bridge_ok_since_ = now();
 
@@ -230,6 +266,7 @@ class MissionExecutive {
     yaw_pub_ = nh_.advertise<std_msgs::Float64>("/planner_bridge/yaw_cmd", 1, true);
     publish_yaw(std::nullopt);
     start_srv_ = nh_.advertiseService("/mission_executive/start", &MissionExecutive::on_start, this);
+    if (interactive_) subs_.push_back(nh_.subscribe("/mission_executive/goal", 10, &MissionExecutive::on_goal, this));
     cmd_ = nh_.serviceClient<mavros_msgs::CommandLong>("/mavros/cmd/command");
     takeoff_srv_ = nh_.serviceClient<mavros_msgs::CommandTOL>("/mavros/cmd/takeoff");
     land_srv_ = nh_.serviceClient<mavros_msgs::CommandTOL>("/mavros/cmd/land");
@@ -298,6 +335,46 @@ class MissionExecutive {
     if (l4::get(s, "state") == "DRIVING" && l4::get(s, "reason") == "new goal") track_goals_ += 1;
   }
 
+  // interactive: a goal (JSON, fc frame) checked and filled like a mission leg; it replaces any pending one
+  void on_goal(const std_msgs::String::ConstPtr& m) {
+    const l4::ojson g = l4::loads(m->data);
+    std::string err;
+    l4::ojson leg;
+    if (g.is_discarded() || !g.is_object()) {
+      err = "not a JSON object";
+    } else if (!(l4::get(g, "type") == "fly" || l4::get(g, "type") == "drive")) {
+      err = "an interactive goal is a fly or a drive";
+    } else {
+      try {
+        // the file's defaults, the goal as its only leg: the mission file's own checks
+        l4::ojson doc = yaml_to_json(YAML::LoadFile(mission_path_));
+        doc["legs"] = l4::ojson::array({g});
+        leg = load_mission_text(l4::dumps(doc), mission_path_).legs.at(0);
+      } catch (const std::exception& e) {
+        err = e.what();
+      }
+    }
+    if (!err.empty()) {
+      report({{"goal_rejected", err}});
+      return;
+    }
+    int id;
+    {
+      std::lock_guard<std::mutex> lk(lock_);
+      id = ++goal_seq_;
+      leg["goal_id"] = id;
+      pending_ = leg;
+    }
+    report({{"goal_received", id}, {"type", leg["type"]}, {"goal_fc", leg["goal"]}, {"yaw", l4::get(leg, "yaw")}});
+  }
+
+  // interactive: a newer goal is waiting (the running one ends PREEMPTED)
+  bool preempted() {
+    if (!interactive_) return false;
+    std::lock_guard<std::mutex> lk(lock_);
+    return pending_.has_value();
+  }
+
   bool on_start(std_srvs::Trigger::Request&, std_srvs::Trigger::Response& res) {
     std::optional<mavros_msgs::State> st;
     {
@@ -359,6 +436,18 @@ class MissionExecutive {
     const auto m = mode_number(st->mode);
     if (our_mode_ && m != modes().at(*our_mode_)) return "FC mode changed to " + st->mode;
     return std::nullopt;
+  }
+
+  // the bridge (enabled for this leg) reports a frozen SLAM pose: the mission ends (the caller lands or stops)
+  Why slam_frozen(int idx) {
+    l4::ojson bridge;
+    {
+      std::lock_guard<std::mutex> g(lock_);
+      bridge = bridge_;
+    }
+    if (l4::get(bridge, "reason") != "slam_frozen" || !l4::truthy(l4::get(bridge, "enabled", true))) return std::nullopt;
+    report({{"phase", "LEG"}, {"leg", idx}, {"slam_frozen", l4::get(bridge, "slam_frozen", true)}, {"flying", flying_}});
+    return std::string(SLAM_FROZE);
   }
 
   void publish_enable(bool on) {
@@ -511,6 +600,8 @@ class MissionExecutive {
   Why land(const l4::ojson& leg, int idx);
   Why waypoint(int idx, std::optional<double> yaw, const std::string& why);
   Why scan(const l4::ojson& leg, int idx);
+  void run_interactive();
+  Why interactive_goal(const l4::ojson& leg, int n, bool& hovering);
   void stop(const std::string& why) {
     bridge_enable(false);
     report({{"phase", "STOPPED"}, {"reason", why}});
@@ -520,6 +611,7 @@ class MissionExecutive {
   void publish_yaw(std::optional<double> yaw) {
     std_msgs::Float64 f;
     f.data = yaw ? *yaw : std::numeric_limits<double>::quiet_NaN();
+    yaw_held_ = yaw.has_value();
     yaw_pub_.publish(f);
   }
 
@@ -583,7 +675,15 @@ class MissionExecutive {
   double yaw_settle_s_, yaw_settle_rate_, yaw_settle_speed_, yaw_tol_, waypoint_min_dist_, scan_rate_;
   double seed_dz_, seed_s_, stuck_s_, seed_ceiling_clear_;
   int stuck_max_;
+  std::string frozen_flight_mode_;
   ros::Publisher yaw_pub_;
+  // interactive ("click and run")
+  std::string mission_path_;
+  bool interactive_ = false;
+  std::optional<l4::ojson> pending_;   // the newest goal not yet taken (under lock_)
+  int goal_seq_ = 0;                   // goals received (under lock_)
+  bool face_first_ = false;            // the next fly leg faces its goal first (from a hover)
+  bool yaw_held_ = false;              // a waypoint yaw is out to the bridge
 
   std::mutex lock_;   // the inputs, written by the callbacks
   std::optional<mavros_msgs::State> state_;
@@ -704,7 +804,10 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
   const auto here0 = pose_copy();
   const Vec3 leg_start = here0 ? *here0 : target;
   bool turned = false;
-  if (!drive && flying_ && !streaming_) {
+  // interactive: also from a hover (the bridge holding a waypoint yaw), whose next goal is new
+  const bool face_first = face_first_;
+  face_first_ = false;
+  if (!drive && flying_ && (!streaming_ || face_first)) {
     // a flight leg with the bridge not streaming yet (after a takeoff, or after a QRLOITER): the waypoint at
     // its start (owner 2026-10-29: the robot yaws only at waypoints). Face the leg, hovering, before it
     // starts (Gate L2 b5, leg 7: off the ground facing the drive, the nose turned 100 deg in flight)
@@ -735,6 +838,7 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
                leg_timeout_s = num(leg["leg_timeout_s"]);
   while (!shutdown()) {
     if (auto lost = fc_lost()) return lost;
+    if (preempted()) return std::string(PREEMPTED);
     std::optional<Vec3> pos;
     l4::ojson bridge, track;
     double ok_since;
@@ -746,6 +850,8 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
       track = track_goals_ > goals_before ? track_ : l4::ojson::object();
     }
     const double t = now();
+    // the SLAM pose froze: the leg and mission end (land in the air, stop on the ground)
+    if (auto fz = slam_frozen(idx)) return fz;
     // the planner died (a status from the bridge enabled for this leg): the leg and mission end
     if (l4::get(bridge, "reason") == "planner_dead" && l4::truthy(l4::get(bridge, "enabled", true))) {
       report({{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"planner_dead", true},
@@ -838,6 +944,7 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   std::optional<bool> clear;
   int answers = 0;
   while (now() - t0 < landing_check_s_) {
+    if (preempted()) return std::string(PREEMPTED);   // interactive: before NAV_LAND only
     if (now() - last_spot >= 0.2) {
       spot.header.stamp = ros::Time::now();
       spot_pub_.publish(spot);
@@ -905,6 +1012,8 @@ Why MissionExecutive::waypoint(int idx, std::optional<double> yaw, const std::st
   const double t0 = now();
   while (!shutdown() && now() - t0 < yaw_settle_s_) {
     if (auto lost = fc_lost()) return lost;
+    if (auto fz = slam_frozen(idx)) return fz;
+    if (preempted()) return std::string(PREEMPTED);
     {
       std::lock_guard<std::mutex> g(lock_);
       if (pose_ && yaw_) w.add(now(), *pose_, *yaw_);
@@ -952,6 +1061,7 @@ Why MissionExecutive::scan(const l4::ojson& leg, int idx) {
 }
 
 void MissionExecutive::run() {
+  if (interactive_) return run_interactive();
   ros::Rate rate(10);
   report({{"phase", "WAIT_ARMED"}, {"mission", mission_.name}, {"legs", mission_.legs.size()}});
   while (!shutdown() && !started_) rate.sleep();
@@ -1030,6 +1140,13 @@ void MissionExecutive::run() {
       set_mode("QRLOITER");
       return stop(w);
     }
+    if (w == SLAM_FROZE) {
+      // the FC's position follows the frozen pose: in the air ~slam_frozen_flight_mode (QRLAND: down, and done
+      // with the position soonest); on the ground GUIDED with the bridge off (the bridge's zero-speed stop is
+      // Rover's last target; a QR mode there would spool the props)
+      if (flying_) set_mode(frozen_flight_mode_);
+      return stop(w);
+    }
     if (w == PLANNER_DIED) {
       // owner 2026-10-29: just stop, never the next leg. In the air QRLOITER (the bridge has held since
       // the death; set_mode turns it off just before the mode command, as on every QRLOITER); on the
@@ -1057,6 +1174,128 @@ void MissionExecutive::run() {
   }
   bridge_enable(false);
   report({{"phase", "DONE"}});
+}
+
+// interactive: one goal (a filled leg, fc frame); none when reached. hovering: set when a fly goal ends in
+// its waypoint hover
+Why MissionExecutive::interactive_goal(const l4::ojson& leg, int n, bool& hovering) {
+  const std::string type = leg["type"].get<std::string>();
+  const double gx = num(leg["goal"][0]), gy = num(leg["goal"][1]);
+  Why why;
+  if (type == "fly") {
+    if (!flying_) {
+      // off the ground: the bridge off (Rover Guided brakes on its last target), then the takeoff's standstill
+      // rule; a drive cut short by this goal is not left streaming toward its old goal
+      bridge_enable(false);
+      why = takeoff(mission_.takeoff_height);
+    }
+    if (!why) why = go(leg, n, Vec3(gx, gy, num(leg["goal"][2])), false);
+    // at the goal: its yaw (or the yaw it has), hover holding it until the next goal
+    if (!why) why = waypoint(n, leg_yaw(leg), "goal");
+    if (!why) hovering = true;
+    return why;
+  }
+  // drive: in the air, land where the vehicle is first (the landing check decides), facing the goal
+  if (flying_) {
+    const auto p = pose_copy();
+    if (!p) return std::string("no FC pose");
+    l4::ojson land_leg = leg;
+    land_leg["type"] = "land";
+    land_leg["at"] = l4::ojson::array({l4::py_round((*p)[0], 3), l4::py_round((*p)[1], 3)});
+    report({{"phase", "GOAL"}, {"goal", n}, {"landing_first", land_leg["at"]}});
+    why = go(land_leg, n, Vec3((*p)[0], (*p)[1], (*p)[2]), false);
+    if (!why) why = waypoint(n, heading_to(gx, gy), "landing");
+    if (!why) why = land(land_leg, n);
+    if (why) return why;
+  }
+  const auto p = pose_copy();
+  return go(leg, n, Vec3(gx, gy, p ? (*p)[2] : 0.0), true);
+}
+
+void MissionExecutive::run_interactive() {
+  ros::Rate rate(10);
+  report({{"phase", "WAIT_ARMED"}, {"mission", mission_.name}, {"interactive", true}});
+  while (!shutdown() && !started_) rate.sleep();
+  if (shutdown()) return;
+  if (!set_mode("GUIDED")) return stop("could not enter GUIDED");
+  flying_ = false;
+  bool hovering = false;   // a fly goal reached: hovering on its waypoint
+  int last = 0;
+  while (!shutdown()) {
+    report({{"phase", "IDLE"}, {"flying", flying_}, {"hovering", hovering}});
+    std::optional<l4::ojson> leg;
+    while (!shutdown()) {
+      if (auto lost = fc_lost()) return stop(*lost);
+      if (hovering) {
+        if (auto fz = slam_frozen(last)) {   // the hover's position is the EKF's: as in a leg
+          set_mode(frozen_flight_mode_);
+          return stop(*fz);
+        }
+      }
+      {
+        std::lock_guard<std::mutex> g(lock_);
+        if (pending_) {
+          leg = *pending_;
+          pending_.reset();
+        }
+      }
+      if (leg) break;
+      sleep(0.1);
+    }
+    if (!leg) return;
+    const int n = (*leg)["goal_id"].get<int>();
+    last = n;
+    face_first_ = flying_ && (hovering || yaw_held_);
+    hovering = false;
+    report({{"phase", "GOAL"}, {"goal", n}, {"type", (*leg)["type"]}, {"goal_fc", (*leg)["goal"]}, {"flying", flying_}});
+    const Why why = interactive_goal(*leg, n, hovering);
+    if (!why) {
+      report({{"phase", "REACHED"}, {"goal", n}, {"flying", flying_}});
+      continue;
+    }
+    const std::string& w = *why;
+    if (w == PREEMPTED) {
+      report({{"phase", "PREEMPTED"}, {"goal", n}});
+      continue;
+    }
+    if (starts_with(w, "FC ") || starts_with(w, "FC link")) return stop(w);   // the FC's failsafe owns the vehicle
+    if (w == "shutdown") return;
+    if (w == SLAM_FROZE) {
+      if (flying_) set_mode(frozen_flight_mode_);
+      return stop(w);
+    }
+    if (w == PLANNER_DIED) {
+      if (flying_) set_mode("QRLOITER");
+      return stop(w);
+    }
+    if (w == "takeoff refused" || w == NOT_STATIONARY) {
+      // on the ground in GUIDED (a QR mode there starts the drive-to-fly transition): bridge off, next goal
+      bridge_enable(false);
+      report({{"phase", "REFUSED"}, {"goal", n}, {"reason", w}, {"on_ground", true}});
+      continue;
+    }
+    if (starts_with(w, "takeoff")) {   // started and did not complete
+      set_mode("QRLOITER");
+      return stop(w);
+    }
+    if (starts_with(w, "bridge")) {
+      if (flying_) set_mode("QRLOITER");
+      return stop(w);
+    }
+    const bool refused = w == "landing spot not reported clear" || w == "yaw did not settle" || w == "landing refused";
+    const std::string phase = refused ? "REFUSED" : "UNREACHABLE";
+    if (!flying_) {
+      bridge_enable(false);
+      report({{"phase", phase}, {"goal", n}, {"reason", w}, {"on_ground", true}});
+      continue;
+    }
+    // in the air: QRLOITER for ~unreachable_hold_s, then GUIDED (bridge off) and the next goal
+    report({{"phase", phase}, {"goal", n}, {"reason", w}});
+    set_mode("QRLOITER");
+    sleep(unreachable_hold_s_);
+    if (auto lost = fc_lost()) return stop(*lost);
+    if (!set_mode("GUIDED")) return stop("could not re-enter GUIDED after " + w);
+  }
 }
 
 }  // namespace l4_executive

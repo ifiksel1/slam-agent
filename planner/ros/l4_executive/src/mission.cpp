@@ -13,6 +13,7 @@ namespace l4_executive {
 
 const char* const NOT_STATIONARY = "not stationary before takeoff";
 const char* const PLANNER_DIED = "planner died";
+const char* const SLAM_FROZE = "SLAM pose frozen";
 
 const std::map<std::string, int>& modes() {
   static const std::map<std::string, int> m = {

@@ -1,0 +1,228 @@
+{
+ "configById": {
+  "3D!clickrun": {
+   "cameraState": {
+    "distance": 26,
+    "perspective": true,
+    "phi": 25,
+    "thetaOffset": 0,
+    "targetOffset": [
+     -2.5,
+     0,
+     0
+    ],
+    "target": [
+     0,
+     0,
+     0
+    ],
+    "targetOrientation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "fovy": 45,
+    "near": 0.5,
+    "far": 5000
+   },
+   "followMode": "follow-none",
+   "followTf": "world",
+   "scene": {
+    "enableStats": false,
+    "backgroundColor": "#10161a",
+    "transforms": {
+     "showLabel": false,
+     "axisScale": 0.6
+    }
+   },
+   "transforms": {
+    "frame:drone": {
+     "visible": true
+    },
+    "frame:world": {
+     "visible": true
+    }
+   },
+   "topics": {
+    "/map_low": {
+     "visible": true,
+     "pointSize": 3,
+     "colorMode": "colormap",
+     "colorField": "z",
+     "colorMap": "turbo",
+     "decayTime": 0
+    },
+    "/map": {
+     "visible": false,
+     "pointSize": 2,
+     "colorMode": "colormap",
+     "colorField": "z",
+     "colorMap": "turbo",
+     "decayTime": 0
+    },
+    "/planner/cloud": {
+     "visible": true,
+     "pointSize": 2,
+     "colorMode": "flat",
+     "flatColor": "#ffffff88"
+    },
+    "/robot/body": {
+     "visible": true
+    },
+    "/click_and_run/goal_marker": {
+     "visible": true
+    },
+    "/track_planner/path": {
+     "visible": true,
+     "type": "line",
+     "lineWidth": 0.08,
+     "gradient": [
+      "#00e5ffff",
+      "#00e5ffff"
+     ]
+    },
+    "/planning/drive_goal": {
+     "visible": true,
+     "type": "arrow",
+     "arrowScale": [
+      0.6,
+      0.15,
+      0.15
+     ],
+     "color": "#00e5ffff"
+    },
+    "/planning/click_goal": {
+     "visible": true,
+     "type": "arrow",
+     "arrowScale": [
+      0.6,
+      0.15,
+      0.15
+     ],
+     "color": "#ffcc00ff"
+    },
+    "/fsm_node/visualization/exp_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/backup_traj": {
+     "visible": false
+    },
+    "/fsm_node/visualization/committed_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/goal": {
+     "visible": false
+    },
+    "/planner/landing_markers": {
+     "visible": true
+    },
+    "/planner/odom": {
+     "visible": false
+    }
+   },
+   "layers": {
+    "grid": {
+     "visible": true,
+     "frameId": "world",
+     "size": 40,
+     "divisions": 40,
+     "lineWidth": 0.5,
+     "color": "#ffffff22",
+     "position": [
+      0,
+      0,
+      0
+     ],
+     "rotation": [
+      0,
+      0,
+      0
+     ],
+     "order": 1,
+     "layerId": "foxglove.Grid"
+    }
+   },
+   "publish": {
+    "type": "point",
+    "pointTopic": "/click_and_run/drive",
+    "poseTopic": "/click_and_run/fly",
+    "poseEstimateTopic": "/click_and_run/pose_estimate",
+    "poseEstimateXDeviation": 0.5,
+    "poseEstimateYDeviation": 0.5,
+    "poseEstimateThetaDeviation": 0.26179939
+   }
+  },
+  "RawMessages!clickstatus": {
+   "topicPath": "/click_and_run/status",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "RawMessages!exec": {
+   "topicPath": "/mission_executive/status",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "StateTransitions!mode": {
+   "paths": [
+    {
+     "value": "/planner_bridge/mode.data",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/mavros/state.mode",
+     "timestampMethod": "receiveTime"
+    }
+   ],
+   "isSynced": true,
+   "xAxisRange": 120
+  },
+  "Plot!height": {
+   "title": "FC height, bridge mode",
+   "paths": [
+    {
+     "value": "/mavros/local_position/pose.pose.position.z",
+     "enabled": true,
+     "label": "FC height (m, fc frame)",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/planner_bridge/mode_code.data",
+     "enabled": true,
+     "label": "bridge mode (0 off, 1 flight, 2 drive)",
+     "timestampMethod": "receiveTime"
+    }
+   ],
+   "showLegend": true,
+   "legendDisplay": "top",
+   "xAxisVal": "timestamp",
+   "followingViewWidth": 120
+  }
+ },
+ "globalVariables": {},
+ "userNodes": {},
+ "playbackConfig": {
+  "speed": 1
+ },
+ "layout": {
+  "direction": "row",
+  "first": "3D!clickrun",
+  "second": {
+   "direction": "column",
+   "first": "RawMessages!clickstatus",
+   "second": {
+    "direction": "column",
+    "first": "RawMessages!exec",
+    "second": {
+     "direction": "column",
+     "first": "StateTransitions!mode",
+     "second": "Plot!height",
+     "splitPercentage": 45
+    },
+    "splitPercentage": 45
+   },
+   "splitPercentage": 22
+  },
+  "splitPercentage": 70
+ }
+}

@@ -2,6 +2,9 @@
   <!-- flight yaw (owner rule 2026-10-29): the bridge with ~flight_yaw travel (the default) -->
   <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
     <param name="speed_cap" value="1.0"/>
+    <!-- the synthetic feed repeats one SLAM pose while SUPER commands motion: the frozen-pose signature
+         (its own test: bridge_frozen_node.test) -->
+    <param name="freeze_enable" value="false"/>
     <!-- the FC's yaw is fixed here, off the travel direction: these cases check SUPER's command streamed as
          it is; the turn slowdown has its own test (turn_slow_node.test) -->
     <param name="turn_slow_enable" value="false"/>

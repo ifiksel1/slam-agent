@@ -10,6 +10,7 @@
 namespace l4_bridge {
 
 const char* const PLANNER_DEAD = "planner_dead";
+const char* const SLAM_FROZEN = "slam_frozen";
 
 std::string fmt(const char* f, ...) {
   char buf[512];
@@ -250,6 +251,73 @@ std::string FcPoseGuard::check(double now) {
   return stale ? "stale" : "ok";
 }
 
+// ---- FrozenPoseCheck ------------------------------------------------------------------------------
+
+FrozenPoseCheck::FrozenPoseCheck(double eps_m_, double eps_q_, double hold_s_, int min_n_, double cmd_speed_,
+                                 double drive_dist_, double gyro_min_, double twist_min_, double evidence_age_,
+                                 double max_age_, double drive_hold_s_)
+    : eps_m(eps_m_), eps_q(eps_q_), hold_s(hold_s_), min_n(std::max(1, min_n_)), cmd_speed(cmd_speed_),
+      drive_dist(drive_dist_), gyro_min(gyro_min_), twist_min(twist_min_), evidence_age(evidence_age_), max_age(max_age_),
+      drive_hold_s(drive_hold_s_) {}
+
+void FrozenPoseCheck::on_pose(double t, const Vec3& p, const Quat& q, const Vec3& twist) {
+  bool same = false;
+  if (last_) {
+    const Quat& a = last_->second;
+    same = (p - last_->first).norm() <= eps_m && std::abs(q.x - a.x) <= eps_q && std::abs(q.y - a.y) <= eps_q &&
+           std::abs(q.z - a.z) <= eps_q && std::abs(q.w - a.w) <= eps_q;
+  }
+  if (same) {
+    if (repeats == 0) run_start = t_pose;
+    repeats += 1;
+  } else {
+    repeats = 0;
+    run_start.reset();
+    evidence_from.reset();
+  }
+  last_ = std::make_pair(p, q);
+  twist_ = twist.norm();
+  t_pose = t;
+}
+
+void FrozenPoseCheck::on_command(double t, double speed) {
+  if (speed >= cmd_speed) t_cmd_move_ = t;
+}
+
+void FrozenPoseCheck::on_drive_target(double t, double dist) {
+  if (dist >= drive_dist) t_cmd_move_ = t;
+}
+
+void FrozenPoseCheck::on_gyro(double t, double rate) {
+  t_gyro_ = t;
+  gyro_ = rate;
+}
+
+std::string FrozenPoseCheck::evidence(double now) const {
+  std::string e;
+  auto add = [&e](const char* k) { e += (e.empty() ? "" : "+") + std::string(k); };
+  if (t_cmd_move_ && now - *t_cmd_move_ <= evidence_age) add("command");
+  if (t_gyro_ && now - *t_gyro_ <= evidence_age && gyro_ >= gyro_min) add("gyro");
+  if (repeats > 0 && twist_ >= twist_min) add("twist");
+  return e;
+}
+
+std::optional<std::string> FrozenPoseCheck::check(double now, bool driving) {
+  if (repeats == 0 || !t_pose || now - *t_pose > max_age) {
+    evidence_from.reset();
+    return std::nullopt;
+  }
+  const bool fc_alive = !t_gyro_ || now - *t_gyro_ <= evidence_age;
+  const std::string e = fc_alive ? evidence(now) : std::string();
+  if (e.empty()) {
+    evidence_from.reset();   // the evidence must last without a break
+    return std::nullopt;
+  }
+  if (!evidence_from) evidence_from = now;
+  if (repeats >= min_n && now - *evidence_from >= (driving ? drive_hold_s : hold_s)) return e;
+  return std::nullopt;
+}
+
 // ---- HoldLogic ------------------------------------------------------------------------------------
 
 HoldLogic::HoldLogic(double planner_timeout_, double slam_timeout_)
@@ -262,7 +330,8 @@ void HoldLogic::latch(const std::string& r, double now) {
 
 void HoldLogic::new_leg() {
   dead = false;
-  if (state == "HOLD" && reason == PLANNER_DEAD) reason = "waiting for a fresh planner command";
+  frozen = false;
+  if (state == "HOLD" && (reason == PLANNER_DEAD || reason == SLAM_FROZEN)) reason = "waiting for a fresh planner command";
 }
 
 void HoldLogic::hold(const std::string& r, double now) {
@@ -272,7 +341,13 @@ void HoldLogic::hold(const std::string& r, double now) {
 }
 
 std::string HoldLogic::step(double now, std::optional<double> t_cmd, std::optional<double> t_slam,
-                            const std::vector<std::string>& faults, std::optional<bool> planner_alive) {
+                            const std::vector<std::string>& faults, std::optional<bool> planner_alive,
+                            bool slam_frozen) {
+  if (slam_frozen) frozen = true;
+  if (frozen) {
+    hold(SLAM_FROZEN, now);
+    return state;
+  }
   if (planner_alive.has_value() && !*planner_alive && (!t_cmd || now - *t_cmd > planner_timeout)) dead = true;
   if (dead) {
     hold(PLANNER_DEAD, now);

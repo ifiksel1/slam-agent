@@ -1,0 +1,121 @@
+Proposed (NOT deployed, 2026-10-30): frozen-pose check in the SLAM-to-FC bridge
+(overrides/FAST-LIO/src/fastlio_mavros_bridge.py, the node that publishes /mavros/vision_pose/pose).
+
+Why: L2 faults 2b/2d (planner/sim/faults/RESULTS.md, note 1). FAST-LIO stuck on its last pose,
+republished with fresh stamps, passes every freshness check; the FC's EKF fuses it and the vehicle
+flies off (f22: 8.4 m/s, 45 m, ground strikes) or drives off (f24: 2.0 m/s). The planner bridge now
+detects it during missions (HOLD "slam_frozen" -> executive QRLAND / stop), but a manual flight has
+no planner bridge: the check belongs before the FC too.
+
+What: ~frozen_min_n (5) raw /Odometry poses in a row that repeat (within ~frozen_eps_m 1e-5 m and
+~frozen_eps_q 1e-6 per quaternion component) -> stop publishing vision pose AND vision speed, log +
+STATUSTEXT "SLAM frozen: vision stopped". The FC then loses vision and its own vision timeout / EKF
+failsafe takes over (FS_EKF_ACTION; note RESULTS.md note 2: QuadRover's EKF failsafe in flight is
+QRALTHOLD). A pose that moves again resumes publishing; the frozen poses are not fed to the frame
+tracker, so the resume looks like a gap and re-anchors onto the EKF (enable_reanchor), as after a
+laserMapping restart.
+Evidence: a real FAST-LIO pose never repeats (4 recordings, ~9200 consecutive pairs: bench parked
+with motors off, flight replays; smallest step 0.075 mm / 1.5e-5 per quaternion component), so on
+the robot no motion evidence is required (~frozen_require_motion false). SITL repeats the pose exactly
+while parked; planner/sim/bridge_params.yaml sets ~frozen_require_motion true (the FC IMU gyro must
+turn at ~frozen_gyro_min 0.2 rad/s during the repeats).
+Language: the node is still Python (the live one); this is a minimal change to it. A C++ port is a
+separate task (owner rule: robot software in C++).
+Deploy (owner): apply to overrides/FAST-LIO/src/, scripts/apply_overrides.sh apply, restart the
+bridge node on the robot (bind-mount note: restart the container). Not done here.
+
+Apply: git apply overrides/FAST-LIO/proposed/fastlio_mavros_bridge_frozen_pose.diff
+
+--- a/overrides/FAST-LIO/src/fastlio_mavros_bridge.py
++++ b/overrides/FAST-LIO/src/fastlio_mavros_bridge.py
+@@ -28,6 +28,7 @@
+ import math
+ from nav_msgs.msg import Odometry
+ from geometry_msgs.msg import PoseStamped, Vector3Stamped
++from sensor_msgs.msg import Imu
+ from tf.transformations import (quaternion_multiply, quaternion_conjugate,
+                                 quaternion_from_matrix, quaternion_from_euler)
+ 
+@@ -140,6 +141,29 @@
+         self.ekf_flags = None
+         self.ekf_flags_rx = 0.0
+ 
++        # FROZEN POSE (L2 faults 2b/2d, 2026-10-30; the log 218/233 class). FAST-LIO stuck on its last
++        # pose, republished with fresh stamps, passes every freshness check, and the FC's EKF fuses it:
++        # in SITL the vehicle flew off at 8.4 m/s (45 m, ground strikes) and drove off at 2.0 m/s. A real
++        # FAST-LIO pose never repeats frame to frame (4 recordings, ~9200 consecutive pairs, bench parked
++        # with the motors off and flight replays: smallest step 0.075 mm / 1.5e-5 per quaternion
++        # component), so ~frozen_min_n repeats in a row (within ~frozen_eps_m / ~frozen_eps_q) is the
++        # stuck output: STOP PUBLISHING vision pose and speed, so the FC's own vision timeout and EKF
++        # failsafe take over instead of a frozen position. A pose that moves again resumes; the freeze
++        # counts as a gap (the frame tracker does not see the frozen poses), so the first pose after it
++        # re-anchors onto the EKF (enable_reanchor) like a laserMapping restart. 0 turns it off.
++        # ~frozen_require_motion: also require the FC's IMU (/mavros/imu/data, the raw gyro) to turn at
++        # ~frozen_gyro_min during the repeats. Off on the robot (no false repeats exist there); on in SITL,
++        # whose pose repeats exactly while the vehicle is parked.
++        self.frozen_min_n = int(rospy.get_param('~frozen_min_n', 5))
++        self.frozen_eps_m = float(rospy.get_param('~frozen_eps_m', 1e-5))
++        self.frozen_eps_q = float(rospy.get_param('~frozen_eps_q', 1e-6))
++        self.frozen_require_motion = bool(rospy.get_param('~frozen_require_motion', False))
++        self.frozen_gyro_min = float(rospy.get_param('~frozen_gyro_min', 0.2))
++        self.frozen_last = None        # the previous raw pose (x, y, z, qx, qy, qz, qw)
++        self.frozen_repeats = 0        # repeats in a row
++        self.frozen_moving = False     # the FC IMU turned at frozen_gyro_min during this run of repeats
++        self.frozen = False            # vision stopped
++
+         # Velocity: forward FAST-LIO's world-frame EKF velocity (now populated in
+         # /Odometry.twist.twist.linear, see laserMapping.cpp) to ArduPilot as
+         # VISION_SPEED_ESTIMATE. mavros listens on /mavros/vision_speed/speed_vector
+@@ -161,6 +185,8 @@
+         self.vision_pub = rospy.Publisher('/mavros/vision_pose/pose', PoseStamped, queue_size=50)
+         self.vel_pub = rospy.Publisher('/mavros/vision_speed/speed_vector', Vector3Stamped, queue_size=50)
+         self.odom_sub = rospy.Subscriber(self.odom_topic, Odometry, self.odometry_callback)
++        if self.frozen_min_n > 0 and self.frozen_require_motion:
++            rospy.Subscriber('/mavros/imu/data', Imu, self.imu_callback, queue_size=50)
+         self.st_pub = None
+         if self.enable_reanchor and _HAVE_MAVROS:
+             rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.ekf_pose_callback, queue_size=20)
+@@ -177,9 +203,43 @@
+         if self.publish_velocity:
+             rospy.loginfo("Publishing vision speed to /mavros/vision_speed/speed_vector")
+ 
++    def imu_callback(self, msg):
++        w = msg.angular_velocity
++        if self.frozen_repeats > 0 and math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z) >= self.frozen_gyro_min:
++            self.frozen_moving = True
++
++    def frozen_check(self, odom_msg):
++        """True while the pose is frozen (vision must not go out). Counts repeated raw poses."""
++        if self.frozen_min_n <= 0:
++            return False
++        p, q = odom_msg.pose.pose.position, odom_msg.pose.pose.orientation
++        cur = (p.x, p.y, p.z, q.x, q.y, q.z, q.w)
++        last, self.frozen_last = self.frozen_last, cur
++        same = (last is not None
++                and math.sqrt(sum((a - b) ** 2 for a, b in zip(cur[:3], last[:3]))) <= self.frozen_eps_m
++                and all(abs(a - b) <= self.frozen_eps_q for a, b in zip(cur[3:], last[3:])))
++        if not same:
++            self.frozen_repeats = 0
++            self.frozen_moving = False
++            if self.frozen:
++                self.frozen = False
++                rospy.logwarn("SLAM pose moving again: vision resumed (re-anchors as after a gap)")
++                self.send_statustext("SLAM moving again: vision resumed")
++            return False
++        self.frozen_repeats += 1
++        if not self.frozen and self.frozen_repeats >= self.frozen_min_n and (
++                self.frozen_moving or not self.frozen_require_motion):
++            self.frozen = True
++            rospy.logerr("SLAM pose frozen (%d repeats): vision pose and speed STOPPED, the FC's failsafe takes over",
++                         self.frozen_repeats)
++            self.send_statustext("SLAM frozen: vision stopped")
++        return self.frozen
++
+     def odometry_callback(self, odom_msg):
+         """Publish FAST-LIO odometry as MAVROS vision pose, keeping the original timestamp."""
+         try:
++            if self.frozen_check(odom_msg):
++                return   # nothing to the FC (and nothing to the frame tracker: the freeze is a gap)
+             pose_msg = PoseStamped()
+             # System-time stamp (mavros-timesynced to FC), not the sensor's internal clock.
+             pose_msg.header.stamp = rospy.Time.now() if self.restamp_system_time else odom_msg.header.stamp

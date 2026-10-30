@@ -11,6 +11,10 @@ Runs inside an L2 run's ROS container (see closed_loop.sh), after SUPER and the 
    pilot arms, D5) and calls /mission_executive/start.
 4. Waits for the executive's DONE or STOPPED, then lands in SITL (QRLAND) and disarms.
 
+A mission file with `interactive: true` (missions/interactive.yaml, click_and_run/click_and_run.sh) starts the
+executive in its interactive mode (_interactive:=true: goals from /mission_executive/goal, no legs); it never
+says DONE, so this waits until STOPPED, the executive exits or timeout_s.
+
 usage: fly_mission.py <mission_map_frame.yaml> [timeout_s]
 """
 import json
@@ -96,6 +100,8 @@ if os.environ.get("BRIDGE_IMPL", "cpp") == "py":
     EXEC_CMD = ["python3", "-u", "/planner/mission_executive.py"]
 else:
     EXEC_CMD = [os.environ.get("EXEC_BIN", "/ws_bx/install/lib/l4_executive/mission_executive")]
+if doc.get("interactive"):
+    EXEC_CMD.append("_interactive:=true")   # click and run: goals from /mission_executive/goal
 ex = subprocess.Popen(EXEC_CMD + ["__name:=mission_executive", "_mission:=" + OUT, "_on_unreachable:=next"],
                       stdout=open("/run/logs/executive.log", "w"), stderr=subprocess.STDOUT)
 rospy.wait_for_service("/mission_executive/start", 60)

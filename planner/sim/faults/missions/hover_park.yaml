@@ -1,0 +1,26 @@
+# No false frozen-pose trigger (faults/cases.sh hover_park): example_hp_drive_fly.yaml with a 30 s hover at
+# its second waypoint (after the waypoint yaw settles; the bridge holds the point, zero velocity) and 20 s
+# parked after the drive (the bridge holding, the rover stopped or circling its last target). SITL's pose
+# repeats exactly while the vehicle stands still, so the planner bridge's frozen-pose check must stay quiet
+# here (no "slam_frozen", mission DONE as the baseline).
+name: hover_park
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [0.11, -4.46, 1.30], hold_s: 30}            # hover 30 s at the waypoint
+  - {type: fly, goal: [-0.28, -7.61, 1.30]}
+  - {type: fly, goal: [-2.29, -9.57, 1.30]}
+  - {type: land, at: [-6.00, -9.00]}
+  - {type: drive, goal: [-1.70, -8.60], speed: 0.5, accept_radius: 0.4, hold_s: 20}   # parked 20 s after it
+  - {type: takeoff, height: 1.30}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: land, at: [-0.20, -3.20]}

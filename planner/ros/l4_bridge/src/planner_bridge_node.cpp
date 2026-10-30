@@ -22,6 +22,7 @@
 //       ~drive_cmd_topic                      the track planner's carrot (/track_planner/pos_cmd,
 //                                             PositionCommand, position + yaw), used in drive mode
 //       /fastlio_health, ~range_topic         optional SLAM health (off when absent)
+//       /mavros/imu/data                      the FC's IMU (angular rate): the frozen-pose check's evidence
 // Out:  /planner/odom, /planner/cloud         planner frame, for SUPER and ROG-Map
 //       /mavros/setpoint_raw/local            mavros_msgs/PositionTarget, 50 Hz, fc frame
 //       /planner_bridge/anchor                geometry_msgs/TransformStamped, fc <- planner
@@ -154,6 +155,26 @@
 // or no recent scan. The executive keeps SUPER's re-seed goal SUPER's inflation below it.
 // A flight HOLD holds the vehicle's position when the hold began (zero velocity): it never climbs, whatever
 // SUPER's last command was (k1: 1.046 m and 1.334 m held flat through both of SUPER's silences).
+//
+// A frozen SLAM pose (L2 faults 2b, 2d, 2026-10-28: FAST-LIO's last pose repeated with fresh stamps; the
+// receive-time SLAM check and the FC-pose check both passed, the EKF fused the frozen pose and the FC flew
+// off at up to 8.4 m/s, 45 m, and drove off at 2.0 m/s, 12.7 m). bridge_core FrozenPoseCheck: the raw
+// /Odometry pose repeated (within ~freeze_eps_m 1e-5 m and ~freeze_eps_q 1e-6 per quaternion component; a
+// real FAST-LIO pose never repeats, SITL's does while parked) at least ~freeze_min_n (4) times in a row,
+// while there is evidence that the vehicle moves or is made to move, without a break for ~freeze_hold_s
+// (0.4 s; driving ~freeze_drive_hold_s 0.8 s: SITL's parked rover repeats its pose until it moves): this bridge
+// streaming a flight target that asks the FC for at least ~freeze_cmd_speed (0.2 m/s: the feed-forward plus
+// ~fc_pos_p times the lead to the target) or a drive target at least ~freeze_drive_dist (0.5 m) from the
+// vehicle (a reverse at ~freeze_cmd_speed), the FC IMU's angular rate (/mavros/imu/data) at least ~freeze_gyro_min (0.2 rad/s), or the repeated /Odometry's own
+// twist at least ~freeze_twist_min (0.2 m/s). Then HOLD with reason "slam_frozen", latched (HoldLogic):
+//   * flight: the usual HOLD at the FC position (zero velocity); the mission executive switches to QRLAND
+//     (D5) and stops the mission: nothing that holds a position can be trusted with a frozen pose;
+//   * drive: the zero-speed velocity + heading stop of a dead planner, at the heading the rover has; the
+//     executive stops the mission in GUIDED;
+//   * only a new leg (the executive enabling the bridge again) clears it, and it latches again at once while
+//     the pose is still frozen. ~freeze_enable false turns the check off.
+// Status: "slam_frozen" {"repeats", "for_s", "evidence"} while a repeat run lasts (null otherwise); "slam_hold"
+// stays false (the executive does not wait it out as a SLAM reset: it lands or stops).
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -168,6 +189,7 @@
 #include <nav_msgs/Odometry.h>
 #include <quadrotor_msgs/PositionCommand.h>
 #include <ros/ros.h>
+#include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/Range.h>
 #include <std_msgs/Bool.h>
@@ -251,6 +273,14 @@ class PlannerBridge {
     health_ = HealthCheck(l4::param_double(pnh_, "health_matched_min", 150.0), l4::param_double(pnh_, "health_eig_min", 5000.0),
                           l4::param_double(pnh_, "health_latency_max_ms", 250.0), l4::param_double(pnh_, "height_tol", 0.5));
     health_on_ = l4::param_bool(pnh_, "health_enable", false);
+    // a frozen SLAM pose (L2 faults 2b, 2d): repeated poses with evidence of motion -> HOLD "slam_frozen"
+    freeze_on_ = l4::param_bool(pnh_, "freeze_enable", true);
+    freeze_ = FrozenPoseCheck(l4::param_double(pnh_, "freeze_eps_m", 1e-5), l4::param_double(pnh_, "freeze_eps_q", 1e-6),
+                              l4::param_double(pnh_, "freeze_hold_s", 0.4), l4::param_int(pnh_, "freeze_min_n", 4),
+                              l4::param_double(pnh_, "freeze_cmd_speed", 0.2), l4::param_double(pnh_, "freeze_drive_dist", 0.5),
+                              l4::param_double(pnh_, "freeze_gyro_min", 0.2),
+                              l4::param_double(pnh_, "freeze_twist_min", 0.2), l4::param_double(pnh_, "freeze_evidence_age", 0.25),
+                              0.5, l4::param_double(pnh_, "freeze_drive_hold_s", 0.8));
     // flight yaw (owner rule 2026-10-29): "travel" points the nose along the commanded velocity while it
     // is above ~yaw_speed_min and holds the yaw (or the executive's waypoint yaw) when slower, rate-limited
     // to ~yaw_rate_max_deg; "planner" passes SUPER's yaw through (the Python bridge's behaviour)
@@ -305,6 +335,7 @@ class PlannerBridge {
         l4::param_string(pnh_, "drive_cmd_topic", "/track_planner/pos_cmd"), 20,
         boost::function<void(const ros::MessageEvent<const quadrotor_msgs::PositionCommand>&)>(
             [this](const ros::MessageEvent<const quadrotor_msgs::PositionCommand>& e) { on_cmd(e, "drive"); })));
+    if (freeze_on_) subs_.push_back(nh_.subscribe("/mavros/imu/data", 20, &PlannerBridge::on_imu, this));
     if (health_on_) {
       subs_.push_back(nh_.subscribe("/fastlio_health", 10, &PlannerBridge::on_health, this));
       subs_.push_back(nh_.subscribe(l4::param_string(pnh_, "range_topic", "/mavros/rangefinder/rangefinder"), 10,
@@ -332,6 +363,7 @@ class PlannerBridge {
     const Vec3 v = raw_to_planner_pos(vec(m->twist.twist.linear));   // FAST-LIO twist is world-frame
     last_planner_ = std::make_pair(p, q);
     t_slam_ = now();
+    freeze_.on_pose(*t_slam_, p, q, v);
     nav_msgs::Odometry o;
     o.header.stamp = m->header.stamp;
     o.header.frame_id = "world";
@@ -405,6 +437,9 @@ class PlannerBridge {
   }
 
   void on_state(const mavros_msgs::State::ConstPtr& m) { fc_mode_ = m->mode; }
+
+  // the FC's IMU: its angular rate is the frozen-pose check's evidence (raw gyro, not the EKF's attitude)
+  void on_imu(const sensor_msgs::Imu::ConstPtr& m) { freeze_.on_gyro(now(), vec(m->angular_velocity).norm()); }
 
   void on_enable(const std_msgs::Bool::ConstPtr& m) {
     if (m->data && !enabled_) {
@@ -535,7 +570,11 @@ class PlannerBridge {
     else if (fc == "stale") faults.insert(faults.begin(), "fc_pose_stale");   // the reason to report: first
     const auto node = liveness_.node(mode);
     liveness_.want(node);
-    const std::string state = hold_.step(t_now, t_cmd_, t_slam_, faults, liveness_.alive(node));
+    const auto frozen = freeze_on_ ? freeze_.check(t_now, mode == "drive") : std::nullopt;
+    if (frozen && !hold_.frozen)
+      ROS_ERROR("planner bridge: SLAM pose frozen (%d repeats over %.2f s, evidence %s): HOLD slam_frozen", freeze_.repeats,
+                t_now - *freeze_.run_start, frozen->c_str());
+    const std::string state = hold_.step(t_now, t_cmd_, t_slam_, faults, liveness_.alive(node), frozen.has_value());
     if (fc_mode_ != guided_mode_ || !enabled_ || fc == "never") {
       hold_point_.reset();
       yaw_out_.reset();
@@ -554,11 +593,14 @@ class PlannerBridge {
       if (mode == "drive") {
         auto rs = reverse_speed(target->p, target->v, target->yaw, p_now);
         if (rs) {
+          freeze_.on_command(t_now, *rs);
           send_reverse(*rs, target->yaw);
           return;
         }
         reversing_.reset();
-        send(drive_target(target->p, target->v, p_now, drive_lookahead_), nullptr, nullptr, target->yaw, MASK_DRIVE);
+        const Vec3 goal = drive_target(target->p, target->v, p_now, drive_lookahead_);
+        freeze_.on_drive_target(t_now, (goal - p_now).head<2>().norm());
+        send(goal, nullptr, nullptr, target->yaw, MASK_DRIVE);
       } else if (yaw_cmd_) {
         // the waypoint hold: not SUPER's command, a fixed point (the reached goal, or the vehicle when the
         // hold began), capped like any target, zero velocity, turning to the waypoint yaw
@@ -585,18 +627,20 @@ class PlannerBridge {
         // the turn slowdown: SUPER's reference replayed at the speed the heading error allows, capped at it
         const Replay r = replay(*anchor, yaw_now);
         auto c = cap_command(r.p, r.v, r.a, p_now, r.cap, max_lead_, fc_pos_p_);
+        freeze_.on_command(t_now, fc_demand(c.p, c.v, p_now));
         send(c.p, &c.v, &c.a, flight_yaw(r.yaw, travel_yaw(r.v_ref, yaw_speed_min_), yaw_now), MASK_FLIGHT);
       } else {
         auto c = cap_command(target->p, target->v, target->a, p_now, speed_cap_, max_lead_, fc_pos_p_);
+        freeze_.on_command(t_now, fc_demand(c.p, c.v, p_now));
         send(c.p, &c.v, &c.a, flight_yaw(target->yaw, travel_yaw(target->v, yaw_speed_min_), yaw_now), MASK_FLIGHT);
       }
       return;
     }
     if (mode == "drive") {
-      if (hold_.dead) {
-        // the planner died: stop where the rover is, now. A zero-speed velocity + heading target (the
-        // reverse HOLD's), the heading the rover has at the death, so it neither drives on to the last
-        // (run-out) target nor pivots
+      if (hold_.dead || hold_.frozen) {
+        // the planner died, or the SLAM pose froze: stop where the rover is, now. A zero-speed velocity +
+        // heading target (the reverse HOLD's), the heading the rover has at the fault, so it neither drives
+        // on to the last (run-out) target nor pivots
         if (!stop_yaw_) stop_yaw_ = yaw_now;
         send_reverse(0.0, *stop_yaw_);
         return;
@@ -677,6 +721,13 @@ class PlannerBridge {
                   anchor.yaw(s.yaw), cap};
   }
 
+  // the horizontal speed a flight target asks of the FC: its feed-forward plus ~fc_pos_p times the lead (a
+  // frozen pose keeps the target ahead of the frozen FC position: the cap then trades the feed-forward for
+  // the lead, SITL fz5: velocity 0, lead 1 m, the FC still flying 1-1.9 m/s)
+  double fc_demand(const Vec3& p, const Vec3& v, const Vec3& p_now) const {
+    return (v + fc_pos_p_ * (p - p_now)).head<2>().norm();
+  }
+
   // back up at speed (m/s, >= 0) holding yaw (fc frame, ENU): MAVROS turns the ENU velocity (0, -speed)
   // into NED vx = -speed, which Rover Guided reads as reverse (speed_dir -1); at 0 a zero-speed heading hold
   void send_reverse(double speed, double yaw) {
@@ -745,6 +796,17 @@ class PlannerBridge {
     s["planner_node"] = node ? l4::ojson(*node) : l4::ojson(nullptr);
     s["planner_alive"] = alive ? l4::ojson(*alive) : l4::ojson(nullptr);
     s["fc_pose"] = fc_guard_.check(t_now);
+    // a repeated SLAM pose (the frozen-pose check): how many in a row, for how long, the evidence now
+    if (freeze_on_ && freeze_.repeats > 0 && freeze_.run_start) {
+      l4::ojson fz;
+      fz["repeats"] = freeze_.repeats;
+      fz["for_s"] = l4::py_round(t_now - *freeze_.run_start, 3);
+      fz["evidence"] = freeze_.evidence(t_now);
+      fz["latched"] = hold_.frozen;
+      s["slam_frozen"] = fz;
+    } else {
+      s["slam_frozen"] = hold_.frozen ? l4::ojson{{"latched", true}} : l4::ojson(nullptr);
+    }
     s["fc_pose_age"] = age(fc_guard_.t);
     s["speed_cap"] = speed_cap_;
     const auto& a = tracker_.anchor;
@@ -804,7 +866,8 @@ class PlannerBridge {
   FcPoseGuard fc_guard_;
   AnchorTracker tracker_;
   HealthCheck health_;
-  bool health_on_ = false, enabled_ = false;
+  FrozenPoseCheck freeze_;
+  bool health_on_ = false, enabled_ = false, freeze_on_ = true;
 
   std::optional<double> t_cmd_;
   std::optional<Cmd> cmd_;                              // planner frame

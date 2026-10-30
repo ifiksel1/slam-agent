@@ -1,0 +1,7 @@
+# Click and run (planner/sim/click_and_run/): the L2 closed-loop image plus the Foxglove WebSocket bridge (ROS 1)
+# and socat (relays the bridge's port out of the run's network-less namespace through a unix socket).
+# A new tag; l4-sim-l2:latest is left as it is.
+# Build (Shannon):  docker build -t l4-sim-l2:foxglove -f Dockerfile.foxglove .
+FROM l4-sim-l2:latest
+RUN apt-get update && apt-get install -y --no-install-recommends ros-noetic-foxglove-bridge socat \
+    && rm -rf /var/lib/apt/lists/*

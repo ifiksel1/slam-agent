@@ -141,6 +141,70 @@ class FcPoseGuard {
   int fresh_n = 0;
 };
 
+// ---- a frozen SLAM pose (L2 faults 2b, 2d: FAST-LIO stuck, its last pose repeated with fresh stamps) ----
+// The receive-time SLAM check and the FC-pose check both pass on a frozen pose (fresh stamps, and the
+// EKF follows the frozen vision pose), and the FC then flies or drives away (f22: 8.4 m/s, 45 m; f24:
+// 2.0 m/s, 12.7 m). A real FAST-LIO pose is never repeated frame to frame (4 recordings, ~9200 pairs:
+// bench parked with the motors off, flight replays; the smallest step 0.075 mm / 1.5e-5 in a quaternion
+// component), so a repeat is the stuck output itself. SITL's pose repeats exactly while the vehicle is
+// parked (f2: runs up to 47 s), so a repeat alone is not a fault: it must come with evidence that the
+// vehicle moves or is made to move:
+//   * command: the bridge streaming a flight target that asks the FC for at least cmd_speed (horizontal,
+//     m/s: the caller passes the feed-forward plus the FC's position gain times the lead), or a drive
+//     target at least drive_dist ahead of the vehicle (the track planner's carrot carries no velocity:
+//     Rover Guided drives toward its position);
+//   * gyro: the FC's own IMU (/mavros/imu/data angular velocity, not an EKF output) turning at gyro_min;
+//   * twist: the repeated /Odometry carrying a velocity of at least twist_min (a pose that says it moves
+//     but does not).
+// A pose repeats when it is within eps_m of the one before and every quaternion component within eps_q
+// (bit-identical in the faults; 7x / 15x under the smallest real step). Frozen: at least min_n repeats in
+// a row, and the evidence active (each kind no older than evidence_age) without a break for hold_s in
+// flight, drive_hold_s driving (SITL's rover from rest: its pose repeats until it moves; SITL f2/fz1: a
+// flying vehicle's pose never repeats, and every 0.1 s of a frozen pose in flight lets the FC accelerate,
+// fz1: 1.06 -> 1.79 m/s in the 1.05 s to the detection).
+// A pose that moves ends the run. check() is none while the newest pose is older than max_age (that is
+// the SLAM stale hold's). The FC must be alive: once an IMU sample has been seen, no evidence counts (and
+// its clock restarts) while the newest is older than evidence_age. SITL stalls under host load stop
+// everything, the FC and its MAVLink stream with the render node's pose (fz13: MAVROS silent 0.6 s, the
+// pose repeated 11 times with the last twist 0.31 m/s and commands out; f2/f3: repeat runs up to 1.7 s);
+// a stuck FAST-LIO leaves the FC running.
+extern const char* const SLAM_FROZEN;    // "slam_frozen": the HOLD reason (the executive acts on it)
+
+class FrozenPoseCheck {
+ public:
+  FrozenPoseCheck(double eps_m = 1e-5, double eps_q = 1e-6, double hold_s = 0.4, int min_n = 4, double cmd_speed = 0.2,
+                  double drive_dist = 0.5, double gyro_min = 0.2, double twist_min = 0.2, double evidence_age = 0.25,
+                  double max_age = 0.5, double drive_hold_s = 0.8);
+  // a raw /Odometry pose (any fixed frame: only the change counts) and its twist, at receive time t
+  void on_pose(double t, const Vec3& p, const Quat& q, const Vec3& twist);
+  // a streamed flight target's horizontal speed (m/s) at time t
+  void on_command(double t, double speed);
+  // a streamed drive target's horizontal distance from the vehicle (m) at time t
+  void on_drive_target(double t, double dist);
+  // the FC IMU's angular rate magnitude (rad/s) at time t
+  void on_gyro(double t, double rate);
+  // -> the evidence ("command", "gyro", "twist", joined by "+") when frozen, else none. Call it every tick:
+  // it runs the evidence clock. driving: drive_hold_s instead of hold_s
+  std::optional<std::string> check(double now, bool driving = false);
+  // the evidence active now ("" when none)
+  std::string evidence(double now) const;
+
+  double eps_m, eps_q, hold_s;
+  int min_n;
+  double cmd_speed, drive_dist, gyro_min, twist_min, evidence_age, max_age, drive_hold_s;
+  int repeats = 0;                     // repeated poses in a row
+  std::optional<double> run_start;     // receive time of the pose the run repeats
+  std::optional<double> evidence_from; // the evidence active since (within this run)
+  std::optional<double> t_pose;        // the newest pose's receive time
+
+ private:
+  std::optional<std::pair<Vec3, Quat>> last_;
+  double twist_ = 0.0;                 // the newest pose's twist (m/s)
+  std::optional<double> t_cmd_move_;   // the last streamed target at cmd_speed or more
+  std::optional<double> t_gyro_;       // the last IMU sample
+  double gyro_ = 0.0;
+};
+
 // ---- HOLD ---------------------------------------------------------------------------------------
 extern const char* const PLANNER_DEAD;   // "planner_dead"
 
@@ -154,15 +218,22 @@ extern const char* const PLANNER_DEAD;   // "planner_dead"
 // new_leg() (the executive enabling the bridge for a new leg) does. A planner alive but silent is the
 // ordinary, resumable "planner stale" hold; one that never sent a command (planner_alive none) keeps
 // the WAIT before the first plan.
+//
+// A frozen SLAM pose (slam_frozen true, FrozenPoseCheck) latches HOLD with reason SLAM_FROZEN the same
+// way, ahead of everything else (the vehicle's position is unknown: the executive lands it in the air and
+// stops it on the ground). Only new_leg() clears it, and it latches again at once while the pose is
+// still frozen.
 class HoldLogic {
  public:
   explicit HoldLogic(double planner_timeout = 0.3, double slam_timeout = 0.2);
   void latch(const std::string& reason, double now);
   void new_leg();
   // faults: reasons from the caller (geofence, SLAM health). planner_alive: the liveness of the mode's
-  // planner process (true, false: gone, none: unknown or no planner known). -> state
+  // planner process (true, false: gone, none: unknown or no planner known). slam_frozen: FrozenPoseCheck
+  // says frozen. -> state
   std::string step(double now, std::optional<double> t_cmd, std::optional<double> t_slam,
-                   const std::vector<std::string>& faults = {}, std::optional<bool> planner_alive = std::nullopt);
+                   const std::vector<std::string>& faults = {}, std::optional<bool> planner_alive = std::nullopt,
+                   bool slam_frozen = false);
 
   double planner_timeout, slam_timeout;
   std::string state = "WAIT";   // WAIT (nothing yet), STREAM, HOLD
@@ -170,6 +241,7 @@ class HoldLogic {
   std::optional<double> hold_since;
   std::optional<std::string> latched;   // a latched cause (anchor jump) until a fresh command
   bool dead = false;                    // the planner died: HOLD until new_leg()
+  bool frozen = false;                  // the SLAM pose froze: HOLD until new_leg()
 
  private:
   void hold(const std::string& reason, double now);

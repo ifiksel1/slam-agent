@@ -1,0 +1,16 @@
+# Click and run (planner/sim/click_and_run/, 2026-10-30): the mission executive's interactive mode. No legs:
+# goals come one at a time from /mission_executive/goal (the click_goal node, l4_click: a point click drives
+# there, a pose click flies there), each filled with the defaults below and checked like a mission leg; a new
+# goal replaces the running one. Nothing ends with a landing: the vehicle hovers or stands until the next goal.
+# fly_mission.py starts the executive with _interactive:=true for a file with `interactive: true`.
+name: interactive
+frame: fc
+interactive: true
+takeoff_height: 1.0       # a fly goal from the ground takes off this high first (m above the liftoff point)
+defaults:
+  speed: 1.0
+  accept_radius: 0.4
+  leg_timeout_s: 120
+  no_progress_s: 20       # not 0.2 m closer (driving: also not 0.5 m driven) for this long: unreachable
+  on_unreachable: next    # (interactive: always wait for the next goal)
+legs: []

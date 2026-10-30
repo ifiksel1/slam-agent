@@ -7,3 +7,7 @@ orientation_matrix: [0, 0, 1, 1, 0, 0, 0, 1, 0]
 fc_mount_yaw_deg: -0.45
 restamp_system_time: false
 enable_reanchor: true
+# the proposed frozen-pose check (overrides/FAST-LIO/proposed/fastlio_mavros_bridge_frozen_pose.diff; the current
+# bridge ignores it): SITL's pose repeats exactly while the vehicle is parked, so in SITL a repeat counts only
+# with the FC's gyro turning (the robot's FAST-LIO never repeats: off there)
+frozen_require_motion: true

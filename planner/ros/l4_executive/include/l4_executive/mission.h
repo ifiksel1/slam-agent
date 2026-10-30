@@ -29,6 +29,7 @@ const std::map<std::string, int>& modes();
 bool allowed_mode(const std::string& name);
 extern const char* const NOT_STATIONARY;   // "not stationary before takeoff"
 extern const char* const PLANNER_DIED;     // "planner died"
+extern const char* const SLAM_FROZE;       // "SLAM pose frozen"
 constexpr int MAV_CMD_DO_SET_MODE = 176;
 constexpr int MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1;
 

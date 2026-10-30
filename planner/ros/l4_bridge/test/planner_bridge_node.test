@@ -3,6 +3,9 @@
        started it with _speed_cap:=1.0 _geofence_min:=[-20,-20,-1] _geofence_max:=[20,20,8]) -->
   <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
     <param name="speed_cap" value="1.0"/>
+    <!-- the synthetic feed repeats one SLAM pose while SUPER commands motion: the frozen-pose signature
+         (its own test: bridge_frozen_node.test) -->
+    <param name="freeze_enable" value="false"/>
     <!-- the ported cases check SUPER's yaw passed through (the Python bridge); travel yaw: test_bridge_yaw_node -->
     <param name="flight_yaw" value="planner"/>
     <!-- SUPER's command streamed as it is (the turn slowdown: turn_slow_node.test) -->

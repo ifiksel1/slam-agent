@@ -3,6 +3,9 @@
        (fc_pos_p 0) and no lead clamp (max_lead 100), so each setpoint is the replayed reference itself -->
   <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log">
     <param name="speed_cap" value="1.0"/>
+    <!-- the synthetic feed repeats one SLAM pose while SUPER commands motion: the frozen-pose signature
+         (its own test: bridge_frozen_node.test) -->
+    <param name="freeze_enable" value="false"/>
     <param name="fc_pos_p" value="0.0"/>
     <param name="max_lead" value="100.0"/>
     <!-- a long lag limit, so the cases see the slowdown hold and the lag level off (default 0.5 s) -->

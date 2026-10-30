@@ -5,7 +5,7 @@
 #   faults/batch.sh case:run [case:run ...]     e.g. batch.sh coast_fly_super:f3 coast_fly_bridge:f4
 # Progress lines go to ~/sim/l2/faults_batch.log.
 set -uo pipefail
-B=~/sim/l2; LOG=$B/faults_batch.log
+B=${L2_BASE:-$HOME/sim/l2}; LOG=$B/faults_batch.log   # L2_BASE: a private copy (sitl_harness.sh)
 for pair in "$@"; do
   c=${pair%%:*}; r=${pair##*:}
   for name in $r ${r}r; do

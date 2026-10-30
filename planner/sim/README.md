@@ -185,3 +185,46 @@ cd ~/sim/l2 && planner_sim/closed_loop.sh cl30 ~/sim/marsim/maps/hp_1015_carved.
 
 The sources live in this folder and are copied to Shannon's `~/sim/l2/planner_sim/`. The bridge and
 the MAVROS config are copied to `~/sim/l2/slam/{overrides,config}`.
+
+## Click and run (live in Foxglove)
+
+`click_and_run/click_and_run.sh` runs the closed loop above with the mission executive in its interactive
+mode (`missions/interactive.yaml`, `_interactive:=true`) and a live Foxglove link: click in the 3D panel
+and the robot drives or flies there. SITL only, like every run here; it runs until stopped.
+
+```bash
+# on Shannon: ~/sim/click/{planner_sim,planner,slam,cpp_ws/install} (L2_BASE; copies of planner/sim, planner/,
+# ~/sim/l2/slam and an install space of l4_common, l4_bridge, l4_executive, l4_click, l4_sim_viz)
+~/sim/click/planner_sim/click_and_run/click_and_run.sh          # HP Gate L2 course, start 0 0 -90.7
+~/sim/click/planner_sim/click_and_run/click_and_run.sh stop     # from another shell (or Ctrl-C)
+```
+
+Foxglove: Open connection -> Foxglove WebSocket -> `ws://<shannon>:8765` (`ws://localhost:8765` on
+Shannon's desktop), layout `foxglove/layouts/click_and_run_layout.json`. The 3D panel's publish tool:
+
+| tool | topic | goal (`/mission_executive/goal`, fc frame) |
+|---|---|---|
+| Publish point | `/click_and_run/drive` (PointStamped) | `drive` there; in the air it lands where it is first (landing check), then drives |
+| Publish pose | `/click_and_run/fly` (PoseStamped) | `fly` there, `FLY_HEIGHT` (1.0 m) above the floor, ending facing the arrow; on the ground it takes off first |
+| Publish pose estimate | `/click_and_run/pose_estimate` | nothing (not used) |
+
+The topics are click and run's own: MAVROS publishes on RViz's `/move_base_simple/goal` (frame map), which
+must never become a goal. Pick this layout (or set the 3D panel's publish topics to these) in Foxglove.
+
+How it fits together:
+- `click_goal` (C++, `planner/ros/l4_click`, robot-side): the click (planner frame "world") -> fc with the
+  bridge's anchor; the floor is the newest ground spot the executive recorded (else the FC's first height).
+  Publishes the JSON goal and `/click_and_run/goal_marker` (yellow sent, orange running, green reached,
+  red refused / unreachable / stopped, grey replaced) and `/click_and_run/status`.
+- The executive (`l4_executive`, `~interactive true`) checks each goal like a mission leg and runs it with
+  the mission's machinery (takeoff standstill rule, waypoint yaw, landing check, no-progress, the FC /
+  planner / SLAM-frozen stops; D5 modes only). A new goal replaces the running one; nothing ends in a
+  landing. See the node's header comment for the rules.
+- `sim_viz` (C++, `planner/ros/l4_sim_viz`, sim only): the run's map in the planner frame (`/map`, and
+  `/map_low` 0.3-1.8 m above SITL's ground for top-down views), `/tf` world -> drone, `/robot/body`.
+- `foxglove_bridge` (ROS 1, image `l4-sim-l2:foxglove`, `click_and_run/Dockerfile.foxglove`) in a
+  container sharing the run's network namespace; `socat` relays it through a unix socket in the run
+  directory to host TCP 8765. Clients may publish only the three click topics: no services, no params.
+- `closed_loop.sh` starts the click nodes through `FAULT_HOOK` (`click_and_run/nodes.sh`) and
+  `fly_mission.py` arms SITL and starts the executive as for a mission. The bag (~25 GB an hour) is
+  stopped at the start unless `RECORD=1` (then it records the clicks too).

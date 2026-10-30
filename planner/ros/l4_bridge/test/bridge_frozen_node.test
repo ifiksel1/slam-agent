@@ -1,0 +1,5 @@
+<launch>
+  <!-- a frozen SLAM pose (L2 faults 2b, 2d): the bridge with its defaults (~freeze_enable true) -->
+  <node pkg="l4_bridge" type="planner_bridge" name="planner_bridge" output="log"/>
+  <test test-name="test_bridge_frozen_node" pkg="l4_bridge" type="test_bridge_frozen_node" time-limit="120.0"/>
+</launch>

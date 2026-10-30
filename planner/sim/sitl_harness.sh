@@ -14,10 +14,13 @@
 # SITL build ~/sim/ardupilot, raycaster ~/sim/marsim, runs ~/sim/l2/runs/<name>.
 # SITL_AP: another ardupilot tree to run SITL from (its build/sitl/bin/ardurover; default ~/sim/ardupilot),
 # e.g. ~/sim/ardupilot_dctl with the track lateral-friction fix (sitl_track_friction.patch).
+# L2_BASE: another tree laid out as ~/sim/l2 (planner_sim, slam, planner, runs), a private copy for one
+# agent's runs (default ~/sim/l2). SLAM_DIR: another SLAM repo copy to mount as /slam (default $L2_BASE/slam),
+# e.g. one with a proposed change to the SLAM-to-FC bridge.
 set -uo pipefail
 cmd=${1:?up|down|status|exec}; name=${2:?run name}
 ROS=l2-ros-$name; SITL=l2-sitl-$name
-BASE=~/sim/l2; RUN=$BASE/runs/$name
+BASE=${L2_BASE:-$HOME/sim/l2}; RUN=$BASE/runs/$name
 AP=~/sim/ardupilot
 
 down() { docker rm -f $SITL $ROS >/dev/null 2>&1 || true; }
@@ -50,7 +53,7 @@ up)
     -e ROS_HOSTNAME=localhost -e ROS_MASTER_URI=http://localhost:11311 \
     -e MAP_PCD=/map/$(basename $map) -e START_X=$sx -e START_Y=$sy -e START_YAW_DEG=$syaw \
     -e RENDER_SCRIPT=${RENDER_SCRIPT:-/planner_sim/render_node.py} -e LIDAR_UP=${LIDAR_UP:-0} -e LATENCY_S=${LATENCY_S:-0.07} -e FAULT=${FAULT:-none} -e FAULT_START_S=${FAULT_START_S:-1e9} -e FAULT_RATE=${FAULT_RATE:-0.05} \
-    -v $(realpath $map):/map/$(basename $map):ro -v $BASE/slam:/slam:ro -v $BASE/planner_sim:/planner_sim:ro \
+    -v $(realpath $map):/map/$(basename $map):ro -v ${SLAM_DIR:-$BASE/slam}:/slam:ro -v $BASE/planner_sim:/planner_sim:ro \
     -v ~/sim/marsim:/marsim:ro -v $RUN:/run \
     --entrypoint bash l4-sim-l2:latest -c "sleep infinity" >/dev/null
   # SITL needs glibc 2.34 (built on Shannon's 22.04): its own container, in the ROS container's network

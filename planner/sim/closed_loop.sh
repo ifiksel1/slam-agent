@@ -47,8 +47,9 @@
 set -uo pipefail
 name=${1:?name}; map=${2:?map}; sx=${3:?}; sy=${4:?}; syaw=${5:?}; mission=${6:?mission}; cfg=${7:?super config}
 timeout=${8:-900}
-H=~/sim/l2/planner_sim/sitl_harness.sh
-RUN=~/sim/l2/runs/$name; ROS=l2-ros-$name
+BASE=${L2_BASE:-$HOME/sim/l2}   # L2_BASE: a private copy of ~/sim/l2 (sitl_harness.sh)
+H=$BASE/planner_sim/sitl_harness.sh
+RUN=$BASE/runs/$name; ROS=l2-ros-$name
 DRIVE_PARMS=${DRIVE_PARMS-WP_SPEED 0.5;WP_RADIUS 0.3;WP_PIVOT_ANGLE 60;CRUISE_SPEED 0.5;CRUISE_THROTTLE 50;ATC_STR_RAT_FF 0.3}
 export EXTRA_PARMS="${DRIVE_PARMS};${EXTRA_PARMS:-}"
 export LIDAR_UP=${LIDAR_UP-0.25}
@@ -57,7 +58,7 @@ TRACK_Z_LO=${TRACK_Z_LO-0.30}
 TRACK_SPEED=$(echo "$DRIVE_PARMS" | tr ';' '\n' | awk '$1=="WP_SPEED" {print $2}')
 
 $H up $name $map $sx $sy $syaw
-docker cp ${PLANNER_DIR:-$HOME/sim/l2/planner} $ROS:/planner   # PLANNER_DIR: another planner/ copy (a private test)
+docker cp ${PLANNER_DIR:-$BASE/planner} $ROS:/planner   # PLANNER_DIR: another planner/ copy (a private test)
 docker exec $ROS mkdir -p /ws && docker cp ${L4_WS:-$HOME/sim/cpp_ws/install} $ROS:/ws/install
 # the C++ nodes (rosrun in their install space; the node's name and params follow as $0 and $@)
 LANDING_CMD="bash -c 'source /ws/install/setup.bash; exec rosrun l4_landing landing_check \$0 \$@'"

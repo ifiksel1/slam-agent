@@ -13,10 +13,12 @@
 #   - fly_mission.py waits END_HOLD_S after the executive's DONE/STOPPED before it lands SITL, so what the
 #     FC does after the stop is seen.
 # SITL-only params (EXTRA_PARMS) are listed per case below and in the run's sitl/extra.parm.
+# Env HOOK_PRE: a command for the ROS container before the runner starts (e.g. an A/B parameter:
+#   HOOK_PRE="rosparam set /mission_executive/slam_frozen_flight_mode QRLOITER").
 # Results: ~/sim/l2/runs/<run>/fault_result.json; the table: faults/results.py.
 set -uo pipefail
 case_=${1:?case (or list)}; run=${2:-}
-BASE=~/sim/l2; PS=$BASE/planner_sim; F=$PS/faults
+BASE=${L2_BASE:-$HOME/sim/l2}; PS=$BASE/planner_sim; F=$PS/faults   # L2_BASE: a private copy (sitl_harness.sh)
 MAP=~/sim/marsim/maps/hp_1015_carved.pcd
 CFG=$PS/super_closed_loop_hp.yaml
 MISSION=$BASE/planner/missions/example_hp_drive_fly.yaml
@@ -32,6 +34,9 @@ ACT=()
 case $case_ in
   list) grep -E "^  [a-z_]+\)" $0 | sed 's/).*//'; exit 0 ;;
   baseline)            TRIG="start"; ACT=(none) ;;
+  # no false frozen-pose trigger: the drive-and-fly mission with a 30 s hover at a waypoint and 20 s parked
+  # after the drive (SITL's pose repeats exactly while parked; the frozen-pose check needs evidence of motion)
+  hover_park)          MISSION=$F/missions/hover_park.yaml; TRIG="start"; MAXS=320; ACT=(none) ;;
   # 1 / coast (D4): the planner killed at speed; the bridge killed at speed (no setpoints at all)
   coast_fly_super)     TRIG=$FLY; ACT=("pkill:-9 -x fsm_node") ;;
   coast_fly_bridge)    TRIG=$FLY; ACT=("pkill:-9 -f '^/ws[^ ]*/lib/l4_bridge/planner_bridge'") ;;
@@ -73,6 +78,7 @@ hook=$F/hooks/$run.sh
 {
   echo "#!/usr/bin/env bash"
   echo "# $case_ ($run), written by faults/cases.sh"
+  [ -n "${HOOK_PRE:-}" ] && echo "$HOOK_PRE   # HOOK_PRE"
   printf 'nohup python3 -u /planner_sim/faults/mav_watch.py %s > /dev/null 2>&1 &   # its record: logs/mav_watch.jsonl\n' "$GCS"
   printf 'exec python3 -u /planner_sim/faults/inject.py --case %q --trigger %q --end_hold %q --max_s %q' "$case_" "$TRIG" "$HOLD" "$MAXS"
   for a in "${ACT[@]}"; do printf ' --action %q' "$a"; done

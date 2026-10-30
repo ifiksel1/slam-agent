@@ -8,3 +8,6 @@ Copies of the tools behind Shannon's `~/sim/foxglove` library (run there, not on
 - `layouts/`: saved Foxglove layouts (`closeup_layout.json` is the owner's drive close-up view).
 
 Offline analysis / tooling, so Python (the C++ rule covers robot software).
+- `layouts/click_and_run_layout.json`: the live click-and-run view (`click_and_run/click_and_run.sh`; connect to
+  `ws://<shannon>:8765`). Its 3D panel's publish tool sends `/click_and_run/drive` (point: drive) and
+  `/click_and_run/fly` (pose: fly).

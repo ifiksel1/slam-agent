@@ -56,6 +56,23 @@ slam_timeout: 0.2            # s since /Odometry
 fc_pose_timeout: 0.3         # s since /mavros/local_position/pose (receive time, ~50 Hz): older -> HOLD
                              # "fc_pose_stale" at the last fresh FC position (flight) / nothing sent (drive)
 fc_pose_resume_n: 5          # fresh FC poses in a row before it is trusted again
+# a frozen SLAM pose (L2 faults 2b/2d, 2026-10-30): FAST-LIO's last pose repeated with fresh stamps passes the
+# receive-time checks and the EKF follows it (f22: flew off at 8.4 m/s, 45 m; f24: drove off at 2.0 m/s). A real
+# FAST-LIO pose never repeats (4 recordings, ~9200 consecutive pairs, smallest step 0.075 mm); SITL's repeats exactly
+# while parked, so a repeat counts only with evidence of motion. Frozen -> HOLD "slam_frozen" (latched): the
+# executive lands in the air (QRLAND) and stops on the ground (zero-speed stop, GUIDED)
+freeze_enable: true
+freeze_eps_m: 1.0e-5         # m: a pose within this of the one before (and the quaternion within freeze_eps_q) repeats
+freeze_eps_q: 1.0e-6
+freeze_min_n: 4              # repeats in a row (FAST-LIO 10 Hz: 0.4 s)
+freeze_hold_s: 0.4           # s the evidence must last without a break, flying (SITL fz1 at 0.8 s: detected 1.05 s after the
+                             # freeze, the FC already accelerating, 1.06 -> 1.79 m/s; a flying pose never repeats in SITL)
+freeze_drive_hold_s: 0.8     # s, driving (SITL's rover from rest: its pose repeats until it moves)
+freeze_cmd_speed: 0.2        # evidence: a flight target asking the FC for this speed (m/s, horizontal: v + fc_pos_p x lead)
+freeze_drive_dist: 0.5       # evidence: a drive target this far (m) from the vehicle streamed
+freeze_gyro_min: 0.2         # evidence: the FC IMU's angular rate (rad/s, /mavros/imu/data)
+freeze_twist_min: 0.2        # evidence: the repeated /Odometry's own twist (m/s)
+freeze_evidence_age: 0.25    # s: evidence older than this is over
 anchor_jump_m: 0.1           # re-anchor / SLAM reset detection (D7)
 anchor_jump_deg: 2.0
 anchor_persist: 3            # vision-pose pairs a change must last (one odd pair is a pairing glitch)
