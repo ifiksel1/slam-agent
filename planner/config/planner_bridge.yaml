@@ -32,7 +32,10 @@ turn_slow_lookahead_s: 0.5   # s: also the error against the direction of v + a 
 turn_slow_accel: 1.5         # m/s^2 the allowed speed may change at
 turn_slow_catchup: 1.5       # x SUPER's pace the replay may catch up at (within the allowed speed)
 turn_slow_max_lag_s: 0.5     # s behind SUPER's newest command where the lag levels off (SUPER checks its backup from
-                             # the vehicle: b9, with 2.0, saw SUPER stall at the tower 0.77 s behind)
+                             # the vehicle). Owner 2026-10-30: keep 0.5. With the SUPER from-rest fix, Gate L2 at
+                             # 0.5 / 1.0 / 2.0 s (L1-L5) all DONE with no stall; heading p90 16.9 / 14.8-16.3 /
+                             # 14.8-15.2 deg, 2.0 s had the lowest flight clearance (0.21-0.25 m); 0.5 s is fastest
+                             # (82 s). Before the fix, b9 at 2.0 s stalled at the tower 0.77 s behind.
 
 # the local ceiling over the vehicle (status "ceiling_above"; the executive keeps SUPER's re-seed goal
 # ~seed_ceiling_clear below it). Container fly-through k1 (2026-10-29): stacked 0.3 m re-seeds took the
