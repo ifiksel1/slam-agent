@@ -1732,6 +1732,18 @@ std::optional<ArcFail> arc_fail(const Window& win, const Path& leg, const V2& p0
   return std::nullopt;
 }
 
+// An arc failure the leg's own bend causes (SITL o4, 2026-10-30): the leg driven from its own first heading
+// (the robot on the path, aligned) fails too, on a later segment. The start heading has no part in it: a start
+// pivot does not clear it and a stop does not change it. o4: a 56 deg driven bend round the crate past the
+// door, 2-3 m ahead, whose lagging model cleared or touched the crate's corner cell by a few cm from replan to
+// replan; each touch refused the whole route (NO_PATH in 45 of 70 status messages, a 3.5 s hesitation before
+// the table) or made the start a pivot (the robot swung 50 deg at the leg's start).
+static bool bend_fail(const Window& win, const Path& leg, const ArcFail& f) {
+  if (leg.size() < 3 || f.seg < 1) return false;
+  auto r = arc_fail(win, leg, leg[0], hd(leg[1] - leg[0]));
+  return r && r->seg >= 1;
+}
+
 std::vector<int> pivot_vertices(const Path& P, const Config& cfg) {
   std::vector<int> out;
   for (int k = 1; k < int(P.size()) - 1; ++k)
@@ -1833,7 +1845,8 @@ PivotResult pivot_pass_forced(Window& win, const Path& path, std::optional<doubl
           norm2(P[j] - C) >= cfg.off + cfg.res) {
         auto pv = pivot_vertices(P, cfg);
         Path leg(P.begin(), P.begin() + (pv.empty() ? n : pv[0] + 1));
-        if (arc_fail(win, leg, P[0], h_in)) turning = arc_involved = true;
+        auto af = arc_fail(win, leg, P[0], h_in);
+        if (af && !bend_fail(win, leg, *af)) turning = arc_involved = true;   // a bend's: no start pivot
       }
     } else {
       IsPivot ip = is_pivot(P, k, h_in, A, cfg, thr);
@@ -1931,8 +1944,11 @@ PivotResult pivot_pass_forced(Window& win, const Path& path, std::optional<doubl
         if (f) {
           // the vertex of the largest turn over pivot_done on the leg up to the failing pose (not the
           // leg's end): a pivot there next time (pivot_pass)
+          // (on the first leg always for a bend's failure, bend_fail: a pivot at the bend clears it, no stop does;
+          // after a pivot only with arc_vertices, see Config::arc_vertices)
           double best = cfg.pivot_done;
-          for (int v = a + 1; cfg.arc_vertices && v <= std::min(a + f->seg + 1, b - 1); ++v) {
+          const bool vertices = cfg.arc_vertices || (q == 0 && bend_fail(win, leg, *f));
+          for (int v = a + 1; vertices && v <= std::min(a + f->seg + 1, b - 1); ++v) {
             if (src[v] < 0) continue;
             double turn = std::abs(wrap(hd(out[v + 1] - out[v]) - hd(out[v] - out[v - 1])));
             if (turn > best) {

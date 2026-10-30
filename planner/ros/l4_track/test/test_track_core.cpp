@@ -925,6 +925,48 @@ TEST(ArcCheck, LagOnAGentleTurnNextToAWallIsRefusedOrRoutedClear) {
   }
 }
 
+// ---- a bend's own arc failure (SITL o4, 2026-10-30): the first leg runs straight through a 0.90 m door, then
+// bends 56 deg (driven, under pivot_angle) round a 0.5 m crate on the bend's outside. The lagging arc model
+// touches the crate's corner from any start heading, the aligned one too: the bend, not the arc onto the path.
+// o4 refused the whole route on each touch (NO_PATH flapping 2-3 m before the bend) and made the start a pivot;
+// now a pivot at the bend, no start pivot, no refusal. (The scene is o4's planner frame turned to +x.)
+namespace {
+Cloud crate_bend_room() {
+  return cat({floor_(-1, 7, -3, 3), w(2.2, -3.0, 2.2, -0.4), w(2.2, 0.5, 2.2, 3.0),   // the door, x 2.2
+              w(3.35, -0.05, 3.85, -0.05), w(3.35, 0.45, 3.85, 0.45), w(3.35, -0.05, 3.35, 0.45), w(3.85, -0.05, 3.85, 0.45)});
+}
+const Path CRATE_ROUTE{V2(0.0, 0.0), V2(2.65, 0.0), V2(2.85, -0.30), V2(3.75, -0.80), V2(5.2, 0.05)};
+}  // namespace
+
+TEST(ArcCheck, ABendsOwnFailurePivotsAtTheBendNotAtTheStart) {
+  tc::HeightGrid hg(crate_bend_room(), std::make_shared<const tc::Config>(CFG));
+  auto win = hg.crop(V2(-0.8, -2.5), V2(6.5, 2.5));
+  // the scene has teeth: the leg's arc from the aligned start touches the crate past the bend
+  auto f = tc::arc_fail(*win, CRATE_ROUTE, CRATE_ROUTE[0], 0.0);
+  ASSERT_TRUE(f.has_value());
+  EXPECT_GE(f->seg, 1);
+  EXPECT_GT(f->s, CFG.arc_commit);
+  for (double off_deg : {0.0, 14.0, -14.0}) {
+    auto r = tc::pivot_pass(*win, CRATE_ROUTE, tc::radians(off_deg));
+    ASSERT_TRUE(r.ok) << "start " << off_deg << " deg off: " << r.reason;
+    ASSERT_FALSE(r.pivots.empty()) << off_deg;
+    for (auto& p : r.pivots) EXPECT_FALSE(p.start) << off_deg;   // a start pivot cannot clear a bend's failure
+    printf("  start %+.0f deg: %zu pivots, the first at (%.2f, %.2f) turn %.0f deg\n", off_deg, r.pivots.size(),
+           r.pivots[0].centre.x(), r.pivots[0].centre.y(), tc::degrees(r.pivots[0].turn));
+    EXPECT_LT(tc::norm2(r.pivots[0].centre - V2(2.65 - CFG.off, 0.0)), 0.4);   // at the bend past the door
+  }
+}
+
+TEST(ArcCheck, AStartHeadingsOwnFailureStillPivotsAtTheStart) {
+  // the arc onto the path (Gate L2 c1/c3) is unchanged: a start 40 deg off by the door, the aligned start clear
+  Cloud room = door_room();
+  double first = std::atan2(DG.y() - DS.y(), DG.x() - DS.x());
+  auto out = tc::plan(room, std::nullopt, DS, DG, CFG, first + tc::radians(40.0));
+  ASSERT_TRUE(out.ok) << out.reason;
+  ASSERT_FALSE(out.pivots.empty());
+  EXPECT_TRUE(out.pivots[0].start);
+}
+
 // ---- the preferred clearance (owner decision 2026-10-30, option 1) and the start check
 namespace {
 // the follower's poses along a path (every 0.05 m, heading to the point lookahead on) -> the least bare-frame
