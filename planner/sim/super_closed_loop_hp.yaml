@@ -90,7 +90,13 @@ traj_opt:
     integral_reso: 12
     smooth_eps: 0.01
     penna_t: 1200.0
-    penna_ts: 1.0e+5
+    # (2026-10-30) 1.0e+4, not SUPER's 1.0e+5: the backup is rewarded penna_ts per second it branches
+    # later off the exp trajectory. At 1.0e+5 that reward outbid the acc penalty (1.0e+5), so a backup
+    # that must brake inside a short corridor (from rest where an obstacle hides part of the path, e.g.
+    # Gate L2 leg 7 at pole_b, the container mouth) settled ~5 % over max_acc (1.057 m/s^2 > the 1.025
+    # check) and was rejected on every replan: no plan, no motion, a stall. Raising penna_acc instead
+    # freed it too but let backups leave their corridor (up to 0.13 m); 1.0e+4 keeps them in (<= 0.02 m).
+    penna_ts: 1.0e+4
     penna_pos: 1.0e+6
     penna_vel: 1.0e+5
     penna_acc: 1.0e+5

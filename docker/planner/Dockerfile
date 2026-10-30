@@ -29,6 +29,10 @@ RUN mkdir -p /super_ws/src && cd /super_ws/src \
 # SUPER aborted on long straight path segments, e.g. a vertical climb (see docker/sim/patch_seed_line.py)
 COPY patch_seed_line.py /tmp/patch_seed_line.py
 RUN python3 /tmp/patch_seed_line.py /super_ws/src/SUPER/super_planner/src/super_core/corridor_generator.cpp
+# SUPER never recorded the backup trajectory's corridor violation, so a backup that left its corridor
+# passed its own check (see super_backup_pos_check.patch)
+COPY super_backup_pos_check.patch /tmp/super_backup_pos_check.patch
+RUN cd /super_ws/src/SUPER && git apply /tmp/super_backup_pos_check.patch
 
 RUN source /opt/ros/noetic/setup.bash && cd /super_ws \
     && catkin_make -DBUILD_TYPE=Release -DCMAKE_BUILD_TYPE=Release -j8

@@ -6,6 +6,6 @@
 set -euo pipefail
 R=$(cd "$(dirname "$0")/../.." && pwd); O=${1:?out dir}
 rm -rf "$O"; mkdir -p "$O"
-cp "$R/docker/planner/Dockerfile" "$R/docker/sim/patch_seed_line.py" "$R/docker/sim/config/super_revolute.yaml" "$O/"
+cp "$R/docker/planner/Dockerfile" "$R/docker/sim/patch_seed_line.py" "$R/docker/sim/super_backup_pos_check.patch" "$R/docker/sim/config/super_revolute.yaml" "$O/"
 rsync -a --exclude __pycache__ --exclude test "$R/planner" "$O/"
 echo "staged $O"

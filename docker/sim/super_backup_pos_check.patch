@@ -1,0 +1,13 @@
+--- a/super_planner/src/traj_opt/backup_traj_optimizer_s4.cpp
++++ b/super_planner/src/traj_opt/backup_traj_optimizer_s4.cpp
+@@ -147,6 +147,10 @@
+                 for (int k = 0; k < K; k++) {
+                     outerNormal = hPoly.block<1, 3>(k, 0);
+                     violaPos = outerNormal.dot(pos) + hPoly(k, 3);
++                    // Revolute: record the worst corridor violation (as ExpTrajOpt does). Upstream never
++                    // set it, so pena_log(1) stayed 0 and optimize()'s "Pos violation" check could not
++                    // reject a backup trajectory that leaves its corridor.
++                    if (violaPos > max_pos_viola_log) max_pos_viola_log = violaPos;
+                     if (gcopter::smoothedL1(violaPos, smoothFactor, violaPosPena, violaPosPenaD)) {
+                         gradPos += weightPos * violaPosPenaD * outerNormal;
+                         pena += weightPos * violaPosPena;
