@@ -1,0 +1,204 @@
+{
+ "configById": {
+  "RawMessages!exec": {
+   "topicPath": "/mission_executive/status",
+   "diffEnabled": false,
+   "expansion": "all"
+  },
+  "3D!fault": {
+   "cameraState": {
+    "distance": 22,
+    "perspective": true,
+    "phi": 50,
+    "thetaOffset": 45,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ]
+   },
+   "followMode": "follow-position",
+   "followTf": "world",
+   "scene": {
+    "enableStats": false,
+    "backgroundColor": "#10161a"
+   },
+   "transforms": {
+    "visible": false
+   },
+   "topics": {
+    "/map": {
+     "visible": true,
+     "pointSize": 2,
+     "colorMode": "colormap",
+     "colorField": "z",
+     "colorMap": "turbo",
+     "decayTime": 0
+    },
+    "/planner/cloud": {
+     "visible": true,
+     "pointSize": 3,
+     "colorMode": "flat",
+     "flatColor": "#ffffffaa"
+    },
+    "/planner/odom": {
+     "visible": false
+    },
+    "/robot/sphere": {
+     "visible": true
+    },
+    "/robot/body": {
+     "visible": true
+    },
+    "/robot/nearest": {
+     "visible": true
+    },
+    "/robot/clearance": {
+     "visible": true
+    },
+    "/fsm_node/visualization/exp_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/backup_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/committed_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/exp_sfc": {
+     "visible": true
+    },
+    "/fsm_node/visualization/backup_sfc": {
+     "visible": true
+    },
+    "/fsm_node/visualization/goal": {
+     "visible": true
+    },
+    "/track_planner/path": {
+     "visible": true,
+     "type": "line",
+     "lineWidth": 0.08,
+     "gradient": [
+      "#00e5ffff",
+      "#00e5ffff"
+     ]
+    },
+    "/planning/drive_goal": {
+     "visible": true,
+     "type": "arrow",
+     "arrowScale": [
+      0.6,
+      0.15,
+      0.15
+     ],
+     "color": "#00e5ffff"
+    },
+    "/planning/click_goal": {
+     "visible": true,
+     "type": "arrow",
+     "arrowScale": [
+      0.6,
+      0.15,
+      0.15
+     ],
+     "color": "#ffcc00ff"
+    },
+    "/planner/landing_markers": {
+     "visible": true
+    },
+    "/planner/landing_spot": {
+     "visible": true
+    }
+   }
+  },
+  "Plot!fault": {
+   "title": "height (believed vs true), speed, bridge mode",
+   "paths": [
+    {
+     "value": "/viz/height.data",
+     "enabled": true,
+     "label": "height (m, odometry z)"
+    },
+    {
+     "value": "/sim/truth.pose.pose.position.z",
+     "enabled": true,
+     "label": "true height (m, sim truth)"
+    },
+    {
+     "value": "/viz/speed.data",
+     "enabled": true,
+     "label": "horizontal speed (m/s)"
+    },
+    {
+     "value": "/planner_bridge/mode_code.data",
+     "enabled": true,
+     "label": "bridge mode (0 off, 1 flight, 2 drive)"
+    },
+    {
+     "value": "/viz/phase.data",
+     "enabled": false,
+     "label": "phase (1 takeoff 2 fly 3 drive 4 check 5 land 7 done)"
+    }
+   ],
+   "showLegend": true,
+   "legendDisplay": "top",
+   "xAxisVal": "timestamp"
+  },
+  "StateTransitions!fault": {
+   "paths": [
+    {
+     "value": "/mavros/state.mode",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/planner_bridge/mode.data",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/planner_bridge/mode_code.data",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/viz/phase.data",
+     "timestampMethod": "receiveTime"
+    },
+    {
+     "value": "/sim_fault/state.data",
+     "timestampMethod": "receiveTime"
+    }
+   ],
+   "isSynced": true
+  },
+  "RawMessages!fault": {
+   "topicPath": "/fault/events",
+   "diffEnabled": false,
+   "expansion": "all"
+  }
+ },
+ "globalVariables": {},
+ "userNodes": {},
+ "playbackConfig": {
+  "speed": 1
+ },
+ "layout": {
+  "direction": "column",
+  "first": {
+   "direction": "row",
+   "first": "3D!fault",
+   "second": {
+    "direction": "column",
+    "first": "RawMessages!exec",
+    "second": "RawMessages!fault",
+    "splitPercentage": 45
+   },
+   "splitPercentage": 72
+  },
+  "second": {
+   "direction": "row",
+   "first": "Plot!fault",
+   "second": "StateTransitions!fault",
+   "splitPercentage": 62
+  },
+  "splitPercentage": 70
+ }
+}

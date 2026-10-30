@@ -1,0 +1,115 @@
+{
+ "configById": {
+  "3D!super": {
+   "cameraState": {
+    "distance": 25,
+    "perspective": true,
+    "phi": 50,
+    "thetaOffset": 45,
+    "targetOffset": [
+     0,
+     0,
+     0
+    ]
+   },
+   "followMode": "follow-position",
+   "followTf": "world",
+   "scene": {
+    "enableStats": false,
+    "backgroundColor": "#10161a"
+   },
+   "transforms": {
+    "visible": false
+   },
+   "topics": {
+    "/map": {
+     "visible": true,
+     "pointSize": 2,
+     "colorMode": "colormap",
+     "colorField": "z",
+     "colorMap": "turbo",
+     "decayTime": 0
+    },
+    "/planner/odom": {
+     "visible": false
+    },
+    "/fsm_node/visualization/exp_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/backup_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/committed_traj": {
+     "visible": true
+    },
+    "/fsm_node/visualization/goal": {
+     "visible": true
+    },
+    "/waypoint_mission/mkr": {
+     "visible": true
+    },
+    "/fsm_node/visualization/exp_sfc": {
+     "visible": true
+    },
+    "/fsm_node/visualization/backup_sfc": {
+     "visible": true
+    },
+    "/fsm_node/visualization/frontend_path": {
+     "visible": false
+    },
+    "/fsm_node/visualization/yaw_traj": {
+     "visible": false
+    },
+    "/robot/sphere": {
+     "visible": true
+    },
+    "/robot/body": {
+     "visible": true
+    },
+    "/robot/nearest": {
+     "visible": true
+    },
+    "/robot/clearance": {
+     "visible": true
+    },
+    "/planner/cloud": {
+     "visible": true,
+     "pointSize": 3,
+     "colorMode": "flat",
+     "flatColor": "#ffffffaa"
+    }
+   }
+  },
+  "Plot!speed": {
+   "paths": [
+    {
+     "value": "/planner/odom.pose.pose.position.z",
+     "enabled": true,
+     "label": "height (m)"
+    },
+    {
+     "value": "/mavros/setpoint_raw/local.velocity.x",
+     "enabled": true,
+     "label": "setpoint vE (m/s)"
+    },
+    {
+     "value": "/mavros/setpoint_raw/local.velocity.y",
+     "enabled": true,
+     "label": "setpoint vN (m/s)"
+    }
+   ],
+   "showLegend": true
+  }
+ },
+ "globalVariables": {},
+ "userNodes": {},
+ "playbackConfig": {
+  "speed": 1
+ },
+ "layout": {
+  "first": "3D!super",
+  "second": "Plot!speed",
+  "direction": "column",
+  "splitPercentage": 78
+ }
+}
