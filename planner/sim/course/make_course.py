@@ -7,7 +7,13 @@ course.json: {"spacing": m (optional, default: the base map's own median point s
               "obstacles": [ {"name": ..., "type": "box", "c": [x, y], "size": [sx, sy, h], "yaw_deg": 0},
                              {"name": ..., "type": "pole", "c": [x, y], "r": m, "h": m},
                              {"name": ..., "type": "wall_gap", "x": x, "y0": y, "y1": y, "gap": [y_lo, y_hi],
-                              "thick": m, "h": m} ]}     (map frame, metres; h above the local floor)
+                              "thick": m, "h": m} ],
+              "floor": [ {"name": ..., "c": [x, y], "size": [sx, sy], "yaw_deg": 0, "z": z} ]}
+                                                           (map frame, metres; h above the local floor)
+
+"floor" (optional): flat floor patches where the base map has none (a hole in the scan), at the given
+map z, sampled on the same square grid. They are floor, not obstacles: listed under "floor" in the
+obstacles file, so the clearance check against the added obstacles leaves them out.
 
 Each obstacle stands on the map's local floor: its bottom is the 10th percentile of the base map's
 points below 0.4 m within 0.6 m of its footprint, less 0.05 m (the merged maps' floor is a 0.1-0.3 m
@@ -129,11 +135,24 @@ def main():
             raise ValueError(o["type"])
         added.append(pts)
         print("  %-10s %-8s %6d points, floor z %.2f" % (o["name"], o["type"], len(pts), placed[-1]["z0"]))
+    floors = []
+    for f in spec.get("floor", []):
+        hx, hy = f["size"][0] / 2, f["size"][1] / 2
+        X, Y = np.meshgrid(grid(-hx, hx, s), grid(-hy, hy, s))
+        yaw = math.radians(f.get("yaw_deg", 0.0))
+        R = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]])
+        xy = np.c_[X.ravel(), Y.ravel()] @ R.T + np.array(f["c"], float)
+        added.append(np.c_[xy, np.full(len(xy), float(f["z"]))])
+        floors.append({"name": f["name"], "c": f["c"], "size": f["size"], "yaw_deg": f.get("yaw_deg", 0.0), "z": f["z"]})
+        print("  %-10s %-8s %6d points, z %.2f" % (f["name"], "floor", len(xy), f["z"]))
     A = np.vstack(added)
     A = np.c_[A, np.full(len(A), 200.0)]
     save_pcd(out, np.vstack([M, A.astype(np.float32)]),
              "%s + Gate L2 course %s (%d obstacle points)" % (base.split("/")[-1], spec_path.split("/")[-1], len(A)))
-    json.dump({"base": base, "n_base": len(M), "n_added": len(A), "spacing": s, "obstacles": placed}, open(out + ".obstacles.json", "w"), indent=1)
+    meta = {"base": base, "n_base": len(M), "n_added": len(A), "spacing": s, "obstacles": placed}
+    if floors:
+        meta["floor"] = floors
+    json.dump(meta, open(out + ".obstacles.json", "w"), indent=1)
     print("wrote %s (%d + %d points) and %s.obstacles.json" % (out, len(M), len(A), out))
 
 

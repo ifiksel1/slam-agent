@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <cmath>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -22,6 +23,7 @@
 #include <nav_msgs/Odometry.h>
 #include <quadrotor_msgs/PositionCommand.h>
 #include <ros/ros.h>
+#include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/Int8.h>
 #include <std_msgs/String.h>
@@ -87,7 +89,7 @@ class Node : public ::testing::Test {
   static inline std::string status;
   static inline std::optional<int> mode_code;
   static inline std::optional<std::string> mode_out;
-  static inline ros::Publisher pub_odom, pub_vis, pub_fc, pub_state, pub_cmd, pub_drive, pub_enable, pub_mode;
+  static inline ros::Publisher pub_cloud, pub_odom, pub_vis, pub_fc, pub_state, pub_cmd, pub_drive, pub_enable, pub_mode;
   static inline std::vector<ros::Subscriber> subs;
 
   static void SetUpTestSuite() {
@@ -109,6 +111,7 @@ class Node : public ::testing::Test {
       mode_out = m->data;
     }));
     pub_odom = nh->advertise<nav_msgs::Odometry>("/Odometry", 50);
+    pub_cloud = nh->advertise<sensor_msgs::PointCloud2>("/cloud_registered", 5);
     pub_vis = nh->advertise<geometry_msgs::PoseStamped>("/mavros/vision_pose/pose", 50);
     pub_fc = nh->advertise<geometry_msgs::PoseStamped>("/mavros/local_position/pose", 50);
     pub_state = nh->advertise<mavros_msgs::State>("/mavros/state", 5, true);
@@ -678,6 +681,74 @@ TEST_F(Node, T9i_LivePlannerSilentIsNotDead) {
   EXPECT_EQ(st["planner_alive"], true);
   feed(0.6);
   EXPECT_EQ(status_json()["state"], "STREAM");
+}
+
+TEST_F(Node, T10_SilentPlannerHoldNeverClimbs) {
+  // container fly-through k1 (2026-10-29): SUPER climbing toward a re-seed goal, then silent. The hold is
+  // the vehicle's position when it began, zero velocity: not SUPER's last (higher) point nor its climb, and
+  // it does not follow the vehicle up while SUPER stays silent
+  Feed climb;
+  climb.cmd_pos = Feed().p_planner + Vec3(0.0, 0.0, 0.3);
+  climb.cmd_vel = Vec3(0.0, 0.0, 0.4);
+  feed(0.6, climb);
+  const double t0 = wall();
+  Feed quiet;
+  quiet.cmd = false;
+  feed(1.0, quiet);
+  Feed drift = quiet;   // the vehicle carried 0.2 m up while SUPER is silent
+  drift.p_planner = Feed().p_planner + Vec3(0.0, 0.0, 0.2);
+  feed(0.6, drift);
+  const auto out = since_t(t0 + 0.4);   // planner_timeout 0.3: the hold from here on
+  ASSERT_GT(out.size(), 40u);
+  const double z_vehicle = ANCHOR.pos(Feed().p_planner)[2];
+  double z_max = -1e9;
+  for (const auto& s : out) {
+    z_max = std::max(z_max, static_cast<double>(s.second.position.z));
+    EXPECT_TRUE(zero_vel(s.second));
+    EXPECT_EQ(s.second.velocity.z, 0.0);
+  }
+  EXPECT_NEAR(z_max, z_vehicle, 1e-3);   // held where it was, never above
+  EXPECT_NEAR(out.back().second.position.z, z_vehicle, 1e-3);
+  EXPECT_TRUE(has("planner stale"));
+}
+
+TEST_F(Node, T11_CeilingOverTheVehicle) {
+  // a /cloud_registered scan (raw frame): the lowest point within ~ceiling_radius (0.6 m) over the vehicle,
+  // more than ~ceiling_min_up (0.15 m) above it, in the status as "ceiling_above"
+  const Vec3 v = Feed().p_planner;   // (1.0, 0.5, 1.2) planner frame
+  const std::vector<Vec3> pts = {v + Vec3(0.2, 0.1, 1.1), v + Vec3(-0.3, 0.2, 1.3), v + Vec3(1.0, 0.0, 0.4),
+                                 v + Vec3(0.1, 0.0, 0.1), v + Vec3(0.0, 0.0, -1.2)};
+  sensor_msgs::PointCloud2 c;
+  c.header.frame_id = "camera_init";
+  c.height = 1;
+  c.width = pts.size();
+  for (int i = 0; i < 3; ++i) {
+    sensor_msgs::PointField f;
+    f.name = std::string(1, "xyz"[i]);
+    f.offset = 4 * i;
+    f.datatype = sensor_msgs::PointField::FLOAT32;
+    f.count = 1;
+    c.fields.push_back(f);
+  }
+  c.point_step = 16;
+  c.row_step = c.point_step * c.width;
+  c.is_dense = true;
+  c.data.assign(c.row_step, 0);
+  for (size_t i = 0; i < pts.size(); ++i) {
+    const Vec3 raw = position_matrix().transpose() * pts[i];   // planner -> raw
+    const float xyz[3] = {static_cast<float>(raw[0]), static_cast<float>(raw[1]), static_cast<float>(raw[2])};
+    std::memcpy(c.data.data() + i * c.point_step, xyz, 12);
+  }
+  feed(0.3);
+  c.header.stamp = ros::Time::now();
+  pub_cloud.publish(c);
+  feed(0.5);
+  auto st = status_json();
+  ASSERT_TRUE(st["ceiling_above"].is_number()) << status_str();
+  EXPECT_NEAR(st["ceiling_above"].get<double>(), 1.1, 1e-3);
+  // no scan for longer than ~ceiling_max_age (1.0 s): not reported
+  feed(1.3);
+  EXPECT_TRUE(status_json()["ceiling_above"].is_null()) << status_str();
 }
 
 int main(int argc, char** argv) {

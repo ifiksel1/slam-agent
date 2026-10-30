@@ -60,5 +60,21 @@
    "r": 0.075,
    "h": 2.5
   }
+ ],
+ "_floor_comment": "2026-10-29: the base map has no floor in front of the HP container's west mouth (also not in hp_1015.pcd). west_mouth_floor fills it flat: planner frame (start 0,0, yaw -90.7, odometry point 0.193 m ahead of the FC; map = Rz(-90.7) planner + (-0.0024, -0.1930), map z = planner z + 0.25) x -2.0..-0.5, y -3.3..-0.2, at planner z -0.24 (map 0.01): the floor top around the hole, per 0.1 m cell, median -0.28 north, -0.23 west, -0.22 at the mouth (the lower floor south of it -0.41 is a different level).",
+ "floor": [
+  {
+   "name": "west_mouth_floor",
+   "c": [
+    -1.737,
+    1.078
+   ],
+   "size": [
+    1.5,
+    3.1
+   ],
+   "yaw_deg": -90.7,
+   "z": 0.01
+  }
  ]
 }

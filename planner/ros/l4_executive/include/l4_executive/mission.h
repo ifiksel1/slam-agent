@@ -77,4 +77,24 @@ class SettleWindow {
 
 double wrap_pi(double a);
 
+// SUPER's re-seed goal altitude (fc frame, m; owner 2026-10-29). Container fly-through k1: each seed went
+// 0.3 m above where the vehicle was, SUPER flew to it, and the next seed went 0.3 m above that (1.05 ->
+// 1.35 -> 1.64 m under a 2.15 m roof). Now the seed is `dz` from the vehicle, up when the vehicle is at or
+// below the leg's planned altitude there, down when above it. The planned altitude: the straight line from
+// the leg's start to its goal, at the vehicle's horizontal progress along it (clamped to the leg; a leg with
+// no horizontal length: the vehicle's altitude clamped between the start's and the goal's); a seed (a
+// vertical move) does not change it. So a seed is always a real dz move (SUPER needs one from rest, Gate L2
+// b7; a seed at plan + dz with the vehicle already there was a 5 mm move in SITL m2 and leg 7 went
+// unreachable), never higher than plan + dz unless the vehicle is already higher (then it goes down), and
+// repeats do not stack: they alternate within plan +- dz. ceiling_above (the bridge's "ceiling_above": from
+// the vehicle up to the lowest point over it, m): the seed at most `ceiling_clear` (SUPER's inflation and a
+// cell) below that point; capped then (it may be below the vehicle: a move away from the ceiling).
+struct SeedAltitude {
+  double z;        // the seed's altitude
+  double plan_z;   // the leg's planned altitude at the vehicle
+  bool capped;     // held down by the ceiling
+};
+SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& goal, const Eigen::Vector3d& here,
+                           double dz, std::optional<double> ceiling_above, double ceiling_clear);
+
 }  // namespace l4_executive

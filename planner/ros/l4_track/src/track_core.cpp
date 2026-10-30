@@ -19,6 +19,13 @@
 // of the obstacle band and counts, per cell, the scans that hit it and the scans that saw through it;
 // apply_evidence() drops obstacle cells seen through more often than hit. With a prior map this uses
 // the mapping run's keyframes; on the live window the latest scans (the latest observation wins).
+// Every return is judged against its own tile's local ground (on the live window each scan gets a
+// ground-only grid of the window's points around the sensor), never one flat level at the robot's
+// floor (2026-10-29: from a floor gap beside lower ground, SITL k5/k6, the flat level read a container
+// floor 0.15 m up the sill as 0.36 m up, walls from afar). A tile with no floor seen (ground_seen 0:
+// no points, or only a ceiling) has a stand-in level, the nearest seen tile's; its returns are judged
+// against the sensor's floor instead, as before, and the sensor's own floor, if its tile is one, is the
+// highest floor seen within a tile of it (none: the scan's hits only, no see-throughs).
 //
 // Footprint. The frame is 0.508 m long and 0.457 m wide (landing FOOTPRINT) plus margin each side,
 // and the planned point is the odometry point (the IMU, footprint_offset 0.193 m ahead of the frame
@@ -80,7 +87,14 @@
 // - whole maps use the first, band-level evidence model (rays to the farthest return), which
 //   overstates see-throughs; it works over hundreds of keyframes, not for a few scans;
 // - doors seen open and closed equally often stay obstacles in a prior map;
-// - the ground model is one level per 0.5 m tile: no steps or ramps, one storey; glass is untested;
+// - the ground model is one level per 0.5 m tile: no steps or ramps, one storey; glass is untested.
+//   A tile across a step takes its lower level (20th percentile), so the upper side's floor next to
+//   the edge can read up to the step's height above it (SITL container: floor -0.12 in a tile reaching
+//   the lower floor outside, -0.43, counted at z_lo 0.30 within ~0.3 m of the south wall). In the
+//   per-scan evidence a tile with no floor seen is judged at the sensor's floor (the old flat
+//   assumption, kept there: leaving those returns out, unknown, lost a wall check on house_current,
+//   258/259, and changed the map-mode evidence); a robot standing where no floor is seen takes the
+//   highest floor seen within a tile, never the nearest (that was a lower floor in k5);
 // - pivots are checked where the plan puts them; Rover may also pivot elsewhere if its heading lags
 //   the carrot by more than 60 deg on a turn under pivot_angle (not seen in the drive-chain model);
 //   the follower's frame is not checked within start_skip (0.5 m) of the start, only a clearance (a
@@ -578,10 +592,26 @@ HeightGrid::HeightGrid(const Cloud& points, ConfigPtr cfg_, std::optional<V2> lo
   ny = int(std::ceil((bhi.y() - lo.y()) / rm)) * m + m;
   nx = int(std::ceil((bhi.x() - lo.x()) / rm)) * m + m;
   const size_t n = size_t(ny) * nx;
+  const int64_t off = int64_t(1) << 20, mask = (int64_t(1) << 21) - 1;
+  if (ground_only && !floor_z) {
+    // the ground alone needs each cell's lowest voxel, no voxel counts: one pass, no sort (the same cellmin)
+    std::vector<int64_t> kmin(n, std::numeric_limits<int64_t>::max());
+    for (auto& p : points) {
+      int64_t jx = int64_t(std::floor((p.x - lo.x()) / r)), iy = int64_t(std::floor((p.y - lo.y()) / r));
+      if (jx < 0 || iy < 0 || jx >= nx || iy >= ny) continue;
+      int64_t kz = int64_t(std::floor(p.z / (r * 0.5)));
+      int64_t& km = kmin[size_t(iy * nx + jx)];
+      km = std::min(km, kz);
+    }
+    cellmin.assign(n, NaN);
+    for (size_t q = 0; q < n; ++q)
+      if (kmin[q] != std::numeric_limits<int64_t>::max()) cellmin[q] = (double(kmin[q]) + 0.5) * r * 0.5;
+    ground_model(m);
+    return;
+  }
   // distinct voxels (res/2 high), so a map and a pile of scans count alike
   std::vector<int64_t> key;
   key.reserve(points.size());
-  const int64_t off = int64_t(1) << 20, mask = (int64_t(1) << 21) - 1;
   for (auto& p : points) {
     int64_t jx = int64_t(std::floor((p.x - lo.x()) / r)), iy = int64_t(std::floor((p.y - lo.y()) / r));
     if (jx < 0 || iy < 0 || jx >= nx || iy >= ny) continue;
@@ -598,10 +628,12 @@ HeightGrid::HeightGrid(const Cloud& points, ConfigPtr cfg_, std::optional<V2> lo
     z[q] = (double((key[q] & mask) - off) + 0.5) * r * 0.5;
     if (q == 0 || k[q] != k[q - 1]) cellmin[k[q]] = z[q];   // sorted: each cell's lowest voxel first
   }
-  if (floor_z)
+  if (floor_z) {
     ground.assign(n, *floor_z);
-  else
+    ground_seen.assign(n, 1);
+  } else {
     ground_model(m);
+  }
   if (ground_only) return;
   count.assign(n, 0);
   std::vector<int> tall(n, 0);
@@ -691,6 +723,9 @@ void HeightGrid::ground_model(int m) {
     }
   for (size_t q = 0; q < g.size(); ++q)
     if (std::isfinite(g[q]) && std::isfinite(nb[q]) && g[q] > nb[q] + c.furniture_step) g[q] = nb[q];
+  ground_seen.resize(size_t(ny) * nx);
+  for (int i = 0; i < ny; ++i)
+    for (int j = 0; j < nx; ++j) ground_seen[size_t(i) * nx + j] = std::isfinite(g[size_t(i / m) * tx + j / m]);
   std::vector<uint8_t> miss(g.size());
   bool all = true, some = false;
   for (size_t q = 0; q < g.size(); ++q) {
@@ -994,6 +1029,31 @@ Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vect
   const Config& c = *hg.cfg;
   const double r = c.res;
   const int ny = hg.ny, nx = hg.nx;
+  // the floor under the sensor. A tile with no floor seen has no level of its own (its ground is the
+  // nearest seen tile's stand-in, which may be a lower floor beside the robot): the highest floor seen
+  // within a tile of the sensor (the higher the floor, the later a ray enters the band: fewer
+  // see-throughs); none seen there: no see-through evidence from this scan, its hits only
+  auto seen = [&](size_t k) { return hg.ground_seen.empty() || hg.ground_seen[k] != 0; };
+  Cell sc = hg.cell(V2(s.x(), s.y()));
+  double g0 = NaN;
+  bool rays = true;
+  if (hg.inside(sc) && seen(hg.idx(sc.first, sc.second))) {
+    g0 = hg.ground[hg.idx(sc.first, sc.second)];
+  } else if (hg.inside(sc)) {
+    const int m = int(std::nearbyint(c.tile / r));
+    for (int i = std::max(0, sc.first - m); i <= std::min(ny - 1, sc.first + m); ++i)
+      for (int j = std::max(0, sc.second - m); j <= std::min(nx - 1, sc.second + m); ++j)
+        if (seen(hg.idx(i, j)) && !(hg.ground[hg.idx(i, j)] <= g0)) g0 = hg.ground[hg.idx(i, j)];
+    rays = !std::isnan(g0);
+  } else {
+    std::vector<double> gk;
+    for (auto& p : pts) {
+      int64_t j = int64_t(std::floor((p.x - hg.lo.x()) / r)), i = int64_t(std::floor((p.y - hg.lo.y()) / r));
+      double rng = std::hypot(p.x - s.x(), p.y - s.y());
+      if (j >= 0 && i >= 0 && j < nx && i < ny && rng > 0.3 && rng < c.ray_range) gk.push_back(hg.ground[i * nx + j]);
+    }
+    g0 = gk.empty() ? 0.0 : median(gk);
+  }
   struct Pt {
     double rng, h, dx, dy;
     int k;
@@ -1006,7 +1066,11 @@ Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vect
     int64_t j = int64_t(std::floor((p.x - hg.lo.x()) / r)), i = int64_t(std::floor((p.y - hg.lo.y()) / r));
     if (!(j >= 0 && i >= 0 && j < nx && i < ny && rng > 0.3 && rng < c.ray_range)) continue;
     int k = int(i * nx + j);
-    v.push_back({rng, p.z - hg.ground[k], dx, dy, k});
+    // each return against its own tile's ground (the per-scan grid's local model); in a tile with no
+    // floor seen, against the sensor's floor (unknown: none there, the return is left out)
+    double gk = seen(size_t(k)) ? hg.ground[k] : g0;
+    if (std::isnan(gk)) continue;
+    v.push_back({rng, p.z - gk, dx, dy, k});
   }
   Evidence ev;
   // a hit is anything from z_lo up to z_tall (a wall seen only above the band still counts); a cell
@@ -1022,17 +1086,9 @@ Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vect
   };
   uniq(ev.hit);
   uniq(ev.wall);
-  Cell sc = hg.cell(V2(s.x(), s.y()));
-  double g0;
-  if (hg.inside(sc)) {
-    g0 = hg.ground[hg.idx(sc.first, sc.second)];
-  } else if (!v.empty()) {
-    std::vector<double> gk;
-    for (auto& q : v) gk.push_back(hg.ground[q.k]);
-    g0 = median(gk);
-  } else {
-    g0 = 0.0;
-  }
+  if (!rays) return ev;
+  // the rays' band crossings below take the ground as a straight ramp from the sensor's floor to each
+  // return's own (the same formula as flat ground, with heights above the local ground)
   const double hs = s.z() - g0;
   const int nb = c.ray_bins;
   std::vector<double> start(nb, INF), reach(nb, 0.0), near(nb, INF), far(nb, 0.0);
@@ -2322,16 +2378,27 @@ void LiveWindow::correct(HeightGrid& hg) {
   }
   double now = recent.back().t;
   size_t q0 = recent.size() > size_t(max_new) ? recent.size() - max_new : 0;
+  CloudF all;
+  bool have_all = false;
   for (size_t q = q0; q < recent.size(); ++q) {
     const Scan& sc = recent[q];
     if (sc.seq <= done) continue;
-    // each scan on its own grid around the sensor (not clipped to this plan's box), the ground flat
-    // at the robot's floor (the plan grid's ground under it)
-    Cell cc = hg.cell(V2(sc.s.x(), sc.s.y()));
-    double g0 = hg.inside(cc) ? hg.ground[hg.idx(cc.first, cc.second)] : median(hg.ground);
+    // each scan on its own grid around the sensor (not clipped to this plan's box), every return judged
+    // against its own tile's local ground (the plan grid's model, over the live window's points around
+    // the sensor), not one flat level at the robot's floor: from a floor gap next to lower ground the
+    // flat level read the container floor 0.36 m higher as walls (SITL k5/k6, 2026-10-29)
+    if (!have_all) {
+      all = points();
+      have_all = true;
+    }
     double R = c.ray_range;
     V2 s2(sc.s.x(), sc.s.y());
-    HeightGrid eg(Cloud{}, cfg, V2(s2.array() - R), V2(s2.array() + R), g0, true);
+    V2 elo = s2.array() - R, ehi = s2.array() + R;
+    Cloud gp;
+    gp.reserve(all.size());
+    for (auto& p : all)
+      if (p.x >= elo.x() && p.y >= elo.y() && p.x <= ehi.x() && p.y <= ehi.y()) gp.push_back({p.x, p.y, p.z});
+    HeightGrid eg(gp, cfg, elo, ehi, std::nullopt, true);
     Evidence ev = scan_evidence(eg, to_double(sc.p), sc.s, true);
     mem->add(eg, ev, sc.t);
   }

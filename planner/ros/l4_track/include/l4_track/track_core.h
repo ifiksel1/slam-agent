@@ -131,6 +131,9 @@ class HeightGrid {
   std::vector<double> cellmin, ground, clear;
   std::vector<int> count;
   std::vector<uint8_t> occ, seen_up, floor_seen, known, seen_free;   // seen_free empty: none
+  // per cell: its tile has a floor level of its own; 0: no floor seen there (no points, or only a ceiling
+  // or wall top), its ground is the nearest such tile's, a stand-in (empty: all seen, a fixed floor_z)
+  std::vector<uint8_t> ground_seen;
   int idx(int i, int j) const { return i * nx + j; }
   std::pair<int, int> cell(const V2& xy) const;
   V2 xy(std::pair<int, int> c) const;

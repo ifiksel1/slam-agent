@@ -1,7 +1,7 @@
 {
  "base": "/home/shannon-mini/sim/marsim/maps/hp_1015_carved.pcd",
  "n_base": 1117928,
- "n_added": 21762,
+ "n_added": 24247,
  "spacing": 0.04472174339701219,
  "obstacles": [
   {
@@ -85,6 +85,21 @@
    "r": 0.075,
    "h": 2.5,
    "z0": -0.1799999952316284
+  }
+ ],
+ "floor": [
+  {
+   "name": "west_mouth_floor",
+   "c": [
+    -1.737,
+    1.078
+   ],
+   "size": [
+    1.5,
+    3.1
+   ],
+   "yaw_deg": -90.7,
+   "z": 0.01
   }
  ]
 }

@@ -210,6 +210,22 @@ TEST(Output, ReverseSpeed) {
   EXPECT_NEAR(*reverse_speed(Vec3(0, -2.0, 0), Vec3(0, -0.3, 0), M_PI / 2, Vec3(0, 0, 0)), 0.3, 1e-7);
 }
 
+TEST(Output, CeilingOverTheVehicle) {
+  // container fly-through k1: the roof 1.1 m over the vehicle at 1.05 m; walls 1.05 m to either side
+  CeilingFinder c(Vec3(0, 0, 1.05), 0.6, 0.15);
+  EXPECT_FALSE(c.above());
+  c.add(0.0, 1.05, 1.5);    // a wall, outside the radius
+  c.add(0.3, 0.0, 1.15);    // 0.10 m up: the vehicle's own level, not a ceiling
+  c.add(0.1, 0.0, -0.05);   // the floor
+  c.add(std::nan(""), 0.0, 1.5);
+  EXPECT_FALSE(c.above());
+  c.add(0.4, 0.3, 2.20);
+  c.add(-0.2, 0.1, 2.15);   // the lowest point over it
+  c.add(0.9, 0.0, 1.60);    // lower, but 0.9 m away
+  ASSERT_TRUE(c.above());
+  EXPECT_NEAR(*c.above(), 1.10, 1e-9);
+}
+
 TEST(Output, Geofence) {
   Geofence f(Vec3(-1, -1, 0), Vec3(1, 1, 2));
   EXPECT_TRUE(f.inside(Vec3(0, 0, 1)));

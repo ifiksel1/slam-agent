@@ -1,0 +1,44 @@
+# Hensel Phelps container fly-through (L2 closed loop, SITL): take off at the real takeoff spot, fly
+# to the container's west mouth, through the container on its centreline at 1.05 m (planner frame) and
+# out of the east end, over the low object outside it, turn, and land on the open floor beyond.
+# Map: planner/sim/course/hp_gate_l2.pcd (the Gate L2 course map, = hp_1015_carved.pcd + the course
+# obstacles, none of them on this route; clearance.py needs its obstacles.json). Start 0.00, 0.00,
+# yaw -90.7 (map x, y, deg): the real takeoff spot.
+#
+# The container, measured in the planner frame of runs on this map (map = Rz(-90.7) planner + start,
+# start (-0.002, -0.193, 0.25); mission z = planner z + 0.25):
+#   a tunnel along planner x from -0.35 to 5.85, open at both ends, its axis turned ~2.5 deg from x:
+#   inner wall faces y -1.50 / -3.60 at x = 1 and -1.30 / -3.45 at x = 5 (2.1 m inside), centreline
+#   y = -2.55 + 0.045 (x - 1); floor top -0.05..-0.10 (outside ground -0.20..-0.30), roof underside
+#   2.10-2.18. Nothing inside: 8 points in the whole interior between 0.2 and 1.9 m (the "few hundred per
+#   slice" are the walls, which are skewed against planner x).
+#   Low object outside the east end: x 6.6..7.9, y -1.75..-3.25, top 0.65-0.70 (0.9 m above the ground),
+#   0.75 m from the east end: no way round it at flight height (the gaps either side of it between the
+#   container corners are 1.1 m, the inflated sphere needs more), so the route climbs over it.
+#   SUPER (super_closed_loop_hp.yaml, ROG-Map 0.1 m cells, inflation 0.5 m): free inside the container
+#   for the centre: about 1.1 m wide and z 0.5..1.6; over the object z >= 1.2; between the roof's end
+#   and the object (x 6.1..6.35) z 1.2..1.6.
+#
+#   W1  (-1.20, -0.90, 1.05)   west of the container's north-west corner (SUPER would otherwise cut it)
+#   A   (-1.10, -2.64, 1.05)   0.75 m outside the west mouth, on the centreline; the 0.9-1.6 m clutter
+#                              at y -3.1 west of x -1.4 stays 0.5 m away
+#   C   ( 5.40, -2.35, 1.05)   inside the east end, on the centreline (1.1 m under the roof)
+#   D   ( 8.70, -2.50, 1.45)   past the object, 0.75 m above its top
+#   land (9.45, -3.58)         the Gate L2 first landing spot (map (-3.70, -9.60)), read clear from
+#                              180-220 deg (map) arrivals; D -> spot arrives at 214 deg
+name: hp_container_fly
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.89, 1.02, 1.30]}       # W1
+  - {type: fly, goal: [-2.63, 0.94, 1.30]}       # A, west mouth; turn to face the container
+  - {type: fly, goal: [-2.42, -5.56, 1.30]}      # C, through the container on its centreline
+  - {type: fly, goal: [-2.61, -8.86, 1.70]}      # D, out of the east end and over the low object
+  - {type: land, at: [-3.70, -9.60]}             # turn, landing check, NAV_LAND

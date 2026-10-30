@@ -218,4 +218,28 @@ bool SettleWindow::settled(double speed_max, double rate_max, std::optional<doub
   return true;
 }
 
+SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& goal, const Eigen::Vector3d& here,
+                           double dz, std::optional<double> ceiling_above, double ceiling_clear) {
+  const Eigen::Vector2d d = (goal - start).head<2>();
+  const double len2 = d.squaredNorm();
+  double plan_z;
+  if (len2 > 1e-4) {
+    const double s = std::clamp((here - start).head<2>().dot(d) / len2, 0.0, 1.0);
+    plan_z = start[2] + s * (goal[2] - start[2]);
+  } else {
+    plan_z = std::clamp(here[2], std::min(start[2], goal[2]), std::max(start[2], goal[2]));
+  }
+  // always a dz move from the vehicle (SUPER needs a real move from rest, Gate L2 b7; m2: a seed 5 mm from
+  // the vehicle left leg 7 unreachable): up when at or below the plan, down toward it when above
+  SeedAltitude out{here[2] <= plan_z ? here[2] + dz : here[2] - dz, plan_z, false};
+  if (ceiling_above) {
+    const double cap = here[2] + *ceiling_above - ceiling_clear;
+    if (out.z > cap) {
+      out.z = cap;
+      out.capped = true;
+    }
+  }
+  return out;
+}
+
 }  // namespace l4_executive

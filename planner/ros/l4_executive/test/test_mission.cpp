@@ -105,6 +105,60 @@ TEST(Settle, NeedsAFullWindowStillAndOnTarget) {
   EXPECT_TRUE(wrap.settled(0.1, r5, M_PI, 0.1));
 }
 
+// SUPER's re-seed altitude (owner 2026-10-29: 0.1 m; container fly-through k1: 0.3 m seeds above the vehicle
+// stacked 1.05 -> 1.35 -> 1.64 m)
+TEST(Seed, AboveTheLegsPlannedAltitudeNotTheVehicle) {
+  using V = Eigen::Vector3d;
+  const V start(-1.1, -2.64, 1.05), goal(5.4, -2.35, 1.05);   // k1 leg 3: through the container at 1.05 m
+  // at the leg start: 0.1 m above it
+  SeedAltitude s = seed_altitude(start, goal, start, 0.1, std::nullopt, 0.6);
+  EXPECT_NEAR(s.z, 1.15, 1e-9);
+  EXPECT_NEAR(s.plan_z, 1.05, 1e-9);
+  EXPECT_FALSE(s.capped);
+  // the vehicle flew to that seed: the next one goes back down to the plan, not up (k1 sent 1.35, then 1.64)
+  EXPECT_NEAR(seed_altitude(start, goal, V(-1.1, -2.64, 1.15), 0.1, std::nullopt, 0.6).z, 1.05, 1e-9);
+  // far above the plan (k1's 1.64): down 0.1 toward it, never up
+  EXPECT_NEAR(seed_altitude(start, goal, V(-1.1, -2.64, 1.64), 0.1, std::nullopt, 0.6).z, 1.54, 1e-9);
+  // a little below the plan: up 0.1 (a real move, at most plan + 0.1)
+  EXPECT_NEAR(seed_altitude(start, goal, V(-1.1, -2.64, 1.03), 0.1, std::nullopt, 0.6).z, 1.13, 1e-9);
+  // repeated seeds, the vehicle flying to each: never stack, always a 0.1 m move, within plan +- 0.1
+  V here = start;
+  for (int i = 0; i < 6; ++i) {
+    const double z = seed_altitude(start, goal, here, 0.1, std::nullopt, 0.6).z;
+    EXPECT_NEAR(std::abs(z - here[2]), 0.1, 1e-9);
+    EXPECT_LE(z, 1.15 + 1e-9);
+    EXPECT_GE(z, 1.05 - 1e-9);
+    here[2] = z;
+  }
+  // a climbing leg (1.0 -> 2.0 over 4 m): the plan's altitude at the vehicle's progress, clamped to the leg
+  const V s2(0, 0, 1.0), g2(4, 0, 2.0);
+  EXPECT_NEAR(seed_altitude(s2, g2, V(1, 0.5, 1.2), 0.1, std::nullopt, 0.6).plan_z, 1.25, 1e-9);
+  EXPECT_NEAR(seed_altitude(s2, g2, V(1, 0.5, 1.2), 0.1, std::nullopt, 0.6).z, 1.3, 1e-9);   // below: up
+  EXPECT_NEAR(seed_altitude(s2, g2, V(1, 0.5, 1.6), 0.1, std::nullopt, 0.6).z, 1.5, 1e-9);   // above: down
+  EXPECT_NEAR(seed_altitude(s2, g2, V(-1, 0, 1.0), 0.1, std::nullopt, 0.6).plan_z, 1.0, 1e-9);   // behind the start
+  EXPECT_NEAR(seed_altitude(s2, g2, V(6, 0, 2.0), 0.1, std::nullopt, 0.6).plan_z, 2.0, 1e-9);    // past the goal
+  // a vertical leg: the vehicle's altitude, clamped between the start's and the goal's
+  EXPECT_NEAR(seed_altitude(V(0, 0, 1.0), V(0, 0, 1.5), V(0, 0, 1.2), 0.1, std::nullopt, 0.6).z, 1.3, 1e-9);
+  EXPECT_NEAR(seed_altitude(V(0, 0, 1.0), V(0, 0, 1.5), V(0, 0, 3.0), 0.1, std::nullopt, 0.6).z, 2.9, 1e-9);
+}
+
+TEST(Seed, CappedBelowTheCeiling) {
+  using V = Eigen::Vector3d;
+  const V start(0, 0, 1.05), goal(6, 0, 1.05);
+  // a roof 1.1 m over the vehicle (2.15 m): 1.15 m is 1.0 m below it, clear of 0.6: not capped
+  SeedAltitude s = seed_altitude(start, goal, start, 0.1, 1.1, 0.6);
+  EXPECT_NEAR(s.z, 1.15, 1e-9);
+  EXPECT_FALSE(s.capped);
+  // a ceiling 0.65 m over the vehicle: at most 0.05 m above it
+  s = seed_altitude(start, goal, start, 0.1, 0.65, 0.6);
+  EXPECT_NEAR(s.z, 1.10, 1e-9);
+  EXPECT_TRUE(s.capped);
+  // the vehicle already within 0.6 m of the ceiling: the seed below it, away from the ceiling
+  s = seed_altitude(start, goal, start, 0.1, 0.4, 0.6);
+  EXPECT_NEAR(s.z, 0.85, 1e-9);
+  EXPECT_TRUE(s.capped);
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

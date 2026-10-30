@@ -284,6 +284,29 @@ class RefBuffer {
   std::vector<Sample> s_;
 };
 
+// ---- the local ceiling (container fly-through k1, 2026-10-29) -------------------------------------------
+// The lowest cloud point over the vehicle: the points within `radius` of it horizontally and more than
+// `min_up` above it (the vehicle's own body, the level it flies at), planner frame. above(): from the vehicle
+// up to that point (m), none when no point is over it. The bridge reports it in its status ("ceiling_above"),
+// and the executive keeps SUPER's re-seed goal SUPER's inflation below it.
+class CeilingFinder {
+ public:
+  CeilingFinder(const Vec3& at, double radius, double min_up) : at_(at), r2_(radius * radius), min_up_(min_up) {}
+  void add(double x, double y, double z) {
+    const double up = z - at_[2];
+    if (!(up > min_up_)) return;   // also NaN
+    const double dx = x - at_[0], dy = y - at_[1];
+    if (!(dx * dx + dy * dy <= r2_)) return;   // also NaN
+    if (!best_ || up < *best_) best_ = up;
+  }
+  std::optional<double> above() const { return best_; }
+
+ private:
+  Vec3 at_;
+  double r2_, min_up_;
+  std::optional<double> best_;
+};
+
 // printf-style formatting into a std::string (the Python "%" reasons)
 std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
 

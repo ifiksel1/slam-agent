@@ -1,0 +1,53 @@
+# Hensel Phelps container drive-through (L2 closed loop, SITL): take off, land in front of the
+# container's west mouth after the landing check, drive through the container (over the ~0.15 m floor
+# step at both ends) to the east side, take off there and land.
+# Map: planner/sim/course/hp_gate_l2.pcd (the Gate L2 course map; its obstacles are off this route).
+# Start 0.00, 0.00, yaw -90.7 (map x, y, deg). The container's measurements are in
+# hp_container_fly.yaml; planner frame below (map = Rz(-90.7) planner + (-0.002, -0.193)).
+#
+# The floor in front of the west mouth (planner x -2.0..-0.5, y -3.3..-0.2) is not in hp_1015.pcd; the
+# course map fills it flat at planner z -0.24 (hp_gate_l2.json "floor", 2026-10-29), the floor top
+# around it (-0.28 north, -0.23 west, -0.22 at the mouth).
+#   W1  (-1.20, -0.90, 1.05)   fly first, as hp_container_fly's leg 1 (k1): a land leg straight from the start
+#                              (k4) never left the start: SUPER's backup trajectory failed ("Ill corridor"),
+#                              UNREACHABLE after 20 s, STOPPED.
+#   L   (-1.20, -2.35)   land on the filled floor 0.85 m outside the west mouth, facing the drive (east). The
+#                        landing disc (r 0.54 m) stays on the flat patch with either point of the frame at
+#                        the spot, 0.70 m from the 0.8-1.2 m clutter at y -3.05..-3.25 (x <= -1.3) and
+#                        0.8 m from the low objects at x -2.4..-1.9, y -2.15..-2.95. The earlier spots on
+#                        mapped floor next to the start were refused for 0.05-0.06 m map floor bumps read at
+#                        0.08-0.09 m against a ~0.07 m limit (k2 (-0.90, 0.10), k3 (-1.08, -0.12)); k4-k6
+#                        landed at (-3.30, -0.50) and crossed the floor gap.
+#   I   ( 5.20, -2.35)   drive 1: east through the container on its centreline (a goal inside, so the only
+#                        way is through), to 0.65 m inside the east end. Before the track planner's
+#                        per-scan evidence was judged per tile (2026-10-29) the robot read the container
+#                        floor as walls from the floor gap (k5 drove round the outside, k6 oscillated).
+#   G   ( 7.00, -4.30)   drive 2: out of the east end and south-east past the low object (x 6.6..7.9,
+#                        y -1.75..-3.25; 1.1 m between it and the container's south-east corner), 1.1 m from
+#                        it and from the Gate L2 door wall (y -5.44); clear of the roof edge (x 5.85) for the
+#                        takeoff
+#   land (9.45, -3.58)   the Gate L2 first landing spot (map (-3.70, -9.60)), facing 219 deg (map): k1 landed
+#                        there clear from that heading; k5 arrived from G at 284 deg and the check refused
+#                        ("occupied: 2 cells, 15 points up to 0.12 m above the floor")
+# Track planner in SITL (closed_loop.sh): z_lo 0.30 above a ground level per 0.5 m tile, so the 0.15 m
+# step onto the container floor is ground, not an obstacle; z_tall 2.0: the roof underside (2.12-2.3)
+# is 2.27 m and more above the container floor's tiles, above the column band. SITL's own ground is flat
+# (map z = 0): the simulated robot drives 0.13-0.20 m below the container floor and its lidar (LIDAR_UP
+# 0.25) sits ~0.1 m above it.
+name: hp_container_drive
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.89, 1.02, 1.30]}                                # W1
+  - {type: land, at: [-2.34, 1.04]}                                        # L: landing check, NAV_LAND
+  - {type: drive, goal: [-2.42, -5.36], speed: 1.0, accept_radius: 0.4}   # I: through the container
+  - {type: drive, goal: [-4.39, -7.14], speed: 1.0, accept_radius: 0.4}   # G: out of the east end
+  - {type: takeoff, height: 1.00}
+  - {type: land, at: [-3.70, -9.60], yaw: 219}                             # landing check, NAV_LAND

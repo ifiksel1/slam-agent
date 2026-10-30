@@ -145,6 +145,15 @@
 // Status "turn_slow": {"err_deg", "frac" (of the speed cap the heading allows), "allowed" (the cap applied,
 // m/s), "rate", "lag_s"} (null when not replaying). ~turn_slow_enable false: SUPER's newest command capped
 // at ~speed_cap, as before.
+//
+// The local ceiling (container fly-through k1, 2026-10-29: SUPER's re-seed goals, 0.3 m above the vehicle each,
+// stacked to 1.64 m under a 2.15 m roof). Each /cloud_registered scan, in the planner frame, gives the lowest
+// point within ~ceiling_radius (0.6 m: SUPER's 0.5 m inflation and a cell) of the vehicle horizontally and more
+// than ~ceiling_min_up (0.15 m) above it (bridge_core CeilingFinder). Status "ceiling_above": from the vehicle up
+// to that point (m), from a scan at most ~ceiling_max_age (1.0 s) old; null when no point is over the vehicle,
+// or no recent scan. The executive keeps SUPER's re-seed goal SUPER's inflation below it.
+// A flight HOLD holds the vehicle's position when the hold began (zero velocity): it never climbs, whatever
+// SUPER's last command was (k1: 1.046 m and 1.334 m held flat through both of SUPER's silences).
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -262,6 +271,10 @@ class PlannerBridge {
     turn_accel_ = l4::param_double(pnh_, "turn_slow_accel", 1.5);
     turn_catchup_ = l4::param_double(pnh_, "turn_slow_catchup", 1.5);
     turn_max_lag_ = l4::param_double(pnh_, "turn_slow_max_lag_s", 0.5);
+    // the local ceiling over the vehicle (status "ceiling_above"; the executive caps SUPER's re-seed with it)
+    ceiling_radius_ = l4::param_double(pnh_, "ceiling_radius", 0.6);
+    ceiling_min_up_ = l4::param_double(pnh_, "ceiling_min_up", 0.15);
+    ceiling_max_age_ = l4::param_double(pnh_, "ceiling_max_age", 1.0);
     // the executive's go-ahead; ~require_enable false streams in every GUIDED (bench use only)
     enabled_ = !l4::param_bool(pnh_, "require_enable", true);
     liveness_.start();
@@ -340,6 +353,9 @@ class PlannerBridge {
     // rotate x, y, z in place (fields are float32 at offsets 0, 4, 8 in FAST-LIO's clouds)
     sensor_msgs::PointCloud2 out(*m);
     const size_t step = m->point_step;
+    // the local ceiling over the vehicle (its newest planner-frame position), from the same points
+    std::optional<CeilingFinder> ceil;
+    if (last_planner_) ceil.emplace(last_planner_->first, ceiling_radius_, ceiling_min_up_);
     if (step >= 12) {
       const size_t n = out.data.size() / step;
       for (size_t i = 0; i < n; ++i) {
@@ -348,7 +364,12 @@ class PlannerBridge {
         std::memcpy(xyz, d, 12);
         const float planner[3] = {xyz[2], xyz[0], xyz[1]};   // POSITION_MATRIX: (z, x, y)
         std::memcpy(d, planner, 12);
+        if (ceil) ceil->add(planner[0], planner[1], planner[2]);
       }
+    }
+    if (ceil) {
+      t_ceiling_ = now();
+      ceiling_ = ceil->above();
     }
     out.header.frame_id = "world";
     pub_cloud_.publish(out);
@@ -762,6 +783,9 @@ class PlannerBridge {
     } else {
       s["turn_slow"] = nullptr;
     }
+    // the local ceiling over the vehicle (m above it; null: none seen over it, or no recent scan)
+    const bool ceil_fresh = t_ceiling_ && t_now - *t_ceiling_ <= ceiling_max_age_;
+    s["ceiling_above"] = ceil_fresh && ceiling_ ? l4::ojson(l4::py_round(*ceiling_, 3)) : l4::ojson(nullptr);
     std_msgs::String out;
     out.data = l4::dumps(s);
     pub_status_.publish(out);
@@ -810,6 +834,8 @@ class PlannerBridge {
   bool turn_slow_ = true;
   double turn_start_ = 0.0, turn_full_ = 0.0, turn_min_frac_ = 0.25, turn_lookahead_ = 0.5, turn_accel_ = 1.5,
          turn_catchup_ = 1.5, turn_max_lag_ = 0.5;
+  double ceiling_radius_ = 0.6, ceiling_min_up_ = 0.15, ceiling_max_age_ = 1.0;
+  std::optional<double> t_ceiling_, ceiling_;   // the newest scan's time and its ceiling over the vehicle
   RefBuffer ref_;                                       // SUPER's recent commands (planner frame, receive time)
   bool replay_on_ = false, replay_tick_ = false;        // replaying; this tick replayed
   double tau_ = 0.0;                                    // the replay time (receive time of SUPER's commands)

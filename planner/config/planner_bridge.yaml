@@ -34,6 +34,13 @@ turn_slow_catchup: 1.5       # x SUPER's pace the replay may catch up at (within
 turn_slow_max_lag_s: 0.5     # s behind SUPER's newest command where the lag levels off (SUPER checks its backup from
                              # the vehicle: b9, with 2.0, saw SUPER stall at the tower 0.77 s behind)
 
+# the local ceiling over the vehicle (status "ceiling_above"; the executive keeps SUPER's re-seed goal
+# ~seed_ceiling_clear below it). Container fly-through k1 (2026-10-29): stacked 0.3 m re-seeds took the
+# vehicle to 1.64 m under a 2.15 m roof
+ceiling_radius: 0.6          # m horizontally from the vehicle (SUPER's 0.5 m inflation and a cell)
+ceiling_min_up: 0.15         # m above the vehicle a point must be to count (its own body, its level)
+ceiling_max_age: 1.0         # s: an older scan's ceiling is not reported (null)
+
 # HOLD triggers
 planner_timeout: 0.3         # s since the mode's planner command (SUPER ~100 Hz, track planner 10 Hz)
                              # older: HOLD "planner stale" (resumable) while the planner process is

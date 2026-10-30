@@ -117,6 +117,7 @@ struct World {
   double yaw_travel = 0.0;                     // total yaw turned, rad
   std::optional<double> yaw_at_land;           // the yaw when NAV_LAND came
   std::vector<double> yaw_at_goal;             // the yaw when each click_goal came
+  double max_z = 0.0;                          // the highest the vehicle has been (m)
 
   ros::NodeHandle nh;
   std::vector<ros::ServiceServer> srvs;
@@ -127,6 +128,7 @@ struct World {
   void reset() {
     std::lock_guard<std::mutex> g(m);
     pos = Vec3::Zero();
+    max_z = 0.0;
     target.reset();
     mode = 0;
     armed = connected = true;
@@ -394,6 +396,7 @@ struct World {
     ps.pose.position.x = pos[0];
     ps.pose.position.y = pos[1];
     ps.pose.position.z = pos[2];
+    max_z = std::max(max_z, pos[2]);
     const double y_pub = yaw + (yaw_wobble && pos[2] >= 0.05 ? 0.35 * std::sin(2 * M_PI * 0.5 * wall()) : 0.0);
     ps.pose.orientation.z = std::sin(y_pub / 2);
     ps.pose.orientation.w = std::cos(y_pub / 2);
@@ -481,10 +484,16 @@ std::vector<std::string> run_executive(const std::vector<ojson>& legs, std::func
   std::vector<std::string> args = {MISSION_EXECUTIVE, "__name:=mission_executive", "_mission:=" + path,
                                    "_unreachable_hold_s:=1.0", "_map_rebuild_s:=1.0", "_landing_check_s:=2.0",
                                    "_goal_settle_s:=0.2", "_takeoff_settle_s:=4.0", "_bridge_mode_timeout_s:=1.0"};
-  // no re-seed goals in between (the scenarios count goals by index) unless a scenario asks (S27-S29)
-  bool seed_arg = false;
-  for (const auto& a : extra_args) seed_arg = seed_arg || a.rfind("_leg_start_seed_dz:=", 0) == 0;
+  // no re-seed goals in between (the scenarios count goals by index) unless a scenario asks (S27-S30: any
+  // _leg_start_seed_* or _planner_stuck_* argument; without _leg_start_seed_dz the node's default, 0.1 m)
+  bool seed_arg = false, dz_arg = false;
+  for (const auto& a : extra_args) {
+    seed_arg = seed_arg || a.rfind("_leg_start_seed_", 0) == 0 || a.rfind("_planner_stuck_", 0) == 0;
+    dz_arg = dz_arg || a.rfind("_leg_start_seed_dz:=", 0) == 0;
+  }
   if (!seed_arg) args.push_back("_leg_start_seed_dz:=0.0");
+  // a private _x:= argument stays on the parameter server after its run: the node's default needs it gone
+  else if (!dz_arg) ros::param::del("/mission_executive/leg_start_seed_dz");
   args.insert(args.end(), extra_args.begin(), extra_args.end());
   pid_t pid = fork();
   if (pid == 0) {
@@ -1038,7 +1047,8 @@ TEST_F(Executive, S26_FacesTheFirstLegAfterTakeoff) {
 // 27. the leg start's turn, then SUPER re-seeded with a short climb before the leg's goal (Gate L2 b7: at rest
 // after the turn, SUPER's PlanFromRest never produced a plan)
 TEST_F(Executive, S27_LegStartReseedsThePlanner) {
-  const std::vector<std::string> extra = {"_leg_start_seed_dz:=0.3", "_leg_start_seed_s:=0.5"};
+  // ~leg_start_seed_dz at its default (0.1 m, owner 2026-10-29)
+  const std::vector<std::string> extra = {"_leg_start_seed_s:=0.5"};
   auto ph = run_executive({takeoff(1.0), fly(0.0, 3.0, 1.0)}, nullptr, nullptr, 40, true, ojson::object(), extra);
   check("takeoff, fly: DONE", last_is(ph, "DONE"), join(ph));
   const int wy = index_of(ph, "WAYPOINT_YAW"), sd = index_of(ph, "PLANNER_SEED"), lg = index_of(ph, "LEG");
@@ -1046,8 +1056,8 @@ TEST_F(Executive, S27_LegStartReseedsThePlanner) {
   std::lock_guard<std::mutex> g(W->m);
   check("two goals: the seed, then the leg's", W->goals.size() == 2, "goals " + std::to_string(W->goals.size()));
   if (W->goals.size() != 2) return;
-  check("the seed 0.3 m straight above the vehicle (it hovered at (0, 0, 1))",
-        (W->goals[0].second - Vec3(0.0, 0.0, 1.3)).norm() < 0.05, vstr(W->goals[0].second));
+  check("the seed 0.1 m (the default) straight above the vehicle (it hovered at (0, 0, 1), the leg's altitude)",
+        (W->goals[0].second - Vec3(0.0, 0.0, 1.1)).norm() < 0.02, vstr(W->goals[0].second));
   check("the leg's goal", (W->goals[1].second - Vec3(0.0, 3.0, 1.0)).norm() < 1e-6, vstr(W->goals[1].second));
   check("the leg's goal ~leg_start_seed_s after the seed", W->goals[1].first - W->goals[0].first >= 0.45,
         std::to_string(W->goals[1].first - W->goals[0].first));
@@ -1067,7 +1077,7 @@ TEST_F(Executive, S28_SilentPlannerIsReseeded) {
     W->block = {1};   // the leg's first goal (after the leg start's seed): SUPER finds no plan
     W->bridge_state = {{"state", "OK"}, {"planner_age", 0.01}};
   }
-  const std::vector<std::string> extra = {"_leg_start_seed_dz:=0.3", "_planner_stuck_s:=1.0"};
+  const std::vector<std::string> extra = {"_planner_stuck_s:=1.0"};
   auto during = [](double) {
     std::lock_guard<std::mutex> g(W->m);
     // silent from the leg's goal until its re-sent copy
@@ -1079,11 +1089,12 @@ TEST_F(Executive, S28_SilentPlannerIsReseeded) {
   std::lock_guard<std::mutex> g(W->m);
   check("goals: seed, leg (no plan), seed, leg", W->goals.size() == 4, "goals " + std::to_string(W->goals.size()));
   if (W->goals.size() != 4) return;
-  check("the second seed is vertical over where it held, the goal re-sent unchanged",
-        std::hypot(W->goals[2].second[0], W->goals[2].second[1]) < 0.4 &&
-            std::abs(std::abs(W->goals[2].second[2] - 1.3) - 0.3) < 0.05 &&
-            (W->goals[3].second - Vec3(0.0, 3.0, 1.0)).norm() < 1e-6,
-        vstr(W->goals[2].second) + " " + vstr(W->goals[3].second));
+  // the vehicle flew to the first seed (1.1 m, 0.1 m above the leg's 1.0 m): the second goes back down to
+  // the leg's altitude, not 0.1 m above the vehicle (k1: 1.05 -> 1.35 -> 1.64 m)
+  check("the second seed vertical over where it held, down to 1.0 m (no stacking), the goal re-sent unchanged",
+        std::hypot(W->goals[2].second[0], W->goals[2].second[1]) < 0.4 && std::abs(W->goals[2].second[2] - 1.0) < 0.02 &&
+            std::abs(W->goals[0].second[2] - 1.1) < 0.02 && (W->goals[3].second - Vec3(0.0, 3.0, 1.0)).norm() < 1e-6,
+        vstr(W->goals[0].second) + " " + vstr(W->goals[2].second) + " " + vstr(W->goals[3].second));
   bool why = false, resent = false;
   for (const auto& s : W->status) {
     if (l4::get(s, "phase") == "PLANNER_SEED" && l4::get(s, "why") == "planner silent") why = true;
@@ -1100,8 +1111,7 @@ TEST_F(Executive, S29_ReseedsAreBounded) {
     W->block = {1, 3, 5, 7};
     W->bridge_state = {{"state", "OK"}, {"planner_age", 0.01}};
   }
-  const std::vector<std::string> extra = {"_leg_start_seed_dz:=0.3", "_planner_stuck_s:=1.0", "_planner_stuck_max:=2",
-                                          "_on_unreachable:=stop"};
+  const std::vector<std::string> extra = {"_planner_stuck_s:=1.0", "_planner_stuck_max:=2", "_on_unreachable:=stop"};
   auto during = [](double) {
     std::lock_guard<std::mutex> g(W->m);
     const double age = W->goals.size() >= 2 && W->goals.size() % 2 == 0 ? 5.0 : 0.01;
@@ -1112,6 +1122,37 @@ TEST_F(Executive, S29_ReseedsAreBounded) {
   std::lock_guard<std::mutex> g(W->m);
   check("goals: the leg start's seed and goal, then two re-seeds with the goal each", W->goals.size() == 6,
         "goals " + std::to_string(W->goals.size()));
+  if (W->goals.size() != 6) return;
+  // the fake SUPER flies to every seed: three seeds, each a 0.1 m move, alternating 1.1, 1.0, 1.1 round the
+  // leg's 1.0 m, never one above the last
+  check("repeated seeds do not stack: 1.1, 1.0, 1.1 m",
+        std::abs(W->goals[0].second[2] - 1.1) < 0.02 && std::abs(W->goals[2].second[2] - 1.0) < 0.02 &&
+            std::abs(W->goals[4].second[2] - 1.1) < 0.02,
+        vstr(W->goals[0].second) + " " + vstr(W->goals[2].second) + " " + vstr(W->goals[4].second));
+  check("the vehicle never above 1.1 m (the leg's altitude + one 0.1 m seed)", W->max_z <= 1.1 + 0.02,
+        std::to_string(W->max_z));
+}
+
+// 30. the bridge reports a ceiling over the vehicle (its "ceiling_above"): the seed stays ~seed_ceiling_clear
+// (0.6 m, SUPER's inflation and a cell) below it (container fly-through k1: 2.15 m roof)
+TEST_F(Executive, S30_SeedCappedBelowTheCeiling) {
+  auto setup = [] {
+    std::lock_guard<std::mutex> g(W->m);
+    W->bridge_state = {{"state", "OK"}, {"planner_age", 0.01}, {"ceiling_above", 0.65}};
+  };
+  const std::vector<std::string> extra = {"_leg_start_seed_s:=0.5"};
+  auto ph = run_executive({takeoff(1.0), fly(0.0, 3.0, 1.0)}, setup, nullptr, 40, true, ojson::object(), extra);
+  check("takeoff, fly: DONE", last_is(ph, "DONE"), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("two goals: the seed, then the leg's", W->goals.size() == 2, "goals " + std::to_string(W->goals.size()));
+  if (W->goals.size() != 2) return;
+  check("the seed 0.6 m below the ceiling 0.65 m over the vehicle (1.05 m, not 1.1 m)",
+        std::abs(W->goals[0].second[2] - 1.05) < 0.02, vstr(W->goals[0].second));
+  bool capped = false;
+  for (const auto& s : W->status)
+    if (l4::get(s, "phase") == "PLANNER_SEED" && l4::get(s, "capped") == true && l4::get(s, "ceiling_above") == 0.65)
+      capped = true;
+  check("reported: capped by the ceiling", capped);
 }
 
 int main(int argc, char** argv) {

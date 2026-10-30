@@ -503,6 +503,60 @@ TEST(Synthetic, MemoryHoldsWallFromAfarNotPersonBeside) {
   EXPECT_TRUE(held && person_gone && out.ok && out.length > 4.8) << held << person_gone << " " << out.length;
 }
 
+// the SITL container mouth (k5/k6, 2026-10-29): the robot stands in a floor gap (no floor in the map)
+// whose nearest seen tile is a lower floor (-0.25) beside it; ahead, past the gap, a tunnel whose floor
+// is 0.15 m above the robot's side. With the per-scan evidence flat at the robot's (stand-in) floor
+// the tunnel floor read 0.40 m up, over z_lo 0.30 (SITL's), and the memory held it as walls from afar
+TEST(Synthetic, StepUpPastAFloorGapIsNotAWall) {
+  tc::Config c = tc::live_config();
+  c.z_lo = 0.30;
+  c.update();
+  auto shift = [](Cloud p, double dz) {
+    for (auto& q : p) q.z += dz;
+    return p;
+  };
+  Cloud fl;
+  for (auto& p : floor_(-4, 6, -3, 3)) {
+    bool gap = p.x >= -1.5 && p.x < 0.5 && p.y > -1.2 && p.y < 1.2;
+    bool tunnel = p.x >= 0.5 && p.y > -1.0 && p.y < 1.0;
+    bool low = p.x >= -1.5 && p.x < 0.5 && p.y <= -1.2;
+    if (gap || tunnel) continue;
+    if (low) p.z -= 0.25;
+    fl.push_back(p);
+  }
+  Cloud tunnel = shift(floor_(0.5, 5.5, -1.0, 1.0), 0.15);
+  Cloud walls = cat({wall(0.5, -1.05, 5.5, -1.05, 0.0, 2.2), wall(0.5, 1.05, 5.5, 1.05, 0.0, 2.2)});
+  Cloud scene = cat({fl, tunnel, walls});
+  const Eigen::Vector3d s(-0.5, -0.7, 0.25);   // in the gap, its tile's nearest seen tile the lower floor
+  tc::LiveWindow lw(c, 3.0);
+  tc::PlanResult out;
+  for (double t : tc::arange(0.0, 2.5, 0.5)) {
+    lw.add_scan(t, F(scene), s);
+    out = lw.plan(V2(s.x(), s.y()), V2(4.0, 0.0));
+  }
+  auto& hg = *out.hg;
+  auto rc = hg.cell(V2(s.x(), s.y()));
+  int floor_walls = 0, side_walls = 0;
+  for (double x : tc::arange(1.0, 5.0, 0.1))
+    for (double y : tc::arange(-0.6, 0.65, 0.1)) {
+      auto k = hg.cell(V2(x, y));
+      floor_walls += hg.occ[hg.idx(k.first, k.second)];
+    }
+  for (double x : tc::arange(1.0, 5.0, 0.5)) {
+    auto k = hg.cell(V2(x, 1.05));
+    side_walls += hg.occ[hg.idx(k.first, k.second)];
+  }
+  double inside = 0.0;   // the path's farthest point from the tunnel's centreline past its mouth
+  if (out.ok)
+    for (auto& p : tc::densify(out.path, 0.05))
+      if (p.x() > 0.8) inside = std::max(inside, std::abs(p.y()));
+  EXPECT_FALSE(hg.ground_seen[hg.idx(rc.first, rc.second)]);
+  EXPECT_NEAR(hg.ground[hg.idx(rc.first, rc.second)], -0.25, 0.05);   // the stand-in: the lower floor
+  EXPECT_EQ(floor_walls, 0);
+  EXPECT_EQ(side_walls, 8);
+  EXPECT_TRUE(out.ok && inside < 0.5) << out.reason << " " << inside;
+}
+
 TEST(Synthetic, Carrot05mAhead) {
   Path path{V2(0, 0), V2(2, 0), V2(2, 2)};
   auto [c, yaw] = tc::carrot(path, V2(1.0, 0.1), 0.5);

@@ -91,7 +91,14 @@
 // backup trajectory failed ("Pos violation", ~4600 times in 20 s), so it sent nothing, the vehicle held, the
 // inputs never changed, and the leg went unreachable. b5, without the turn, gave SUPER leg 7's goal mid-climb
 // and flew it. So after a leg-start turn the executive re-seeds SUPER (PLANNER_SEED, "why": "leg start"): a
-// goal ~leg_start_seed_dz (0.3 m) straight above the vehicle (never below: toward the inflated floor), and
+// goal ~leg_start_seed_dz (0.1 m, owner 2026-10-29; was 0.3) straight over the vehicle: up from it when it is
+// at or below the leg's planned altitude there, down toward that altitude when above it (mission.h
+// seed_altitude). The container fly-through k1: 0.3 m seeds above the vehicle, each from where the last one
+// took it, stacked 1.05 -> 1.35 -> 1.64 m under a 2.15 m roof; now repeats alternate within the plan +- 0.1 m
+// and a seed is always a real 0.1 m move (SITL m2: a seed 5 mm from the vehicle left Gate L2 leg 7
+// unreachable). At most ~seed_ceiling_clear (0.6 m: SUPER's 0.5 m inflation and a cell) below the bridge's
+// "ceiling_above". Never more than 0.1 m below the leg's plan (b10's seeds below the vehicle at a low hover
+// took it toward the inflated floor). Then,
 // after ~leg_start_seed_s (0.5 s) with SUPER commanding again (the bridge's "planner_age" fresh) it sends the
 // leg's goal, which SUPER then replans from its moving trajectory. The same on a flight leg whose planner has
 // been silent ~planner_stuck_s (3 s; "planner_age") with the goal sent at least that long ago: re-seed, send
@@ -192,10 +199,13 @@ class MissionExecutive {
     // SUPER's re-seed (Gate L2 b7): a short vertical move from the vehicle, so that the leg's goal reaches
     // SUPER while it follows a trajectory, not at rest. After the leg start's turn, and when SUPER has been
     // silent ~planner_stuck_s on a flight leg (at most ~planner_stuck_max times a leg). 0 disables either
-    seed_dz_ = l4::param_double(pnh_, "leg_start_seed_dz", 0.3);
+    seed_dz_ = l4::param_double(pnh_, "leg_start_seed_dz", 0.1);   // owner 2026-10-29 (was 0.3)
     seed_s_ = l4::param_double(pnh_, "leg_start_seed_s", 0.5);
     stuck_s_ = l4::param_double(pnh_, "planner_stuck_s", 3.0);
     stuck_max_ = l4::param_int(pnh_, "planner_stuck_max", 2);
+    // the seed at most this far below the bridge's local ceiling ("ceiling_above"): SUPER's inflation (0.5 m)
+    // and a cell
+    seed_ceiling_clear_ = l4::param_double(pnh_, "seed_ceiling_clear", 0.6);
     bridge_ = {{"state", "OK"}, {"slam_ok", true}};
     bridge_ok_since_ = now();
 
@@ -520,20 +530,31 @@ class MissionExecutive {
     return std::atan2(y - (*p)[1], x - (*p)[0]);
   }
 
-  // re-seed SUPER (Gate L2 b7): a goal ~leg_start_seed_dz straight above the vehicle (always up: b10's
-  // downward seeds took it toward the inflated floor), then ~leg_start_seed_s with SUPER commanding before the caller sends the
+  // re-seed SUPER (Gate L2 b7): a goal straight over the vehicle, ~leg_start_seed_dz up from it (or down, when
+  // it is above the leg's planned altitude; start: where the leg began; mission.h seed_altitude: repeats
+  // never stack, k1), at most
+  // ~seed_ceiling_clear below the bridge's local ceiling, then ~leg_start_seed_s with SUPER commanding before the caller sends the
   // leg's goal. SUPER handles a goal that comes while it follows a trajectory as a replan from that
   // trajectory; one that comes at rest goes to its PlanFromRest, whose backup trajectory failed every
   // attempt for 20 s in b7 (leg 7, pole_b on the line 2.2 m ahead: "Pos violation") with nothing sent, so
   // the vehicle never moved and nothing changed. A vertical move toward no obstacle is planned from rest
   // without that backup (all of it in view), and the leg's goal then comes mid-move (as in b5, mid-climb).
   // False when there is no seed to send (disabled, no pose).
-  bool seed_planner(int idx, const Vec3& target, const std::string& why) {
+  bool seed_planner(int idx, const Vec3& start, const Vec3& target, const std::string& why) {
     const auto here = pose_copy();
     if (seed_dz_ <= 0 || !here) return false;
-    const Vec3 seed((*here)[0], (*here)[1], (*here)[2] + seed_dz_);
+    std::optional<double> ceiling;
+    {
+      std::lock_guard<std::mutex> g(lock_);
+      const l4::ojson c = l4::get(bridge_, "ceiling_above");
+      if (c.is_number()) ceiling = c.get<double>();
+    }
+    const SeedAltitude sa = seed_altitude(start, target, *here, seed_dz_, ceiling, seed_ceiling_clear_);
+    const Vec3 seed((*here)[0], (*here)[1], sa.z);
     const Vec3 planner = publish_goal(seed);
-    report({{"phase", "PLANNER_SEED"}, {"leg", idx}, {"why", why}, {"seed_fc", vec_json(seed)}, {"seed_planner", vec_json(planner)}});
+    report({{"phase", "PLANNER_SEED"}, {"leg", idx}, {"why", why}, {"seed_fc", vec_json(seed)}, {"seed_planner", vec_json(planner)},
+            {"plan_z", l4::py_round(sa.plan_z, 3)}, {"ceiling_above", ceiling ? l4::ojson(*ceiling) : l4::ojson(nullptr)},
+            {"capped", sa.capped}});
     // SUPER commanding again (the bridge's planner_age fresh; an older bridge without it: the time alone)
     const double t0 = now();
     while (!shutdown() && now() - t0 < seed_s_ + 2.0) {
@@ -560,7 +581,7 @@ class MissionExecutive {
   double unreachable_hold_s_, map_rebuild_s_, landing_check_s_, takeoff_timeout_s_, land_timeout_s_, goal_resend_s_,
       bridge_mode_timeout_s_, takeoff_settle_s_, drive_progress_m_, goal_settle_s_;
   double yaw_settle_s_, yaw_settle_rate_, yaw_settle_speed_, yaw_tol_, waypoint_min_dist_, scan_rate_;
-  double seed_dz_, seed_s_, stuck_s_;
+  double seed_dz_, seed_s_, stuck_s_, seed_ceiling_clear_;
   int stuck_max_;
   ros::Publisher yaw_pub_;
 
@@ -679,6 +700,9 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
     std::lock_guard<std::mutex> g(lock_);
     goals_before = track_goals_;
   }
+  // where the leg began (fc): the re-seeds' planned altitude runs from here to the goal (seed_altitude)
+  const auto here0 = pose_copy();
+  const Vec3 leg_start = here0 ? *here0 : target;
   bool turned = false;
   if (!drive && flying_ && !streaming_) {
     // a flight leg with the bridge not streaming yet (after a takeoff, or after a QRLOITER): the waypoint at
@@ -695,7 +719,7 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
   publish_yaw(std::nullopt);   // the last waypoint's yaw is over: the nose follows the travel direction
   // after the turn SUPER has long reached the hover point it was given and sits at rest (b7: the 3.55 s turn
   // on leg 7, then PlanFromRest failing for 20 s): re-seed it so the leg's goal comes while it moves
-  if (turned) seed_planner(idx, target, "leg start");
+  if (turned) seed_planner(idx, leg_start, target, "leg start");
   Vec3 planner = publish_goal(target, drive);
   if (!drive && !streaming_ && goal_settle_s_ > 0) sleep(goal_settle_s_);   // SUPER plans the new goal before anything streams
   bridge_enable(true);
@@ -770,7 +794,7 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
         reseeds += 1;
         report({{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"planner_silent_s", l4::py_round(age.get<double>(), 2)},
                 {"reseed", reseeds}});
-        if (seed_planner(idx, target, "planner silent")) {
+        if (seed_planner(idx, leg_start, target, "planner silent")) {
           planner = publish_goal(target, drive);
           last_send = now();
           last_progress_t = last_send;   // a fresh start for the re-sent goal
