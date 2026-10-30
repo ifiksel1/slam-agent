@@ -13,6 +13,29 @@
 // disagreeing between keyframes, z drift; one keyframe's floor is 0.03-0.05 m and the deskew time-unit
 // fix does not thin it), 0.15 m on the live window (a few seconds of scans hardly drift).
 //
+// Overhangs (owner 2026-10-30: "the robot can drive under openings with a ceiling of 15 inches"; the
+// frame is 0.203 m high). overhang_clear (0.381 m) is the top of what blocks on its own: a cell with any
+// voxel in (z_lo, overhang_clear] above its local ground ("low") is judged by the rules above and never
+// as an overhang. A cell whose returns all lie above overhang_clear (a table top, a shelf, a beam, a wall
+// whose base is hidden) is still an obstacle by the same rules (the live window's sparse-wall rule
+// included) unless the live evidence saw through the space beneath it: scan_evidence() casts the rays
+// a second time in the slab (z_lo, overhang_clear] (Evidence::under), cut at the nearest return in that
+// slab (table legs, clutter under the shelf, the base of a wall, the wall behind), not by returns above
+// it (the table top), and counts the scans that hit the cell in the slab (Evidence::low). On the live
+// window a cell with no low voxel (overhang_ok) whose beneath was seen through in at least overhang_seen
+// (3) recent scans (the memory's decayed count) and more than mem_clear_ratio x the low hits is passable,
+// and the memory does not hold it as a wall from afar. A wall seen only above the band has nothing seen
+// beyond it, so no ray passes beneath it and it stays a wall; a table whose underside is lower than
+// overhang_clear has low voxels and stays an obstacle. A wall's top that registers a cell off its base
+// (tilt, drift) can be cleared as an overhang; its base cells keep their low voxels and stay obstacles, so
+// the margin is held to the base (overhang_ring 1 would keep a cell round every low column, but narrows
+// every opening under an overhang by a cell each side). On the house drive's live replay (2026-10-30), with
+// overhang_seen 1 a wall end seen through beneath by 2 grazing scans (0.5 deg bins) was driven past at
+// 0.02-0.04 m; with 3 the house wall checks are unchanged (255/255, 259/259, 262/263 as without). The
+// lidar sits ~0.08 m up on the robot (0.25 m in SITL), well under a 0.38 m underside, so it sees under
+// tables to whatever stands behind them. Whole maps (prior maps, the band-level evidence) have no
+// beneath evidence: unchanged there.
+//
 // Moved objects. A merged map keeps everything that was ever there: on the house drive the cells
 // blocking the robot's own driven path were hit by a median of 3 of 524 keyframes, far in time from
 // when the robot drove there (people, doors). scan_evidence() casts each scan as a 2-D virtual scan
@@ -34,7 +57,16 @@
 // shortened by line of sight with an oriented-rectangle check of the follower's poses: along each
 // segment the heading is the direction to the carrot lookahead ahead, as the carrot follower drives
 // (so corners are checked with the robot turning onto the next segment). A doorway narrower than the
-// frame's diagonal but wider than the frame passes when the robot goes straight through it. A carrot
+// frame's diagonal but wider than the frame passes when the robot goes straight through it. The
+// shortening prefers clearance (owner decision 2026-10-30, option 1): a shortcut (and a sharpen()
+// corner) is kept only if its frame keeps prefer_clearance (0.15 m, bare frame to obstacle cell
+// centres) wherever the search's cell path had that much (each pose against the nearest vertex it
+// replaces, owed up to prefer_slack less than the cell path had); otherwise the cell path's vertex
+// stays. Where the cell path itself is tighter (doors, the house drive) the requirement falls with it,
+// down to the margin: the margin stays the hard limit. Soft throughout: a preferred route the frame
+// cannot follow, or whose pivots or arcs are refused, gives way to the old straightened route before
+// any refusal or new search (house drive live replay: 315/337/342 of 490/490/506 planned, was
+// 298/315/344; without that fallback 297/321/316, the arc onto a route bent off the heading). A carrot
 // a fixed distance ahead is the driving target (D4: position + yaw only, so a dead planner stops
 // within the lookahead).
 //
@@ -76,11 +108,21 @@
 // - obstacles lower than z_lo above the local ground are invisible: 0.30 m on whole maps, 0.15 m on
 //   the live window (kerbs, steps down, cables, low boxes, a pet); above z_hi (0.6 m), on whole maps
 //   only a tall column counts (overhangs are driven under), on the live window 2+ voxels up to 2 m do
-//   (a table top or shelf the robot could pass under blocks it);
+//   unless the space beneath (to overhang_clear, 0.381 m) was seen through (see Overhangs);
+// - overhangs: heights are voxel centres (res/2 = 0.05 m) over the ground model, which sits at the
+//   bottom of the floor smear (the lowest voxel's centre), so a voxel counts as low when its bottom edge
+//   (centre - res/4) is at or under overhang_clear: an underside up to ~0.05 m above overhang_clear can
+//   read low and be refused (conservative); on the gtest floor (0.06 m smear) an underside at 0.40 m
+//   passes and 0.35 m does not. A thicker floor smear reads undersides higher. The robot drives under only
+//   what it has seen through lately (decay 10 s): an overhang seen only from above or behind, or whose
+//   beneath is hidden, is a wall. The memory's under-rays are the same 0.5 deg bins as the band's; a
+//   wall whose base is hidden but which rays pass beside at a grazing angle could read as an overhang
+//   (house wall checks: see the 2026-10-30 overhang report). Whole maps never drive under 0.38-0.6 m;
 // - the lidar sits ~0.08 m above the floor: wall bases behind furniture go unseen. On the live window
-//   any column seen above the band (2+ voxels) is a wall, and the evidence memory holds walls hit
-//   from 1.5 m or more in earlier scans (decay 10 s); a wall seen by one voxel and never from afar is
-//   still missed (house drive tfix: 1 of 263 goals behind a seen wall);
+//   any column seen above the band (2+ voxels) is a wall unless seen through beneath, and the evidence
+//   memory holds walls hit from 1.5 m or more in earlier scans (decay 10 s; not overhangs seen through
+//   beneath); a wall seen by one voxel and never from afar is still missed (house drive tfix: 1 of 263
+//   goals behind a seen wall);
 // - people standing still are obstacles until rays at band height see through them (1.5 x more often
 //   than hit, decayed): on the house drive about 13% of the live goals ahead are refused, about 6-8%
 //   of those whose driven stretch the scan of the moment shows free;
@@ -98,13 +140,19 @@
 //   highest floor seen within a tile, never the nearest (that was a lower floor in k5);
 // - pivots are checked where the plan puts them; Rover may also pivot elsewhere if its heading lags
 //   the carrot by more than 60 deg on a turn under pivot_angle (not seen in the drive-chain model);
-//   the follower's frame is not checked within start_skip (0.5 m) of the start, only a clearance (a
-//   start pivot's circle is). With replans at 10 Hz that region is always just ahead of the robot: a
-//   replan may cut a corner there, as a turn under pivot_angle, and the robot's lagging heading arcs
-//   wider than the follower model (synthetic hairpin with a 0.7 m way out: 6 cm into the wall).
-//   start_skip_heading 0.15 (used when the heading is known) checks it, but on the house drive's
-//   live replay it refused 29 more replans (338 instead of 367 of 490) and put the replan p95 over
-//   100 ms (Python), so it stays 0.5 by default;
+//   within start_skip (0.5 m) of the start the follower's frame was not checked until 2026-10-30, only
+//   a clearance (a start pivot's circle is). With replans at 10 Hz that region is always just ahead of
+//   the robot: a replan could cut a corner there (Gate L2 s8: 0.046-0.056 m from the crate, only the
+//   bare-frame arc check applied). Since 2026-10-30 (start_frame) the frame there is held to the margin
+//   and the preferred clearance where the start pose has that much, and otherwise (start_soft) to the
+//   start pose's own clearance: no nearer anything than the robot already is. With the heading known the
+//   poses there turn from the robot's heading to the path's over the stretch (unless a start pivot): at
+//   the path's heading the start pose was fictitious (Gate L2 w1: 12 deg off the robot's, already at a
+//   door jamb), which made the limit lax and the robot passed the jamb at 0.044 m. The full margin from the start would refuse every replan of a robot standing
+//   within it (after a pivot near a wall); a clearance that has to grow back over the stretch would
+//   refuse driving straight on along the wall, since turning away swings the rear corner into it. The
+//   robot's own heading there is still only the arc check's (bare frame). start_skip_heading 0.15
+//   (instead, a frame check from 0.15 m at the full margin) refused 29 more house replans in 2026-10-28;
 // - the arc onto the path (2026-10-29, after the Gate L2 door-jamb clips c1/c3): with the heading known
 //   each driving leg's arc is simulated from the robot's heading with Rover's steering lag fit to SITL
 //   (2 sin(error) / max(distance to its target, arc_steer 3.0 m)) and its bare frame checked
@@ -123,7 +171,21 @@
 //   pivoted near walls) about 10% of live replans are refused for it (see the 2026-10-28 report);
 // - a pivot that cannot be moved within pivot_search blocks the cells within the pivot radius of its
 //   vertex for the next search, which also bars driving straight through them;
-// - margin 0.05 m: the house drive passes walls with ~5 cm to spare, so 0.10 m refuses it.
+// - margin 0.05 m: the house drive passes walls with ~5 cm to spare, so 0.10 m refuses it. The
+//   preferred clearance (0.15 m) is soft for that reason; it is measured to obstacle cell centres (the
+//   obstacle's surface may be up to res/2 nearer or farther), and it binds the plan, not the robot:
+//   heading lag and tracking error come off it (the slow-down near obstacles limits those).
+// - driven bends (owner request 2026-10-30, after the hairpin drive chain went 0.016 m into the
+//   divider: keeping the cell path's vertices split a sharp corner into two 43-45 deg bends 0.42 m
+//   apart, each under pivot_angle, so driven, and the carrot chase cut inside; the old straightening
+//   plans a driven 69 deg corner there from the same pose). Two guards: (1) follow_free checks the
+//   chase's inside cut at every driven bend: the frame along the Bezier curve on the path from
+//   cut_lead (0.5 m) before the bend to cut_lead after it (heading along the curve), at the margin; a
+//   straight chord there turned the frame onto the chord at its start and refused leaving a 0.75 m
+//   dead-end corridor; (2) merge_bends (in pivot_pass) makes driven bends within bend_merge (0.5 m) of
+//   each other that turn by more than pivot_angle in all one corner where the incoming and outgoing
+//   lines meet, which pivot_pass then pivots (the pivot's hard check), when the frame can follow
+//   it. The curve is a model of the chase, not of Rover's lag (the arc check covers the outside swing);
 // - the reverse only backs straight up the way the robot faces, over cells seen free in the last
 //   ~window_s (floor) or the evidence memory (see-throughs, decay mem_tau 10 s): a robot that waited
 //   long in a dead end may have forgotten the way out and is refused (never into unknown space).
@@ -637,10 +699,12 @@ HeightGrid::HeightGrid(const Cloud& points, ConfigPtr cfg_, std::optional<V2> lo
   }
   if (ground_only) return;
   count.assign(n, 0);
+  low.assign(n, 0);
   std::vector<int> tall(n, 0);
   std::vector<uint8_t> floor(n, 0);
   for (size_t q = 0; q < key.size(); ++q) {
     double h = z[q] - ground[k[q]];
+    if (h > c.z_lo && h <= c.overhang_clear + r * 0.25) low[k[q]]++;   // the voxel's bottom at or under it
     if (h > c.z_lo && h < c.z_hi) count[k[q]]++;
     if (h >= c.z_hi && h < c.z_tall) tall[k[q]]++;
     if (h > -0.15 && h <= c.z_lo) floor[k[q]] = 1;
@@ -656,6 +720,17 @@ HeightGrid::HeightGrid(const Cloud& points, ConfigPtr cfg_, std::optional<V2> lo
     seen[q] = floor[q] | occ[q];
   }
   floor_seen = floor;
+  // overhang candidates: no low voxel in the cell (or within overhang_ring cells of it)
+  {
+    std::vector<uint8_t> lw(n);
+    for (size_t q = 0; q < n; ++q) lw[q] = low[q] > 0;
+    std::vector<Cell> st8;
+    for (int a = -c.overhang_ring; a <= c.overhang_ring; ++a)
+      for (int b = -c.overhang_ring; b <= c.overhang_ring; ++b) st8.push_back({a, b});
+    if (any(lw) && c.overhang_ring > 0) lw = dilate(lw, ny, nx, st8);
+    overhang_ok.assign(n, 0);
+    for (size_t q = 0; q < n; ++q) overhang_ok[q] = !lw[q];
+  }
   int rr = int(std::ceil(c.known_radius / r));
   std::vector<Cell> st;
   for (int yy = -rr; yy <= rr; ++yy)
@@ -757,6 +832,19 @@ int HeightGrid::apply_evidence(const std::vector<int>& hits, const std::vector<i
       dropped++;
     }
   edt();
+  return dropped;
+}
+
+int HeightGrid::apply_overhangs(const std::vector<int>& under, const std::vector<int>& low_hits) {
+  const Config& c = *cfg;
+  if (!(c.overhang_clear > c.z_lo) || overhang_ok.empty()) return 0;
+  int dropped = 0;
+  for (size_t q = 0; q < occ.size(); ++q)
+    if (occ[q] && overhang_ok[q] && under[q] >= c.clear_misses && under[q] > c.clear_ratio * low_hits[q]) {
+      occ[q] = 0;
+      dropped++;
+    }
+  if (dropped) edt();
   return dropped;
 }
 
@@ -960,7 +1048,7 @@ bool Window::pivot_free(const V2& centre, double yaw_in, double tol, bool back) 
   return true;
 }
 
-std::optional<int> Window::follow_free(const Path& P, int k0) {
+std::optional<int> Window::follow_free(const Path& P, int k0, const ClearRef* ref, int r0, int r1) {
   const Config& c = *cfg;
   const int n = int(P.size());
   if (n < 2) return std::nullopt;
@@ -1006,22 +1094,124 @@ std::optional<int> Window::follow_free(const Path& P, int k0) {
   }
   std::vector<uint8_t> ok = poses_free(p, yaw);
   for (size_t q = 0; q < m; ++q) ok[q] = ok[q] | in_pivot[q];
+  // the preferred clearance (prune, sharpen): what each pose is held to, at least the margin
+  const bool soft = ref && c.prefer_clearance > c.margin;
+  std::vector<double> need(m, c.margin);
+  if (soft)
+    for (size_t q = 0; q < m; ++q)
+      if (!in_pivot[q]) need[q] = std::max(c.margin, ref->need(p[q], r0, r1));
+  std::vector<uint8_t> near_start(m, 0);
   if (start) {
-    // near the start the frame is not checked, but the point may not come nearer an obstacle than
-    // the start already is (nor nearer than the bare half-width): no shortcut through a wall next to it
+    // near the start the point may not come nearer an obstacle than the start already is (nor nearer
+    // than the bare half-width): no shortcut through a wall next to it. The frame (start_frame) is held
+    // to the margin (and the preferred clearance) as everywhere where the start pose has that much;
+    // start_soft: where it has less, to the start pose's own clearance (the first pose checked here,
+    // at the follower's heading) -- a robot beside a wall drives on along it, but no nearer
     double lim = std::min(FOOTPRINT_WID / 2, clearance_at(*start)) - 1e-9;
+    double m0 = NaN;
     for (size_t q = 0; q < m; ++q) {
-      if (!(std::hypot(p[q].x() - start->x(), p[q].y() - start->y()) < skip)) continue;
+      double d = std::hypot(p[q].x() - start->x(), p[q].y() - start->y());
+      if (!(d < skip)) continue;
+      near_start[q] = 1;
       int ci = int(std::floor((p[q].y() - lo.y()) / c.res)), cj = int(std::floor((p[q].x() - lo.x()) / c.res));
       double cl = (ci >= 0 && cj >= 0 && ci < ny && cj < nx) ? clear[size_t(ci) * nx + cj] : 0.0;
-      ok[q] = cl >= lim;
+      bool fine = cl >= lim;
+      if (fine && c.start_frame && !in_pivot[q]) {
+        // with the robot's heading known, the pose turns from it to the path's over the stretch (the
+        // robot's heading lags the path; Gate L2 w1: the path's heading at the robot, 12 deg off its own,
+        // already sat at a door jamb, so the start's own clearance read low and the limit was lax); a
+        // turn over pivot_angle is a start pivot, its circle checked by pivot_pass
+        double yq = yaw[q];
+        if (start_yaw && std::abs(wrap(yaw[q] - *start_yaw)) <= c.pivot_angle)
+          yq = *start_yaw + wrap(yaw[q] - *start_yaw) * std::min(d / std::max(skip, 1e-9), 1.0);
+        if (std::isnan(m0)) m0 = frame_margin(*this, p[q], yq, std::max(c.margin, c.prefer_clearance));
+        double r = c.start_soft ? std::min(need[q], m0) : need[q];
+        fine = frame_margin(*this, p[q], yq, r) >= r - 1e-9;
+      }
+      ok[q] = fine;
     }
   }
+  if (soft)
+    for (size_t q = 0; q < m; ++q)
+      if (ok[q] && !near_start[q] && need[q] > c.margin + 1e-9)
+        ok[q] = frame_margin(*this, p[q], yaw[q], need[q]) >= need[q] - 1e-9;
+  size_t first = m;
   for (size_t q = 0; q < m; ++q)
     if (!ok[q]) {
-      fail_at = p[q];   // the first blocked pose (odometry point)
-      return seg[q];
+      first = q;
+      break;
     }
+  // the driven bends (cut_check): the carrot chase cuts inside a bend under pivot_angle, the robot taking
+  // about the chord from cut_lead before the vertex to cut_lead after it (along the path, so bends closer
+  // than that share one chord, as the chase takes them); its frame along the chord, heading along it,
+  // keeps the margin (near the start: the start check's limit). Not across a pivot (the carrot holds
+  // there and the robot drives straight in, and leaves it heading along the path)
+  if (c.cut_check && c.cut_lead > 0) {
+    const double s_lo = cum[k0], s_hi = cum[n - 1];
+    double m_start = NaN;
+    for (int k = std::max(k0 + 1, 1); k < n - 1; ++k) {
+      if (std::binary_search(pv.begin(), pv.end(), k)) continue;
+      if (first < m && s[first] <= cum[k] - c.cut_lead) break;   // a failure before this bend's chord
+      double turn = std::abs(wrap(hd(P[k + 1] - P[k]) - hd(P[k] - P[k - 1])));
+      if (turn < radians(c.cut_min_deg)) continue;
+      double sa = std::max(cum[k] - c.cut_lead, s_lo), sb = std::min(cum[k] + c.cut_lead, s_hi);
+      for (int v : pv) {
+        if (v < k) sa = std::max(sa, cum[v] + 2 * c.off);   // past a pivot's leaving point
+        if (v > k) sb = std::min(sb, cum[v]);
+      }
+      if (sb - sa < 1e-6) continue;
+      auto at = [&](double sv) {
+        int sg = std::clamp(ss_right(cum, sv) - 1, 0, n - 2);
+        return V2(P[sg] + (P[sg + 1] - P[sg]) * ((sv - cum[sg]) / std::max(L[sg], 1e-9)));
+      };
+      // the cut: the Bezier curve on the path's polyline from sa to sb (tangent to the path at both ends,
+      // inside every bend between; two bends a few decimetres apart make one curve)
+      std::vector<V2> ctl{at(sa)};
+      for (int v = 1; v < n - 1; ++v)
+        if (cum[v] > sa + 1e-9 && cum[v] < sb - 1e-9) ctl.push_back(P[v]);
+      ctl.push_back(at(sb));
+      const int nc = int(ctl.size());
+      if (nc < 3) continue;
+      auto bez = [&](double t) {
+        std::vector<V2> w = ctl;
+        for (int r = nc - 1; r > 0; --r)
+          for (int i = 0; i < r; ++i) w[i] = w[i] * (1 - t) + w[i + 1] * t;
+        return w[0];
+      };
+      auto bez_d = [&](double t) {   // the derivative: (nc - 1) x the Bezier of the control differences
+        std::vector<V2> w(nc - 1);
+        for (int i = 0; i + 1 < nc; ++i) w[i] = ctl[i + 1] - ctl[i];
+        for (int r = nc - 2; r > 0; --r)
+          for (int i = 0; i < r; ++i) w[i] = w[i] * (1 - t) + w[i + 1] * t;
+        return w[0];
+      };
+      int nq = int(std::ceil((sb - sa) / step));
+      for (int t = 0; t <= nq; ++t) {
+        double tt = double(t) / nq;
+        V2 x = bez(tt), dv = bez_d(tt);
+        if (norm2(dv) < 1e-9) continue;
+        double h = hd(dv);
+        double r = c.margin;
+        if (start && std::hypot(x.x() - start->x(), x.y() - start->y()) < skip) {
+          if (!c.start_frame) continue;
+          if (std::isnan(m_start)) m_start = frame_margin(*this, *start, start_yaw ? *start_yaw : h, c.margin);
+          if (c.start_soft) r = std::min(r, m_start);
+        }
+        if (frame_margin(*this, x, h, r) < r - 1e-9) {
+          // the bend's chord is blocked: fail at the bend (its incoming segment), unless a pose on the
+          // path failed earlier
+          double sv = sa + (sb - sa) * (double(t) / nq);
+          if (first < m && s[first] <= sv) break;
+          fail_at = x;
+          return k - 1;
+        }
+      }
+    }
+  }
+  if (first < m) {
+    fail_at = p[first];   // the first blocked pose (odometry point)
+    return seg[first];
+  }
   return std::nullopt;
 }
 
@@ -1076,10 +1266,15 @@ Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vect
   Evidence ev;
   // a hit is anything from z_lo up to z_tall (a wall seen only above the band still counts); a cell
   // is cleared only where rays show the band itself free more often (an overhang, a person)
+  const bool overhangs = low_sensor && c.overhang_clear > c.z_lo;
+  // a return is low when its voxel's bottom (the scans are voxel centres, res/2 high) is at or under
+  // overhang_clear, as HeightGrid::low
+  const double oc_low = c.overhang_clear + r * 0.25;
   for (auto& q : v) {
     bool band = q.h > c.z_lo && q.h < c.z_hi;
     if (low_sensor ? (q.h > c.z_lo && q.h < c.z_tall) : band) ev.hit.push_back(q.k);
     if (walls && q.h > c.z_lo && q.h < c.z_tall && q.rng >= c.mem_min_range) ev.wall.push_back(q.k);
+    if (overhangs && q.h > c.z_lo && q.h <= oc_low) ev.low.push_back(q.k);
   }
   auto uniq = [](std::vector<int>& a) {
     std::sort(a.begin(), a.end());
@@ -1087,65 +1282,85 @@ Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vect
   };
   uniq(ev.hit);
   uniq(ev.wall);
+  uniq(ev.low);
   if (!rays) return ev;
   // the rays' band crossings below take the ground as a straight ramp from the sensor's floor to each
   // return's own (the same formula as flat ground, with heights above the local ground)
   const double hs = s.z() - g0;
   const int nb = c.ray_bins;
-  std::vector<double> start(nb, INF), reach(nb, 0.0), near(nb, INF), far(nb, 0.0);
-  for (auto& q : v) {
-    int b = int(int64_t((std::atan2(q.dy, q.dx) + PI) / (2 * PI) * nb) % nb);
-    // each ray's stretch inside the band (ranges where its height is in [z_lo, z_hi])
-    bool up = q.h > hs + 1e-3;
-    double enter = hs >= c.z_lo ? 0.0 : q.rng * (c.z_lo - hs) / (q.h - hs);
-    double leave = hs >= c.z_hi ? 0.0 : np_min(q.rng, q.rng * (c.z_hi - hs) / (q.h - hs));
-    if (hs >= c.z_lo) {   // sensor in the band (hovering low): level rays count too
-      up = up || (q.h > c.z_lo) || (hs < c.z_hi);
-      if (q.h <= hs)
-        leave = np_min(q.rng, q.h < c.z_lo ? q.rng * (hs - c.z_lo) / std::max(hs - q.h, 1e-9) : q.rng);
-    }
-    if (up && q.h > c.z_lo && leave > enter) {
-      start[b] = std::min(start[b], enter);
-      reach[b] = std::max(reach[b], leave);
-    }
-    if (q.h > c.z_lo && q.h < c.z_hi) near[b] = std::min(near[b], q.rng);   // nearest band return per bin
-    far[b] = std::max(far[b], q.rng);
-  }
-  for (int b = 0; b < nb; ++b) {
-    if (low_sensor) {
-      reach[b] = (std::isfinite(near[b]) ? near[b] : reach[b]) - 1.5 * r;
-    } else {
-      start[b] = 0.0;
-      reach[b] = (std::isfinite(near[b]) ? near[b] : far[b]) - 1.5 * r;
-    }
-    start[b] = std::max(start[b], 0.3);
-  }
   std::vector<double> steps = arange(0.3, c.ray_range, r * 0.5);
-  std::vector<int> fr;
-  for (int b = 0; b < nb; ++b) {
-    double ang = (b + 0.5) / nb * 2 * PI - PI;
-    double ca = std::cos(ang), sa = std::sin(ang);
-    for (double R : steps) {
-      if (!(R < reach[b] && R >= start[b])) continue;
-      int64_t ci = int64_t(std::floor((s.x() + R * ca - hg.lo.x()) / r));
-      int64_t cj = int64_t(std::floor((s.y() + R * sa - hg.lo.y()) / r));
-      if (ci >= 0 && cj >= 0 && ci < nx && cj < ny) fr.push_back(int(cj * nx + ci));
+  // the cells rays saw through in the slab (z_lo, top): per bin from the nearest ray's entry into the slab to
+  // the farthest exit, cut 1.5 res before the nearest return in (z_lo, cut) (inclusive: (z_lo, cut]);
+  // band_model: the whole-map model (from the sensor, to the farthest return)
+  auto see_through = [&](double top, double cut, bool inclusive, bool band_model) {
+    std::vector<double> start(nb, INF), reach(nb, 0.0), near(nb, INF), far(nb, 0.0);
+    for (auto& q : v) {
+      int b = int(int64_t((std::atan2(q.dy, q.dx) + PI) / (2 * PI) * nb) % nb);
+      // each ray's stretch inside the slab (ranges where its height is in [z_lo, top])
+      bool up = q.h > hs + 1e-3;
+      double enter = hs >= c.z_lo ? 0.0 : q.rng * (c.z_lo - hs) / (q.h - hs);
+      double leave = hs >= top ? 0.0 : np_min(q.rng, q.rng * (top - hs) / (q.h - hs));
+      if (hs >= c.z_lo) {   // sensor in the slab (hovering low): level rays count too
+        up = up || (q.h > c.z_lo) || (hs < top);
+        if (q.h <= hs)
+          leave = np_min(q.rng, q.h < c.z_lo ? q.rng * (hs - c.z_lo) / std::max(hs - q.h, 1e-9) : q.rng);
+      }
+      if (up && q.h > c.z_lo && leave > enter) {
+        start[b] = std::min(start[b], enter);
+        reach[b] = std::max(reach[b], leave);
+      }
+      if (q.h > c.z_lo && (inclusive ? q.h <= cut : q.h < cut)) near[b] = std::min(near[b], q.rng);
+      far[b] = std::max(far[b], q.rng);
     }
-  }
-  uniq(fr);
+    for (int b = 0; b < nb; ++b) {
+      if (!band_model) {
+        reach[b] = (std::isfinite(near[b]) ? near[b] : reach[b]) - 1.5 * r;
+      } else {
+        start[b] = 0.0;
+        reach[b] = (std::isfinite(near[b]) ? near[b] : far[b]) - 1.5 * r;
+      }
+      start[b] = std::max(start[b], 0.3);
+    }
+    std::vector<int> fr;
+    for (int b = 0; b < nb; ++b) {
+      double ang = (b + 0.5) / nb * 2 * PI - PI;
+      double ca = std::cos(ang), sa = std::sin(ang);
+      for (double R : steps) {
+        if (!(R < reach[b] && R >= start[b])) continue;
+        int64_t ci = int64_t(std::floor((s.x() + R * ca - hg.lo.x()) / r));
+        int64_t cj = int64_t(std::floor((s.y() + R * sa - hg.lo.y()) / r));
+        if (ci >= 0 && cj >= 0 && ci < nx && cj < ny) fr.push_back(int(cj * nx + ci));
+      }
+    }
+    uniq(fr);
+    return fr;
+  };
+  std::vector<int> fr = see_through(c.z_hi, c.z_hi, false, !low_sensor);
   std::set_difference(fr.begin(), fr.end(), ev.hit.begin(), ev.hit.end(), std::back_inserter(ev.free));
+  if (overhangs) {
+    // beneath overhangs: the same rays in (z_lo, overhang_clear], cut only by returns in it (a table top above
+    // does not cut them; its legs, clutter below it and a wall's base do); cells hit in it are left out
+    std::vector<int> fu = see_through(c.overhang_clear, oc_low, true, false);
+    std::set_difference(fu.begin(), fu.end(), ev.low.begin(), ev.low.end(), std::back_inserter(ev.under));
+  }
   return ev;
 }
 
 void evidence(const HeightGrid& hg, const std::vector<std::pair<Cloud, Eigen::Vector3d>>& scans, std::vector<int>& hits,
-              std::vector<int>& miss, bool low_sensor) {
+              std::vector<int>& miss, bool low_sensor, std::vector<int>* under, std::vector<int>* low_hits) {
   size_t n = size_t(hg.ny) * hg.nx;
   hits.assign(n, 0);
   miss.assign(n, 0);
+  if (under) under->assign(n, 0);
+  if (low_hits) low_hits->assign(n, 0);
   for (auto& sc : scans) {
     Evidence e = scan_evidence(hg, sc.first, sc.second, false, low_sensor);
     for (int k : e.hit) hits[k]++;
     for (int k : e.free) miss[k]++;
+    if (under)
+      for (int k : e.under) (*under)[k]++;
+    if (low_hits)
+      for (int k : e.low) (*low_hits)[k]++;
   }
 }
 
@@ -1222,10 +1437,14 @@ std::optional<std::vector<Cell>> search(const Window& win, Cell start, Cell goal
 
 // drop waypoints while the shortcut, followed by the carrot follower from the previous vertex, keeps
 // the oriented frame clear -> (path, index of a blocked segment or none). From each vertex: the goal
-// if it checks, else gallop out (+1, +2, +4 ...) to the first failure and bisect back
-std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts) {
+// if it checks, else gallop out (+1, +2, +4 ...) to the first failure and bisect back. With ref the
+// shortcut must also keep the preferred clearance where the vertices it replaces had it (each pose
+// against the nearest of them): else the cell path's vertex stays, so the path keeps the room the
+// search gave it instead of being pulled to the margin (the next vertex is always taken)
+std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts, const ClearRef* ref) {
   if (pts.size() <= 2) return {pts, win.follow_free(pts)};
   Path out{pts[0]};
+  std::vector<int> oi{0};   // out's vertices in pts
   int i = 0;
   const int n = int(pts.size());
   auto ok = [&](int j) {
@@ -1233,7 +1452,8 @@ std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts) {
     if (out.size() >= 2) q.push_back(out[out.size() - 2]);
     q.push_back(out.back());
     q.push_back(pts[j]);
-    return !win.follow_free(q, 0).has_value();
+    int r0 = oi[out.size() >= 2 ? out.size() - 2 : 0];
+    return !win.follow_free(q, 0, ref, r0, j).has_value();
   };
   while (i < n - 1) {
     int best;
@@ -1260,6 +1480,7 @@ std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts) {
       best = good;
     }
     out.push_back(pts[best]);
+    oi.push_back(best);
     i = best;
   }
   auto bad = win.follow_free(out);
@@ -1298,6 +1519,59 @@ IsPivot is_pivot(const Path& P, int k, double h_in, const V2& A, const Config& c
   V2 q = point_along(tail, cfg.lookahead);
   if (norm2(q - A) <= 1e-6 || std::abs(wrap(hd(q - A) - h_in)) <= thr) return {false, C, j};
   return {norm2(P[j] - C) >= cfg.off + cfg.res && std::abs(wrap(hd(P[j] - C) - h_in)) > thr, C, j};
+}
+
+// A turn split into bends close together (owner request 2026-10-30, the hairpin drive chain: two 43-45 deg
+// bends 0.42 m apart, each under pivot_angle, were driven as one 88 deg corner and the carrot chase cut
+// inside it). The vertices within bend_merge of each other along the path, starting at a vertex (or at
+// the start, with the robot's heading), turning by more than pivot_angle in all (from the heading into the
+// first to the segment leaving the last) become one vertex where those two lines meet, if the frame can
+// follow that path: a sharp corner, which pivot_pass makes a pivot (its hard check). Otherwise they stay
+// driven bends (the cut check in follow_free keeps their inside cut clear).
+Path merge_bends(Window& win, const Path& P0, std::optional<double> start_yaw) {
+  const Config& cfg = *win.cfg;
+  Path Q = P0;
+  if (cfg.bend_merge <= 0) return Q;
+  for (int guard = 0; guard < 8; ++guard) {
+    const int n = int(Q.size());
+    if (n < 3) return Q;
+    std::vector<double> cum(n, 0.0);
+    for (int k = 1; k < n; ++k) cum[k] = cum[k - 1] + norm2(Q[k] - Q[k - 1]);
+    bool changed = false;
+    for (int k = start_yaw ? 0 : 1; k + 1 < n && !changed; ++k) {
+      if (k > 0 && cum[k] - cum[k - 1] < 1e-6) continue;
+      double h_in = k == 0 ? *start_yaw : hd(Q[k] - Q[k - 1]);
+      int m = k;
+      while (m + 2 < n && cum[m + 1] - cum[k] <= cfg.bend_merge) ++m;
+      if (m == k || cum[m + 1] - cum[m] < 1e-6) continue;
+      // each bend in the cluster driven (under pivot_angle); a pivot there is one already
+      bool driven = true;
+      double prev = h_in;
+      for (int v = k; v <= m && driven; ++v) {
+        double ho = hd(Q[v + 1] - Q[v]);
+        driven = std::abs(wrap(ho - prev)) <= cfg.pivot_angle;
+        prev = ho;
+      }
+      double h_out = hd(Q[m + 1] - Q[m]);
+      if (!driven || std::abs(wrap(h_out - h_in)) <= cfg.pivot_angle) continue;
+      V2 u = unit(h_in), v = unit(h_out), w = Q[m] - Q[k];
+      double den = u.x() * v.y() - u.y() * v.x();
+      if (std::abs(den) < 0.2) continue;
+      double t = (w.x() * v.y() - w.y() * v.x()) / den;    // along the incoming line from Q[k]
+      double s2 = (w.x() * u.y() - w.y() * u.x()) / den;   // along the outgoing line from Q[m]
+      if (t < 0 || t > cfg.bend_merge + 0.5 || s2 >= cum[m + 1] - cum[m] - 0.05) continue;
+      Path cand(Q.begin(), Q.begin() + (k == 0 ? 1 : k));
+      V2 X = Q[k] + t * u;
+      if (norm2(X - cand.back()) > 1e-3) cand.push_back(X);
+      cand.insert(cand.end(), Q.begin() + m + 1, Q.end());
+      if (!win.follow_free(cand).has_value()) {
+        Q = cand;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return Q;
 }
 
 PivotResult pivot_fail(const std::string& reason, Block b) {
@@ -1493,7 +1767,10 @@ PivotResult pivot_pass_forced(Window& win, const Path& path, std::optional<doubl
                               const std::set<int>& forced, int* force_next);
 }  // namespace
 
-PivotResult pivot_pass(Window& win, const Path& path, std::optional<double> start_yaw, bool start_pivoting) {
+PivotResult pivot_pass(Window& win, const Path& path0, std::optional<double> start_yaw, bool start_pivoting) {
+  // a turn split into driven bends close together: one corner, a pivot (merge_bends); not while a pivot
+  // is under way (it finishes on its own route)
+  const Path path = start_pivoting ? path0 : merge_bends(win, path0, start_yaw);
   std::set<int> forced;
   while (true) {
     int next = -1;
@@ -1690,29 +1967,33 @@ PivotResult pivot_pass_forced(Window& win, const Path& path, std::optional<doubl
 }
 }  // namespace
 
-std::optional<Path> sharpen(Window& win, const Path& R, int bad, int max_skip) {
+std::optional<Path> sharpen(Window& win, const Path& R, int bad, int max_skip, const ClearRef* ref) {
   const int n = int(R.size());
-  for (int b : {bad, bad - 1}) {
-    if (b < 0 || b + 2 >= n) continue;
-    V2 u = R[b + 1] - R[b];
-    double Lu = norm2(u);
-    if (Lu < 1e-9) continue;
-    u = u / Lu;
-    for (int m = b + 1; m < std::min(b + 1 + max_skip, n - 1); ++m) {
-      V2 v = R[m + 1] - R[m];
-      double Lv = norm2(v);
-      if (Lv < 1e-9) continue;
-      v = v / Lv;
-      double den = u.x() * v.y() - u.y() * v.x();
-      if (std::abs(den) < 0.2) continue;   // nearly parallel
-      V2 w = R[m] - R[b];
-      double t = (w.x() * v.y() - w.y() * v.x()) / den;   // along the incoming line from R[b]
-      double s = (w.x() * u.y() - w.y() * u.x()) / den;   // along segment m from R[m]
-      if (t <= 0.05 || t > Lu + 1.5 || s >= Lv - 0.05) continue;
-      Path cand(R.begin(), R.begin() + b + 1);
-      cand.push_back(R[b] + t * u);
-      cand.insert(cand.end(), R.begin() + m + 1, R.end());
-      if (!win.follow_free(cand).has_value()) return cand;
+  // with ref: first the corners that keep the preferred clearance, then any the frame can follow
+  for (int pass = ref ? 0 : 1; pass < 2; ++pass) {
+    const ClearRef* rf = pass == 0 ? ref : nullptr;
+    for (int b : {bad, bad - 1}) {
+      if (b < 0 || b + 2 >= n) continue;
+      V2 u = R[b + 1] - R[b];
+      double Lu = norm2(u);
+      if (Lu < 1e-9) continue;
+      u = u / Lu;
+      for (int m = b + 1; m < std::min(b + 1 + max_skip, n - 1); ++m) {
+        V2 v = R[m + 1] - R[m];
+        double Lv = norm2(v);
+        if (Lv < 1e-9) continue;
+        v = v / Lv;
+        double den = u.x() * v.y() - u.y() * v.x();
+        if (std::abs(den) < 0.2) continue;   // nearly parallel
+        V2 w = R[m] - R[b];
+        double t = (w.x() * v.y() - w.y() * v.x()) / den;   // along the incoming line from R[b]
+        double s = (w.x() * u.y() - w.y() * u.x()) / den;   // along segment m from R[m]
+        if (t <= 0.05 || t > Lu + 1.5 || s >= Lv - 0.05) continue;
+        Path cand(R.begin(), R.begin() + b + 1);
+        cand.push_back(R[b] + t * u);
+        cand.insert(cand.end(), R.begin() + m + 1, R.end());
+        if (!win.follow_free(cand, 0, rf).has_value()) return cand;
+      }
     }
   }
   return std::nullopt;
@@ -1791,6 +2072,7 @@ PlanResult plan_grid(std::shared_ptr<HeightGrid> hg, const V2& s, const V2& gxy,
   auto win = hg->crop(s.cwiseMin(gxy).array() - cfg.pad, s.cwiseMax(gxy).array() + cfg.pad);
   res.grid = win;
   win->start = s;
+  win->start_yaw = start_yaw;
   win->skip = start_yaw ? cfg.start_skip_heading : cfg.start_skip;
   auto sc = win->nearest_free(win->cell(s), cfg.snap_radius);
   auto gc = win->nearest_free(win->cell(gxy), cfg.snap_radius);
@@ -1821,16 +2103,36 @@ PlanResult plan_grid(std::shared_ptr<HeightGrid> hg, const V2& s, const V2& gxy,
     for (size_t q = 1; q + 1 < cells->size(); ++q) pts.push_back(win->xy((*cells)[q]));
     pts.push_back(g_end);
     t0 = now_s();
-    auto pr = prune(*win, pts);
+    std::optional<ClearRef> ref;
+    if (cfg.prefer_clearance > cfg.margin) ref = clear_ref(*win, pts);
+    auto pr = prune(*win, pts, ref ? &*ref : nullptr);
     route = pr.first;
     auto bad = pr.second;
     std::optional<V2> fail_at = bad ? win->fail_at : std::nullopt;
     if (bad) {
-      auto sharp = sharpen(*win, route, *bad);
+      auto sharp = sharpen(*win, route, *bad, 4, ref ? &*ref : nullptr);
       if (sharp) {
         route = *sharp;
         bad.reset();
       }
+    }
+    if (bad && ref) {
+      // soft: the vertices the preferred clearance kept made a route the frame cannot follow (a corner
+      // in a tight spot): the old straightening instead, before blocking cells for another search
+      auto p2 = prune(*win, pts);
+      std::optional<int> b2 = p2.second;
+      Path r2 = p2.first;
+      std::optional<V2> f2 = b2 ? win->fail_at : std::nullopt;
+      if (b2) {
+        auto sharp = sharpen(*win, r2, *b2);
+        if (sharp) {
+          r2 = *sharp;
+          b2.reset();
+        }
+      }
+      route = r2;   // both blocked: the old route's blocked segment is blocked, as before
+      bad = b2;
+      fail_at = f2;
     }
     res.t_prune += now_s() - t0;
     if (bad) {
@@ -1851,6 +2153,27 @@ PlanResult plan_grid(std::shared_ptr<HeightGrid> hg, const V2& s, const V2& gxy,
     }
     t0 = now_s();
     pv = pivot_pass(*win, route, start_yaw, start_pivoting);
+    if (!pv.ok && ref) {
+      // soft: the preferred route's pivots or arcs refused (it bends away from the straight line, so the
+      // robot's heading is farther off it): the old straightened route, if the frame can follow it
+      auto p2 = prune(*win, pts);
+      Path r2 = p2.first;
+      bool ok2 = !p2.second;
+      if (!ok2) {
+        auto sharp = sharpen(*win, r2, *p2.second);
+        if (sharp) {
+          r2 = *sharp;
+          ok2 = true;
+        }
+      }
+      if (ok2 && r2 != route) {
+        PivotResult pv2 = pivot_pass(*win, r2, start_yaw, start_pivoting);
+        if (pv2.ok) {
+          route = r2;
+          pv = pv2;
+        }
+      }
+    }
     res.t_pivot += now_s() - t0;
     if (pv.ok) break;
     if (!pv.retry) {
@@ -1990,6 +2313,7 @@ PlanResult plan_reverse(std::shared_ptr<HeightGrid> hg, const V2& s, const V2& g
 double reverse_left(const Reverse& rev, const V2& pos) { return (pos - rev.to).dot(unit(rev.yaw)); }
 
 PivotResult check_route(Window& win, const Path& route, std::optional<double> start_yaw, bool start_pivoting) {
+  // (the kept route: the margin only, not the preferred clearance; the start eased as in plan_grid)
   if (route.size() >= 2 && win.follow_free(route).has_value()) {
     PivotResult r;
     r.ok = false;
@@ -2231,6 +2555,79 @@ double drive_clearance(const Window& win, const Path& path, const V2& pos, std::
   return best;
 }
 
+// The preferred clearance (owner decision 2026-10-30, option 1). The search prefers the middle of a
+// passage (prefer_clear, clear_weight), but line-of-sight pruning then pulled the path straight, as near
+// obstacles as the 0.05 margin allows: Gate L2 s8 planned 0.046-0.056 m from the crate past the 0.90 m
+// door. frame_margin is the margin check's own metric (rectangle grown by m: max of the longitudinal and
+// lateral excess), so a requirement of the margin itself is exactly poses_free's check.
+double frame_margin(const Window& win, const V2& p, double yaw, double cap) {
+  const Config& c = *win.cfg;
+  const double r = c.res, hl = FOOTPRINT_LEN / 2, hw = FOOTPRINT_WID / 2;
+  {
+    // nothing within reach of the frame grown by cap (as poses_free's early out)
+    int ci = int(std::floor((p.y() - win.lo.y()) / r)), cj = int(std::floor((p.x() - win.lo.x()) / r));
+    if (ci >= 0 && cj >= 0 && ci < win.ny && cj < win.nx &&
+        win.clear[size_t(ci) * win.nx + cj] > std::hypot(hl + c.off + std::max(cap, 0.0), hw + std::max(cap, 0.0)) + r * 0.75)
+      return cap;
+  }
+  const double cs = std::cos(yaw), sn = std::sin(yaw);
+  const double fx = p.x() - c.off * cs, fy = p.y() - c.off * sn;
+  const int ci = int(std::floor((fy - win.lo.y()) / r)), cj = int(std::floor((fx - win.lo.x()) / r));
+  const int k = int(std::ceil((std::hypot(hl, hw) + std::max(cap, 0.0) * M_SQRT2) / r)) + 1;
+  double best = cap;
+  for (int di = -k; di <= k; ++di)
+    for (int dj = -k; dj <= k; ++dj) {
+      long ii = long(ci) + win.pad + di, jj = long(cj) + win.pad + dj;
+      if (ii < 0 || jj < 0 || ii >= win.bny || jj >= win.bnx) continue;   // off the padded box: free (poses_free blocks poses off it)
+      if (!win.occ_big[size_t(ii) * win.bnx + jj]) continue;
+      double dx = win.lo.x() + (cj + dj + 0.5) * r - fx, dy = win.lo.y() + (ci + di + 0.5) * r - fy;
+      best = std::min(best, std::max(std::abs(dx * cs + dy * sn) - hl, std::abs(-dx * sn + dy * cs) - hw));
+    }
+  return best;
+}
+
+ClearRef clear_ref(const Window& win, const Path& pts) {
+  const Config& c = *win.cfg;
+  ClearRef out;
+  out.pts = pts;
+  const int n = int(pts.size());
+  std::vector<double> cum(n, 0.0), raw(n, c.prefer_clearance);
+  for (int k = 1; k < n; ++k) cum[k] = cum[k - 1] + norm2(pts[k] - pts[k - 1]);
+  for (int k = 0; k < n && n >= 2; ++k) {
+    // the follower's heading: to the point lookahead on (the last vertex: its incoming segment)
+    double a = cum[k] + c.lookahead;
+    int s = std::min(int(std::upper_bound(cum.begin(), cum.end(), a) - cum.begin()), n - 1);
+    V2 q = pts[s];
+    if (s > 0 && cum[s] > a) {
+      double L = cum[s] - cum[s - 1];
+      q = pts[s - 1] + (pts[s] - pts[s - 1]) * ((a - cum[s - 1]) / std::max(L, 1e-9));
+    }
+    V2 d = q - pts[k];
+    if (norm2(d) < 1e-6) d = pts[std::max(k, 1)] - pts[std::max(k, 1) - 1];
+    raw[k] = frame_margin(win, pts[k], hd(d), c.prefer_clearance + c.prefer_slack);
+  }
+  out.m.resize(n);
+  for (int k = 0; k < n; ++k)
+    out.m[k] = std::min({raw[k], raw[std::max(k - 1, 0)], raw[std::min(k + 1, n - 1)]}) - c.prefer_slack;
+  return out;
+}
+
+double ClearRef::need(const V2& p, int r0, int r1) const {
+  const int n = int(pts.size());
+  if (n == 0) return -INF;
+  r0 = std::clamp(r0, 0, n - 1);
+  r1 = r1 < 0 ? n - 1 : std::clamp(r1, r0, n - 1);
+  double best = INF, v = m[r0];
+  for (int k = r0; k <= r1; ++k) {
+    double d = (pts[k] - p).squaredNorm();
+    if (d < best) {
+      best = d;
+      v = m[k];
+    }
+  }
+  return v;
+}
+
 double slow_reach(double clear, double reach, const SlowDown& s) {
   if (!s.on || reach <= s.reach_min) return reach;
   double f = std::clamp((clear - s.clear_slow) / std::max(s.clear_full - s.clear_slow, 1e-6), 0.0, 1.0);
@@ -2297,7 +2694,7 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
   V2 top = have ? V2(std::max(lo.x() + nx * r, hi.x() + 10.0), std::max(lo.y() + ny * r, hi.y() + 10.0))
                 : V2(hi.x() + 10.0, hi.y() + 10.0);
   int nny = int(std::ceil((top.y() - new_lo.y()) / r)), nnx = int(std::ceil((top.x() - new_lo.x()) / r));
-  std::vector<float> h(size_t(nny) * nnx, 0.f), m(h.size(), 0.f), w(h.size(), 0.f);
+  std::vector<float> h(size_t(nny) * nnx, 0.f), m(h.size(), 0.f), w(h.size(), 0.f), u(h.size(), 0.f), lw(h.size(), 0.f);
   std::vector<double> t(h.size(), 0.0);
   if (have) {
     int di = int(std::nearbyint((lo.y() - new_lo.y()) / r)), dj = int(std::nearbyint((lo.x() - new_lo.x()) / r));
@@ -2307,6 +2704,8 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
         h[a] = h_[b];
         m[a] = m_[b];
         w[a] = w_[b];
+        u[a] = u_[b];
+        lw[a] = l_[b];
         t[a] = t_[b];
       }
   }
@@ -2316,6 +2715,8 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
   h_.swap(h);
   m_.swap(m);
   w_.swap(w);
+  u_.swap(u);
+  l_.swap(lw);
   t_.swap(t);
   have = true;
 }
@@ -2330,28 +2731,42 @@ void EvidenceMemory::add(const HeightGrid& hg, const Evidence& ev, double now) {
   auto at = [&](int k) { return size_t(k / hg.nx + di) * nx + (k % hg.nx + dj); };
   std::vector<int> touched;
   std::set_union(ev.hit.begin(), ev.hit.end(), ev.free.begin(), ev.free.end(), std::back_inserter(touched));
-  std::vector<int> t2;
+  std::vector<int> t2, t3, t4;
   std::set_union(touched.begin(), touched.end(), ev.wall.begin(), ev.wall.end(), std::back_inserter(t2));
-  for (int k : t2) {
+  std::set_union(t2.begin(), t2.end(), ev.under.begin(), ev.under.end(), std::back_inserter(t3));
+  std::set_union(t3.begin(), t3.end(), ev.low.begin(), ev.low.end(), std::back_inserter(t4));
+  for (int k : t4) {
     size_t a = at(k);
     double f = std::exp(-std::max(now - t_[a], 0.0) / tau);
     h_[a] = float(h_[a] * f);
     m_[a] = float(m_[a] * f);
     w_[a] = float(w_[a] * f);
+    u_[a] = float(u_[a] * f);
+    l_[a] = float(l_[a] * f);
     t_[a] = now;
   }
   for (int k : ev.hit) h_[at(k)] += 1.0f;
   for (int k : ev.free) m_[at(k)] += 1.0f;
   for (int k : ev.wall) w_[at(k)] += 1.0f;
+  for (int k : ev.under) u_[at(k)] += 1.0f;
+  for (int k : ev.low) l_[at(k)] += 1.0f;
 }
 
 void EvidenceMemory::read(const HeightGrid& hg, double now, std::vector<double>& h, std::vector<double>& m,
                           std::vector<double>& w) {
+  std::vector<double> u, l;
+  read(hg, now, h, m, w, u, l);
+}
+
+void EvidenceMemory::read(const HeightGrid& hg, double now, std::vector<double>& h, std::vector<double>& m,
+                          std::vector<double>& w, std::vector<double>& u, std::vector<double>& l) {
   auto [di, dj] = view(hg);
   size_t n = size_t(hg.ny) * hg.nx;
   h.resize(n);
   m.resize(n);
   w.resize(n);
+  u.resize(n);
+  l.resize(n);
   for (int i = 0; i < hg.ny; ++i)
     for (int j = 0; j < hg.nx; ++j) {
       size_t a = size_t(i + di) * nx + j + dj, b = size_t(i) * hg.nx + j;
@@ -2359,6 +2774,8 @@ void EvidenceMemory::read(const HeightGrid& hg, double now, std::vector<double>&
       h[b] = double(h_[a]) * f;
       m[b] = double(m_[a]) * f;
       w[b] = double(w_[a]) * f;
+      u[b] = double(u_[a]) * f;
+      l[b] = double(l_[a]) * f;
     }
 }
 
@@ -2431,9 +2848,10 @@ void LiveWindow::correct(HeightGrid& hg) {
       std::vector<std::pair<Cloud, Eigen::Vector3d>> sc;
       for (size_t q = recent.size() > size_t(n_clear) ? recent.size() - n_clear : 0; q < recent.size(); ++q)
         sc.push_back({to_double(recent[q].p), recent[q].s});
-      std::vector<int> hits, miss;
-      evidence(hg, sc, hits, miss, true);
+      std::vector<int> hits, miss, under, low_hits;
+      evidence(hg, sc, hits, miss, true, &under, &low_hits);
       hg.apply_evidence(hits, miss);
+      hg.apply_overhangs(under, low_hits);
     }
     return;
   }
@@ -2464,14 +2882,20 @@ void LiveWindow::correct(HeightGrid& hg) {
     mem->add(eg, ev, sc.t);
   }
   done = recent.back().seq;
-  std::vector<double> h, m, w;
-  mem->read(hg, now, h, m, w);
+  std::vector<double> h, m, w, u, l;
+  mem->read(hg, now, h, m, w, u, l);
+  const bool oh = c.overhang_clear > c.z_lo;
   hg.seen_free.assign(h.size(), 0);
   for (size_t q = 0; q < h.size(); ++q) {
     bool moved = hg.occ[q] && m[q] >= 1.0 && m[q] > mem_clear_ratio * h[q];
-    hg.seen_free[q] = m[q] >= 1.0 && m[q] > h[q];   // seen through more than hit lately (a reverse may use it)
-    bool held = w[q] >= mem_hits && h[q] > m[q];
-    hg.occ[q] = (hg.occ[q] && !moved) || held;
+    // an overhang: nothing in (z_lo, overhang_clear] here or next to it in the window's points (overhang_ok),
+    // and the space beneath seen through lately more often than hit (mem_clear_ratio): passable, not held as
+    // a wall from afar either
+    bool beneath = oh && hg.overhang_ok[q] && u[q] >= c.overhang_seen && u[q] > mem_clear_ratio * l[q];
+    // seen through more than hit lately (a reverse may use it); under an overhang, seen through beneath it
+    hg.seen_free[q] = (m[q] >= 1.0 && m[q] > h[q]) || (beneath && (hg.seen_up[q] || h[q] >= 1.0));
+    bool held = w[q] >= mem_hits && h[q] > m[q] && !beneath;
+    hg.occ[q] = (hg.occ[q] && !moved && !beneath) || held;
   }
   hg.edt();
 }

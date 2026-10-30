@@ -51,6 +51,12 @@
 // already heading along its leg is committed to that much), ~arc_vertices false (a pivot at a gentle
 // turn whose arc fails instead of NO_PATH; off: see track_core.cpp LIMITS).
 //
+// Clearance (owner decision 2026-10-30, option 1, after Gate L2 s8 planned 0.05 m past the crate): the
+// path's straightening keeps ~prefer_clearance (0.15 m, bare frame to obstacle cell centres) wherever the
+// search's path had that much, down to ~margin only where that was tighter (0: the old straightening).
+// The first start_skip (0.5 m) of each replan is frame-checked too (~start_frame): at the margin and the
+// preferred clearance where the robot's pose has that much, else (~start_soft) no nearer than it is.
+//
 // Speed (l4_track::run_out). Rover Guided's fast-update path asks ~0.5 m/s per metre to its target
 // and steers like pure pursuit on it: the carrot alone held it to ~0.3 m/s; the run-out gives it
 // ~runout_s (2.1) x ~drive_speed (the FC's WP_SPEED) of target on straights, and none at stop points
@@ -142,6 +148,10 @@ class TrackPlanner {
     c.margin = getd(pnh_, "margin", 0.05);
     c.z_lo = getd(pnh_, "z_lo", 0.15);
     c.z_hi = getd(pnh_, "z_hi", 0.60);
+    // overhangs (owner 2026-10-30, 15 in): returns only above ~overhang_clear (m above the local floor), with
+    // the space beneath seen through (in ~overhang_seen recent scans), are driven under; <= ~z_lo: off
+    c.overhang_clear = getd(pnh_, "overhang_clear", c.overhang_clear);
+    c.overhang_seen = getd(pnh_, "overhang_seen", c.overhang_seen);
     c.min_pts = int(getd(pnh_, "min_pts", 2));
     c.lookahead = getd(pnh_, "lookahead", 0.5);
     c.pad = getd(pnh_, "pad", 3.0);
@@ -165,6 +175,25 @@ class TrackPlanner {
     bool av = false;
     pnh_.param("arc_vertices", av, false);
     c.arc_vertices = av;
+    // the preferred clearance (owner 2026-10-30, option 1): straightening keeps ~prefer_clearance (0.15 m,
+    // bare frame) where the search's path had it; down to ~margin only where that was tighter (0: off).
+    // The first start_skip of each replan: the frame is checked there too, at ~margin where the robot's
+    // pose has that much, else (~start_soft) no nearer than it already is; ~start_frame false: the old
+    // point check only
+    c.prefer_clearance = getd(pnh_, "prefer_clearance", c.prefer_clearance);
+    bool sf = c.start_frame, ss = c.start_soft;
+    pnh_.param("start_frame", sf, sf);
+    pnh_.param("start_soft", ss, ss);
+    c.start_frame = sf;
+    c.start_soft = ss;
+    // the driven bends' inside cut (track_core: Window::follow_free): the frame along the chord the carrot
+    // chase takes, ~cut_lead (0.5 m) before to after a bend under pivot_angle, keeps the margin
+    bool cc = c.cut_check;
+    pnh_.param("cut_check", cc, cc);
+    c.cut_check = cc;
+    c.cut_lead = getd(pnh_, "cut_lead", c.cut_lead);
+    // a turn split into bends within ~bend_merge (0.5 m) is one bend: over pivot_angle a pivot (0: off)
+    c.bend_merge = getd(pnh_, "bend_merge", c.bend_merge);
     c.update();
     cfg_ = c;
     pivot_lead_ = getd(pnh_, "pivot_lead", 0.15);

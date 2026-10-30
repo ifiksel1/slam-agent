@@ -102,6 +102,46 @@ struct Config {
   // on the house drive it made routes the old planner rejected viable, one 0.18 m from a wall cell
   // (the gate's 0.2 m wall check failed, house_current keyframe 62)
   bool arc_vertices = false;
+  // the preferred clearance (owner decision 2026-10-30, option 1, after Gate L2 s8 passed the crate at the
+  // 0.05 margin): line-of-sight pruning and sharpen() keep a shortcut only if its follower frame keeps this
+  // much (bare frame to obstacle cell centres, the margin's rectangle metric) wherever the search's own cell
+  // path had that much there; else they keep the search's vertex. Soft: down to the margin where the search
+  // path itself is tighter (doors, the house drive). 0 or <= margin: off (the old straightening)
+  double prefer_clearance = 0.15;
+  // ... owed up to prefer_slack less than the cell path had (its cell-centre staircase): the full
+  // prefer_clearance where it had prefer_clearance + prefer_slack; where it had no more than margin +
+  // prefer_slack (a 0.70-0.80 m door, a tight corridor) the old straightening (2026-10-30: without the
+  // slack, kept staircase vertices in the 0.7 m hairpin made the lagging drive chain clip a wall)
+  double prefer_slack = 0.05;
+  // the first start_skip of a replan (owner 2026-10-30): the follower frame is checked there too, with the
+  // margin (and the preferred clearance) where the start pose allows it. start_soft: a start pose nearer
+  // than that is the limit there instead (the frame comes no nearer anything than it already is); false: the
+  // full margin, which refuses a robot standing within it. start_frame false: the old point check only
+  bool start_frame = true;
+  bool start_soft = true;
+  // overhangs (owner 2026-10-30: "the robot can drive under openings with a ceiling of 15 inches"): the
+  // obstacle band's top for what blocks on its own. A column with returns in (z_lo, overhang_clear] above
+  // its local ground is an obstacle by the band rules; a column whose returns all lie above overhang_clear
+  // (a table top, a shelf, a beam) is an obstacle by the same rules unless the live evidence saw through
+  // the space beneath it, (z_lo, overhang_clear], more often than it hit anything there (see
+  // track_core.cpp, Overhangs). <= z_lo: off (the old behaviour)
+  double overhang_clear = 0.381;
+  // ... seen through beneath in at least this many recent scans (the live evidence memory's decayed count): a
+  // ray grazing past a wall's end in the same 0.5 deg bin is no evidence (house_view keyframe 480: 2 scans)
+  double overhang_seen = 3.0;
+  // ... and with no low voxel within this many cells (HeightGrid::overhang_ok; 0: the cell itself only). 1 narrows
+  // every opening under an overhang by a cell each side (SITL o2: the 0.90 m door under the table read 0.70 m and
+  // the arc check refused it); the house wall checks pass at 0 (the wall's base cells stay obstacles)
+  int overhang_ring = 0;
+  // the driven bends' inside cut (owner request 2026-10-30, the hairpin drive chain): the carrot chase
+  // takes about the chord from cut_lead before a bend under pivot_angle to cut_lead after it (along the
+  // path); the frame along that chord must keep the margin (Window::follow_free). Bends under cut_min_deg
+  // are not checked. cut_check false: off
+  bool cut_check = true;
+  double cut_lead = 0.5, cut_min_deg = 5.0;
+  // ... and a turn split into bends within bend_merge (m, along the path) of each other is one bend: over
+  // pivot_angle a pivot at its first vertex (pivot_vertices, pivot_pass; 0: off)
+  double bend_merge = 0.5;
   // derived (update())
   double half_len = 0, half_wid = 0, r_in = 0, r_hard = 0, r_out = 0, inflate = 0;
   double pivot_angle = 0, pivot_done = 0, pivot_radius = 0;
@@ -118,6 +158,7 @@ Config live_config();
 CloudF voxel_down(const CloudF& p, double vox);
 
 class Window;
+struct ClearRef;
 
 // ground, obstacles, clearance and known space on a res grid over [lo, hi] (xy)
 class HeightGrid {
@@ -130,6 +171,10 @@ class HeightGrid {
   int ny = 0, nx = 0;
   std::vector<double> cellmin, ground, clear;
   std::vector<int> count;
+  // per cell: voxels in (z_lo, overhang_clear] above the ground; overhang_ok: no such voxel in the cell (or within
+  // Config::overhang_ring cells): only such a cell can be an overhang (see track_core.cpp, Overhangs)
+  std::vector<int> low;
+  std::vector<uint8_t> overhang_ok;
   std::vector<uint8_t> occ, seen_up, floor_seen, known, seen_free;   // seen_free empty: none
   // per cell: its tile has a floor level of its own; 0: no floor seen there (no points, or only a ceiling
   // or wall top), its ground is the nearest such tile's, a stand-in (empty: all seen, a fixed floor_z)
@@ -141,6 +186,9 @@ class HeightGrid {
   double clearance_at(const V2& xy) const;
   double ground_at(const V2& xy) const;
   int apply_evidence(const std::vector<int>& hits, const std::vector<int>& misses);
+  // overhangs: obstacle cells with overhang_ok whose space beneath was seen through (under, clear_misses or
+  // more) more often than hit there (low_hits x clear_ratio) -> dropped
+  int apply_overhangs(const std::vector<int>& under, const std::vector<int>& low_hits);
   void edt();
   std::shared_ptr<Window> crop(const V2& lo, const V2& hi) const;
 
@@ -172,6 +220,7 @@ class Window {
   std::vector<uint8_t> occ_big;
   int pad = 0, bny = 0, bnx = 0;
   std::optional<V2> start;
+  std::optional<double> start_yaw;   // the robot's heading there (plan_grid), for follow_free's start check
   double skip = 0.5;
   std::optional<V2> fail_at;
 
@@ -187,21 +236,45 @@ class Window {
   std::vector<int> pose_hits(const V2& xy, double yaw, double margin = -1.0) const;   // margin < 0: cfg.margin
   std::vector<uint8_t> discs_free(const std::vector<V2>& xy, double radius = -1.0) const;
   bool pivot_free(const V2& centre, double yaw_in, double tol = -1.0, bool back = true) const;
-  std::optional<int> follow_free(const Path& pts, int k0 = 0);
+  // the follower's frame along pts from vertex k0 -> the first blocked segment (fail_at: its pose), or none.
+  // With ref (the preferred clearance): each pose also keeps ref's need there, from ref's vertices
+  // [r0, r1] (r1 < 0: to the end)
+  std::optional<int> follow_free(const Path& pts, int k0 = 0, const ClearRef* ref = nullptr, int r0 = 0,
+                                 int r1 = -1);
 };
 
+// the preferred clearance along the search's cell path (Config::prefer_clearance): per vertex the follower
+// frame's clearance there (frame_margin, heading to the point lookahead on), capped at prefer_clearance +
+// prefer_slack, the least of it and its neighbours (the cell path's staircase headings), less prefer_slack
+struct ClearRef {
+  Path pts;
+  std::vector<double> m;
+  // what a pose at p is held to: m of the nearest vertex in [r0, r1] (r1 < 0: to the end)
+  double need(const V2& p, int r0 = 0, int r1 = -1) const;
+};
+ClearRef clear_ref(const Window& win, const Path& pts);
+// the bare frame's clearance at odometry pose (p, yaw) in the margin's metric: the least over obstacle cell
+// centres of max(|lon| - L/2, |lat| - W/2) (negative: a cell centre inside the frame), at most cap. The
+// frame plus margin m holds no obstacle cell centre exactly when this is >= m (Window::poses_free)
+double frame_margin(const Window& win, const V2& p, double yaw, double cap);
+
+// flat cell indices, sorted, unique. low: hit in (z_lo, overhang_clear]; under (low_sensor only): rays seen
+// through (z_lo, overhang_clear] there, cut at the nearest return in it, less the low hits
 struct Evidence {
-  std::vector<int> hit, free, wall;   // flat cell indices, sorted, unique
+  std::vector<int> hit, free, wall, low, under;
 };
 Evidence scan_evidence(const HeightGrid& hg, const Cloud& pts, const Eigen::Vector3d& sensor, bool walls = false,
                        bool low_sensor = true);
-// hit and seen-free counts per cell over scans (whole maps: the band-level model by default)
+// hit and seen-free counts per cell over scans (whole maps: the band-level model by default); with under /
+// low_hits, the overhang evidence too (low_sensor)
 void evidence(const HeightGrid& hg, const std::vector<std::pair<Cloud, Eigen::Vector3d>>& scans,
-              std::vector<int>& hits, std::vector<int>& miss, bool low_sensor = false);
+              std::vector<int>& hits, std::vector<int>& miss, bool low_sensor = false,
+              std::vector<int>* under = nullptr, std::vector<int>* low_hits = nullptr);
 
 std::optional<std::vector<std::pair<int, int>>> search(const Window& win, std::pair<int, int> start,
                                                        std::pair<int, int> goal);
-std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts);
+// ref: the preferred clearance (clear_ref of pts), none: the old line of sight
+std::pair<Path, std::optional<int>> prune(Window& win, const Path& pts, const ClearRef* ref = nullptr);
 
 struct Pivot {
   int i = 0;
@@ -240,7 +313,8 @@ std::optional<ArcFail> arc_fail(const Window& win, const Path& leg, const V2& p0
 
 PivotResult pivot_pass(Window& win, const Path& path, std::optional<double> start_yaw = std::nullopt,
                        bool start_pivoting = false);
-std::optional<Path> sharpen(Window& win, const Path& route, int bad, int max_skip = 4);
+// ref: try the corners that keep the preferred clearance first (then any the frame can follow)
+std::optional<Path> sharpen(Window& win, const Path& route, int bad, int max_skip = 4, const ClearRef* ref = nullptr);
 
 struct Reverse {
   V2 from, to;
@@ -323,13 +397,16 @@ class EvidenceMemory {
   void add(const HeightGrid& hg, const Evidence& ev, double now);
   void read(const HeightGrid& hg, double now, std::vector<double>& h, std::vector<double>& m,
             std::vector<double>& w);
+  // ... and the overhang channels: u seen through beneath (Evidence::under), l hit there (Evidence::low)
+  void read(const HeightGrid& hg, double now, std::vector<double>& h, std::vector<double>& m,
+            std::vector<double>& w, std::vector<double>& u, std::vector<double>& l);
   double res, tau;
 
  private:
   bool have = false;
   V2 lo = V2::Zero();
   int ny = 0, nx = 0;
-  std::vector<float> h_, m_, w_;
+  std::vector<float> h_, m_, w_, u_, l_;
   std::vector<double> t_;
   void ensure(const V2& lo, const V2& hi);
   std::pair<int, int> view(const HeightGrid& hg);

@@ -52,6 +52,20 @@ double now_s() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// A/B switches for the preferred clearance and the start check (the node's ~prefer_clearance,
+// ~start_frame, ~start_soft, ~overhang_clear): L4_PREFER, L4_START_FRAME, L4_START_SOFT, L4_OVERHANG (0: off)
+void ab_env(tc::Config& c) {
+  if (std::getenv("L4_OVERHANG")) c.overhang_clear = std::atof(std::getenv("L4_OVERHANG"));
+  if (std::getenv("L4_OVERHANG_SEEN")) c.overhang_seen = std::atof(std::getenv("L4_OVERHANG_SEEN"));
+  if (std::getenv("L4_OVERHANG_RING")) c.overhang_ring = std::atoi(std::getenv("L4_OVERHANG_RING"));
+  if (std::getenv("L4_PREFER")) c.prefer_clearance = std::atof(std::getenv("L4_PREFER"));
+  if (std::getenv("L4_START_FRAME")) c.start_frame = std::atoi(std::getenv("L4_START_FRAME")) != 0;
+  if (std::getenv("L4_START_SOFT")) c.start_soft = std::atoi(std::getenv("L4_START_SOFT")) != 0;
+  if (std::getenv("L4_CUT")) c.cut_check = std::atoi(std::getenv("L4_CUT")) != 0;
+  if (std::getenv("L4_CUT_LEAD")) c.cut_lead = std::atof(std::getenv("L4_CUT_LEAD"));
+  if (std::getenv("L4_MERGE")) c.bend_merge = std::atof(std::getenv("L4_MERGE"));
+}
+
 std::vector<bool> results;
 void check(const std::string& name, bool ok, const std::string& detail = "") {
   results.push_back(ok);
@@ -344,6 +358,18 @@ void grid_dump(const std::string& label, long k, double dist, const tc::LiveWind
   j["known"] = hg.known;
   j["seen_free"] = hg.seen_free;
   j["clear"] = hg.clear;
+  // the overhang inputs: low voxels per cell, the evidence memory's channels now
+  j["low"] = hg.low;
+  j["seen_up"] = hg.seen_up;
+  if (lw.mem && !lw.recent.empty()) {
+    std::vector<double> h, mm, w, u, l;
+    lw.mem->read(hg, lw.recent.back().t, h, mm, w, u, l);
+    j["mem_h"] = h;
+    j["mem_m"] = mm;
+    j["mem_w"] = w;
+    j["mem_u"] = u;
+    j["mem_l"] = l;
+  }
   std::ofstream(fmt("grid_cpp_%s_%ld_%g.json", label.c_str(), k, dist)) << j.dump();
 }
 
@@ -517,7 +543,9 @@ class RealMap {
 
   MapRes map_mode(double low = 9.0) {
     const double dists[4] = {2, 5, 10, 20};
-    auto cfg = std::make_shared<const tc::Config>();
+    tc::Config mc;
+    ab_env(mc);
+    auto cfg = std::make_shared<const tc::Config>(mc);
     MapRes res;
     auto hg = std::make_shared<tc::HeightGrid>(P, cfg);
     std::vector<int> hits, miss;
@@ -578,6 +606,7 @@ class RealMap {
     // A/B switches for the arc check (the node's ~arc_check, ~arc_vertices)
     if (std::getenv("L4_ARC")) cfg.arc_check = std::atoi(std::getenv("L4_ARC")) != 0;
     if (std::getenv("L4_ARC_VERTICES")) cfg.arc_vertices = std::atoi(std::getenv("L4_ARC_VERTICES")) != 0;
+    ab_env(cfg);
     LiveRes res;
     KD Dk(D);
     tc::LiveWindow lw(cfg, window_s);

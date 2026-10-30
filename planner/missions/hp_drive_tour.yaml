@@ -1,0 +1,75 @@
+# Hensel Phelps drive-only tour (owner 2026-10-30), SITL: a loop driven on the tracks the whole way, no
+# takeoff (the first leg is a drive, so the executive drives first; no fly / land / takeoff legs at all).
+# Map: planner/sim/course/hp_gate_l2.pcd (the Gate L2 course map: hp_1015_carved.pcd + hp_gate_l2.json,
+# the filled floor at the container's west mouth and the obstacles: door wall x -5.5 with a 0.90 m gap
+# y -9.45..-8.55, crate (-7.0, -9.2), tower (-0.24, -7.6), pole_a (-1.5, -9.2), pole_b (-7.4, -6.8)).
+# Start 0.00, 0.00, yaw -90.7 (map x, y, deg) on the ground: the real takeoff spot, facing south (map -y).
+# Waypoints in the map frame = fc in simulation (identity anchor at the start). Route picture:
+# Shannon ~/sim/l2/drive_tour/route.png.
+#
+# The loop goes round the container (map x -3.9..-1.0 outer, y +0.25..-6.1; 2.1-2.2 m inside, floor
+# ~0.15 m up a sill at both ends) clockwise seen from above: down the corridor east of it, west along
+# the south through the door and past the crate, north up the west side, then back through the
+# container south to north and out of its north mouth to the start. Floor along it, from the map
+# (0.2 m cells): flat, -0.3..0.0 m map z, nothing between 0.3 and 1.9 m above it except the obstacles
+# named below; no step except the container sills (the container drive's, hp_container_drive.yaml).
+#  1  (-0.30, -3.00)  south down the corridor between the container's east wall (x -1.2 .. -1.0, skewed)
+#                     and the racks (x 0.8): 1.8-2.0 m wide, the robot's heading at the start
+#  2  (-0.30, -6.65)  the corridor's south end, past the container's south-east corner (-1.0, -6.1) and
+#                     the racks' end (y -6.3); the tower's top edge (y -7.3) 0.65 m ahead
+#  3  (-1.17, -8.65)  south-west through the 1.26 m gap between the low box (x -3.25..-1.8, y -7.0..-8.2,
+#                     0.9 m high) and the tower (x -0.54..0.06), to its south side; the pivot west here
+#                     (circle r 0.392 about the frame centre) stays 0.68 m from the box and 0.81 m from pole_a
+#  4  (-4.30, -8.70)  west through the 0.92 m gap between the box's south side (y -8.2) and pole_a
+#                     (top y -9.125), to 1.2 m east of the door wall, near its axis
+#  5  (-8.50, -9.00)  through the 0.90 m door and past the crate (Gate L2's drive goal)
+#  6  (-8.60, -6.00)  north up the west room, 1.1 m west of pole_b; the low objects (0.3-0.6 m) at
+#                     x -9.2..-8.4, y -4.3..-2.3 stay 1.7 m north
+#  7  (-6.20, -4.90)  east-north-east, 1.2 m from pole_b's line, 0.8 m west of the door wall's north end
+#                     (-5.44, -4.6)
+#  8  (-5.20, -2.60)  north-east round the wall's end; an overhead object (points from map z 1.9 up) at
+#                     (-7.0..-6.6, -3.9..-3.7) stays 1 m west of the line
+#  9  (-5.40,  1.60)  north up the corridor west of the container (3 m wide: container x -4.0, the
+#                     ~1 m clutter at x -8.0..-6.8, y -2.3..1.5) into the open floor north-west of it
+#                     (north wall y 2.7); the turn back south pivots here, 1.1 m from everything
+# 10  (-4.75, -3.60)  back south along the container's west wall (0.75 m)
+# 11  (-4.75, -6.45)  between the door wall (x -5.44, 0.69 m) and the container (0.75 m), to south of the
+#                     container's south-west corner; 0.55 m north of the box's line (y -7.0)
+# 12  (-2.50, -4.60)  east, then north into the container's south mouth over the sill, 1.4 m inside (a
+#                     goal inside, so the only way is through the mouth)
+# 13  (-2.55,  0.85)  north through the container on its centreline and out of the north mouth onto
+#                     the filled floor (hp_gate_l2.json "floor"); the container floor near the north end
+#                     has no map points (unknown, driven through on the live window); the pivot east
+#                     here stays 0.74 m from the 0.7-1.5 m clutter at x -3.3..-3.1, y >= 1.25
+# 14  (-0.40,  0.50)  east to 0.6 m north-west of the start
+# SITL t1 (2026-10-30, ~/sim/l2/k_ana/run.sh, the Gate L2 launch): DONE in 153 s, all 14 legs reached,
+# no reverse; pivots at 3 (~120 deg), 9 (~145 deg), 11 (~60 deg) and a short one past the crate;
+# body clearance >= 0.12 m over the whole run (clearance.py --floor-ignore 0.30; the container's sill at
+# its south-west corner), >= 0.15 m to the course obstacles (the door's jamb), max 1.19 m/s.
+# Driving speed is the FC's WP_SPEED / CRUISE_SPEED, raised in SITL only through closed_loop.sh's
+# DRIVE_PARMS (as gate_l2_hp_course.yaml: WP_SPEED 1.0, CRUISE_SPEED 1.0, WP_PIVOT_ANGLE 60); the legs'
+# speed below is the executive's record of it, not a command (the robot's own are 0.5).
+name: hp_drive_tour
+frame: fc
+takeoff_height: 1.00      # unused: no takeoff leg
+defaults:
+  speed: 1.0
+  accept_radius: 0.4
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: drive, goal: [-0.30, -3.00], speed: 1.0, accept_radius: 0.4}   # 1  east corridor
+  - {type: drive, goal: [-0.30, -6.65], speed: 1.0, accept_radius: 0.4}   # 2  corridor's south end
+  - {type: drive, goal: [-1.17, -8.65], speed: 1.0, accept_radius: 0.4}   # 3  box-tower gap
+  - {type: drive, goal: [-4.30, -8.70], speed: 1.0, accept_radius: 0.4}   # 4  box-pole_a gap, door approach
+  - {type: drive, goal: [-8.50, -9.00], speed: 1.0, accept_radius: 0.4}   # 5  door, crate
+  - {type: drive, goal: [-8.60, -6.00], speed: 1.0, accept_radius: 0.4}   # 6  west room, west of pole_b
+  - {type: drive, goal: [-6.20, -4.90], speed: 1.0, accept_radius: 0.4}   # 7  north of pole_b
+  - {type: drive, goal: [-5.20, -2.60], speed: 1.0, accept_radius: 0.4}   # 8  round the door wall's end
+  - {type: drive, goal: [-5.40, 1.60], speed: 1.0, accept_radius: 0.4}    # 9  west corridor, north-west floor
+  - {type: drive, goal: [-4.75, -3.60], speed: 1.0, accept_radius: 0.4}   # 10 back south
+  - {type: drive, goal: [-4.75, -6.45], speed: 1.0, accept_radius: 0.4}   # 11 wall / container gap
+  - {type: drive, goal: [-2.50, -4.60], speed: 1.0, accept_radius: 0.4}   # 12 into the container's south mouth
+  - {type: drive, goal: [-2.55, 0.85], speed: 1.0, accept_radius: 0.4}    # 13 through, out of the north mouth
+  - {type: drive, goal: [-0.40, 0.50], speed: 1.0, accept_radius: 0.4}    # 14 near the start

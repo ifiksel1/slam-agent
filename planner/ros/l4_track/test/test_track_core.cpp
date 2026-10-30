@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <tuple>
 
 #include "l4_track/track_core.h"
 
@@ -882,6 +883,8 @@ TEST(ArcCheck, WithoutItTheLaggingArcClipsTheJamb) {
   // the same scene without the arc check: some start heading clips (the test has teeth)
   tc::Config off = CFG;
   off.arc_check = false;
+  off.cut_check = false;   // the driven bends' cut check and merge (2026-10-30) also catch this clip
+  off.bend_merge = 0.0;
   off.update();
   Cloud room = door_room(), walls = door_walls();
   double first = std::atan2(DG.y() - DS.y(), DG.x() - DS.x()), worst = 0.0;
@@ -919,6 +922,297 @@ TEST(ArcCheck, LagOnAGentleTurnNextToAWallIsRefusedOrRoutedClear) {
     auto r = drive_chain_rover(CFG, walls, room, V2(-1.5 + E, 1.2 + E), y0, V2(3.5 + E, -0.6 + E), 2.1, 1.0, 0.5, 1.0, FCB, 2.5,
                                1.0, 0.05, 0.3, 0.15, 4.0, STEER);
     EXPECT_EQ(r.worst, 0.0) << "yaw " << y0 << ": reached " << r.reached << " " << r.why;
+  }
+}
+
+// ---- the preferred clearance (owner decision 2026-10-30, option 1) and the start check
+namespace {
+// the follower's poses along a path (every 0.05 m, heading to the point lookahead on) -> the least bare-frame
+// clearance to obstacle points in the margin's metric (max of the longitudinal and lateral excess), and to
+// the grid's obstacle cell centres (tc::frame_margin); poses within `skip` of the start left out
+std::pair<double, double> path_margin(const Path& path, const std::vector<V2>& obs, const tc::Window& win,
+                                      const tc::Config& cfg, double skip = 0.0) {
+  Path P = tc::densify(path, 0.05);
+  std::vector<double> cum{0.0};
+  for (size_t k = 1; k < P.size(); ++k) cum.push_back(cum.back() + tc::norm2(P[k] - P[k - 1]));
+  double pts = 1e3, cells = 1e3;
+  for (size_t k = 0; k < P.size(); ++k) {
+    if (tc::norm2(P[k] - P[0]) < skip) continue;
+    size_t qi = std::lower_bound(cum.begin(), cum.end(), cum[k] + cfg.lookahead) - cum.begin();
+    V2 q = P[std::min(qi, P.size() - 1)];
+    V2 d = tc::norm2(q - P[k]) > 1e-6 ? V2(q - P[k]) : V2(P.back() - P[P.size() - 2]);
+    double yaw = std::atan2(d.y(), d.x()), c = std::cos(yaw), s = std::sin(yaw);
+    V2 f = P[k] - cfg.off * V2(c, s);
+    for (auto& o : obs) {
+      double dx = o.x() - f.x(), dy = o.y() - f.y();
+      pts = std::min(pts, std::max(std::abs(dx * c + dy * s) - tc::FOOTPRINT_LEN / 2,
+                                   std::abs(-dx * s + dy * c) - tc::FOOTPRINT_WID / 2));
+    }
+    cells = std::min(cells, tc::frame_margin(win, P[k], yaw, 1.0));
+  }
+  return {pts, cells};
+}
+
+// a 0.5 m box (x -0.25..0.25, y 0.0..0.5) in the open, its walls 0.025 m off the cell boundaries
+Cloud box_walls() {
+  return cat({w(-0.25, 0.0, 0.25, 0.0), w(-0.25, 0.5, 0.25, 0.5), w(-0.25, 0.0, -0.25, 0.5), w(0.25, 0.0, 0.25, 0.5)});
+}
+}  // namespace
+
+TEST(PreferClearance, PathPastABoxInTheOpenKeepsThePreferredClearance) {
+  Cloud walls = box_walls(), room = cat({floor_(-4, 4, -3, 3), walls});
+  auto obs = band_xy(walls, CFG);
+  tc::Config old = CFG;
+  old.prefer_clearance = 0.0;
+  old.update();
+  // goals past the box on a line that grazes it (the straightened path wants its corner)
+  for (auto [s, g] : {std::pair<V2, V2>{at(-3.0, -0.6), at(3.0, 0.9)}, {at(-3.0, 0.9), at(3.0, -0.6)},
+                      {at(-2.5, -0.3), at(2.5, -0.3)}, {at(-2.5, 0.25), at(2.5, 0.25)}}) {
+    auto out = tc::plan(room, std::nullopt, s, g, CFG);
+    auto was = tc::plan(room, std::nullopt, s, g, old);
+    ASSERT_TRUE(out.ok && was.ok) << out.reason << was.reason;
+    auto [mp, mc] = path_margin(out.path, obs, *out.grid, CFG);
+    auto [wp, wc] = path_margin(was.path, obs, *was.grid, old);
+    printf("  box (%.2f, %.2f) -> (%.2f, %.2f): preferred %.3f m (cell centres %.3f), length %.2f; without %.3f (%.3f), %.2f\n",
+           s.x(), s.y(), g.x(), g.y(), mp, mc, out.length, wp, wc, was.length);
+    // against the cell centres the preferred clearance exactly; against the points, less the cell rounding
+    EXPECT_GE(mc, CFG.prefer_clearance - 1e-6);
+    EXPECT_GE(mp, CFG.prefer_clearance - CFG.res / 2);
+    EXPECT_LT(out.length, was.length + 0.5);   // a little longer, no detour
+  }
+}
+
+TEST(PreferClearance, StraighteningAloneHugsTheBox) {
+  // the test has teeth: without the preferred clearance the same paths pass the box nearer than it
+  Cloud walls = box_walls(), room = cat({floor_(-4, 4, -3, 3), walls});
+  tc::Config old = CFG;
+  old.prefer_clearance = 0.0;
+  old.update();
+  double worst = 1e3;
+  for (auto [s, g] : {std::pair<V2, V2>{at(-3.0, -0.6), at(3.0, 0.9)}, {at(-3.0, 0.9), at(3.0, -0.6)}}) {
+    auto was = tc::plan(room, std::nullopt, s, g, old);
+    ASSERT_TRUE(was.ok) << was.reason;
+    worst = std::min(worst, path_margin(was.path, band_xy(walls, old), *was.grid, old).second);
+  }
+  EXPECT_LT(worst, CFG.prefer_clearance - 0.03);
+}
+
+TEST(PreferClearance, Doors070To090StillPassAtTheMargin) {
+  // where the space is tighter than the preferred clearance the path falls back to the margin: straight
+  // through, and in from the side (with the robot's heading: the arc check and the start check apply)
+  for (double wd : {0.70, 0.75, 0.80, 0.90}) {
+    Cloud d = door(wd);
+    auto obs = band_xy(d, CFG);
+    auto out = tc::plan(d, std::nullopt, V2(-2, 0), V2(2, 0), CFG);
+    ASSERT_TRUE(out.ok) << wd << " " << out.reason;
+    auto [ok, worst] = frame_clear(out.path, obs, CFG);
+    EXPECT_TRUE(ok) << wd << " " << worst;
+    EXPECT_GE(path_margin(out.path, obs, *out.grid, CFG).second, CFG.margin - 1e-6) << wd;
+    for (auto [s, g, yaw] : {std::tuple<V2, V2, double>{V2(-2.0, 1.0), V2(2.0, -0.8), 0.0},
+                             {V2(-2.0, -1.0), V2(2.0, 0.6), 0.0}, {V2(-2.0, 0.0), V2(2.0, 0.0), 0.0}}) {
+      auto o2 = tc::plan(d, std::nullopt, s, g, CFG, yaw);
+      ASSERT_TRUE(o2.ok) << wd << " from (" << s.x() << ", " << s.y() << "): " << o2.reason;
+      auto L = legs_clear(o2, obs, CFG);
+      EXPECT_TRUE(L.ok) << wd << " worst " << L.worst << " pivot nearest " << L.near;
+      printf("  door %.2f from (%.1f, %.1f): clearance %.3f m, length %.2f, pivots %zu\n", wd, s.x(), s.y(),
+             path_margin(o2.path, obs, *o2.grid, CFG, CFG.start_skip).second, o2.length, o2.pivots.size());
+    }
+  }
+}
+
+TEST(StartCheck, FrameHeldToTheMarginWithinTheFirstHalfMetre) {
+  // a wall along y = 0.3..0.4 (cell centres y 0.35); the start pose has the margin, a path bending toward
+  // the wall within start_skip brings the frame inside it (still clear of the bare frame)
+  Cloud room = cat({floor_(-3, 3, -3, 3), w(-1.0, 0.3, 2.0, 0.3)});
+  for (bool on : {true, false}) {
+    tc::Config c = CFG;
+    c.start_frame = on;
+    c.update();
+    tc::HeightGrid hg(room, std::make_shared<const tc::Config>(c));
+    auto win = hg.crop(V2(-2, -2), V2(2, 2));
+    win->start = V2(0.0, 0.0);
+    win->skip = c.start_skip;
+    Path P{V2(0.0, 0.0), V2(0.2, 0.0), V2(0.45, 0.07)};
+    ASSERT_GE(tc::frame_margin(*win, P[0], 0.0, 1.0), c.margin);
+    ASSERT_LT(tc::frame_margin(*win, P[2], std::atan2(0.07, 0.25), 1.0), c.margin);
+    ASSERT_GE(tc::frame_margin(*win, P[2], std::atan2(0.07, 0.25), 1.0), 0.0);
+    // checked: refused; the old point check alone let it through
+    EXPECT_EQ(win->follow_free(P).has_value(), on);
+  }
+}
+
+TEST(StartCheck, RobotWithinTheMarginDrivesOnNoNearer) {
+  // the robot stands 0.02 m from the wall (inside the margin): straight on along it passes (start_soft), a
+  // path nearer the wall does not; the full margin from the start (start_soft false) refuses both
+  Cloud room = cat({floor_(-3, 3, -3, 3), w(-1.0, 0.3, 2.0, 0.3)});
+  for (bool soft : {true, false}) {
+    tc::Config c = CFG;
+    c.start_soft = soft;
+    c.update();
+    tc::HeightGrid hg(room, std::make_shared<const tc::Config>(c));
+    auto win = hg.crop(V2(-2, -2), V2(2, 2));
+    win->start = V2(0.0, 0.1);
+    win->skip = c.start_skip;
+    double m0 = tc::frame_margin(*win, V2(0.0, 0.1), 0.0, 1.0);
+    ASSERT_GT(m0, 0.0);
+    ASSERT_LT(m0, c.margin);
+    EXPECT_EQ(win->follow_free(Path{V2(0.0, 0.1), V2(0.45, 0.1)}).has_value(), !soft) << m0;
+    EXPECT_TRUE(win->follow_free(Path{V2(0.0, 0.1), V2(0.45, 0.13)}).has_value());
+  }
+}
+
+// ---- overhangs (owner 2026-10-30: the robot drives under openings with a 15 in, 0.381 m, ceiling)
+namespace {
+// a slab x0..x1, y0..y1 from z0 to z0 + thick (a table top, a shelf): every 0.04 m, every 0.05 m up
+Cloud slab(double x0, double x1, double y0, double y1, double z0, double thick = 0.10) {
+  Cloud out;
+  for (double z : tc::arange(z0, z0 + thick + 1e-9, 0.05))
+    for (double y : tc::arange(y0, y1 + 1e-9, 0.04))
+      for (double x : tc::arange(x0, x1 + 1e-9, 0.04)) out.push_back({x, y, z});
+  return out;
+}
+// a 0.06 m square column (a table leg) from the floor to z1
+Cloud leg(double x, double y, double z1) {
+  return cat({wall(x - 0.03, y - 0.03, x + 0.03, y - 0.03, 0.0, z1, 0.02), wall(x - 0.03, y + 0.03, x + 0.03, y + 0.03, 0.0, z1, 0.02),
+              wall(x - 0.03, y - 0.03, x - 0.03, y + 0.03, 0.0, z1, 0.02), wall(x + 0.03, y - 0.03, x + 0.03, y + 0.03, 0.0, z1, 0.02)});
+}
+// a 1.2 m corridor (walls x = +-0.6, y -3..4.6, closed at both ends, y -3 and 4.5) with a 1 m deep table across
+// it at y 1.5..2.5, its underside `under` m up, a leg at each corner; the robot at the origin, the goal 3.5 m
+// ahead past the table: the only way there is under it
+Cloud table_corridor(double under, const Cloud& extra = {}) {
+  return cat({floor_(-0.6, 0.6, -3, 4.5), wall(-0.6, -3, -0.6, 4.6), wall(0.6, -3, 0.6, 4.6), wall(-0.6, -3, 0.6, -3),
+              wall(-0.6, 4.5, 0.6, 4.5), slab(-0.6, 0.6, 1.5, 2.5, under), leg(-0.54, 1.56, under), leg(0.54, 1.56, under),
+              leg(-0.54, 2.44, under), leg(0.54, 2.44, under), extra});
+}
+const V2 OH_GOAL(0.0, 3.5);
+// the live window: scans of the scene every 0.5 s from the sensor at the origin, a plan after each
+tc::PlanResult live_plan(const Cloud& scene, double lidar_z, const tc::Config& c = tc::live_config(), int n = 5) {
+  tc::LiveWindow lw(c, 3.0);
+  tc::PlanResult out;
+  for (int k = 0; k < n; ++k) {
+    lw.add_scan(0.5 * k, F(scene), Eigen::Vector3d(0, 0, lidar_z));
+    out = lw.plan(V2(0, 0), OH_GOAL, M_PI / 2);
+  }
+  return out;
+}
+bool occ_at(const tc::HeightGrid& hg, double x, double y) {
+  auto c = hg.cell(V2(x, y));
+  return hg.occ[hg.idx(c.first, c.second)] != 0;
+}
+// the path's points within the table's footprint (y 1.5..2.5)
+int under_table(const tc::PlanResult& out) {
+  int n = 0;
+  for (auto& p : tc::densify(out.path, 0.05)) n += p.y() > 1.5 && p.y() < 2.5 && std::abs(p.x()) < 0.6;
+  return n;
+}
+}  // namespace
+
+TEST(Overhang, DrivesUnderA040mTableLegsStayObstacles) {
+  Cloud scene = table_corridor(0.40);
+  // the robot's lidar (0.08 m up) and SITL's (0.25 m up)
+  for (double lidar_z : {0.08, 0.25}) {
+    auto out = live_plan(scene, lidar_z);
+    ASSERT_TRUE(out.ok) << "lidar " << lidar_z << ": " << out.reason;
+    EXPECT_GT(under_table(out), 10) << lidar_z;
+    EXPECT_LT(out.length, 4.0) << lidar_z;
+    auto& hg = *out.hg;
+    for (double x : {-0.54, 0.54})
+      for (double y : {1.56, 2.44}) EXPECT_TRUE(occ_at(hg, x, y)) << "leg at " << x << " " << y << " lidar " << lidar_z;
+    // the table top over the middle is no obstacle; the frame along the path holds no leg
+    EXPECT_FALSE(occ_at(hg, 0.0, 2.0)) << lidar_z;
+    std::vector<V2> legs;
+    for (double x : {-0.54, 0.54})
+      for (double y : {1.56, 2.44}) legs.push_back(V2(x, y));
+    auto [ok, worst] = frame_clear(out.path, legs, tc::live_config());
+    EXPECT_TRUE(ok) << worst;
+  }
+  // overhang_clear off (<= z_lo): the old behaviour, the table top blocks the corridor
+  tc::Config off = tc::live_config();
+  off.overhang_clear = 0.0;
+  off.update();
+  auto old = live_plan(scene, 0.08, off);
+  EXPECT_TRUE(!old.ok || under_table(old) == 0) << old.length;
+}
+
+TEST(Overhang, A035mTableRefused) {
+  for (double lidar_z : {0.08, 0.25}) {
+    auto out = live_plan(table_corridor(0.35), lidar_z);
+    EXPECT_TRUE(!out.ok || under_table(out) == 0) << lidar_z << " " << out.length;
+    if (out.hg) EXPECT_TRUE(occ_at(*out.hg, 0.0, 2.0)) << lidar_z;
+  }
+}
+
+TEST(Overhang, WallSeenOnlyAboveTheBandNothingSeenBeneathRefused) {
+  // a wall across the corridor at y 2 from 0.40 m up (its base hidden: nothing below it is seen) and nothing
+  // seen beyond it (it hides everything there): no ray passed beneath it, a wall
+  Cloud scene = cat({floor_(-0.6, 0.6, -3, 1.95), wall(-0.6, -3, -0.6, 2.0), wall(0.6, -3, 0.6, 2.0), wall(-0.6, -3, 0.6, -3),
+                     wall(-0.6, 2.0, 0.6, 2.0, 0.40, 1.0)});
+  for (double lidar_z : {0.08, 0.25}) {
+    auto out = live_plan(scene, lidar_z);
+    bool crossed = false;
+    if (out.ok)
+      for (auto& p : tc::densify(out.path, 0.05)) crossed = crossed || (p.y() > 2.0 && std::abs(p.x()) < 0.6);
+    EXPECT_FALSE(crossed) << lidar_z;
+    EXPECT_FALSE(out.ok) << lidar_z;
+    ASSERT_TRUE(out.hg);
+    for (double x : {-0.3, 0.0, 0.3}) EXPECT_TRUE(occ_at(*out.hg, x, 2.0)) << x << " lidar " << lidar_z;
+  }
+}
+
+TEST(Overhang, ShelfWithClutterBelowRefused) {
+  // the 0.40 m table with two 0.3 m boxes 0.25 m high under it (gaps 0.3 m in the middle, 0.15 m at the sides)
+  Cloud boxes;
+  for (double cx : {-0.3, 0.3})
+    boxes = cat({boxes, wall(cx - 0.15, 1.85, cx + 0.15, 1.85, 0.0, 0.25), wall(cx - 0.15, 2.15, cx + 0.15, 2.15, 0.0, 0.25),
+                 wall(cx - 0.15, 1.85, cx - 0.15, 2.15, 0.0, 0.25), wall(cx + 0.15, 1.85, cx + 0.15, 2.15, 0.0, 0.25),
+                 slab(cx - 0.15, cx + 0.15, 1.85, 2.15, 0.25, 0.0)});
+  for (double lidar_z : {0.08, 0.25}) {
+    auto out = live_plan(table_corridor(0.40, boxes), lidar_z);
+    EXPECT_TRUE(!out.ok || under_table(out) == 0) << lidar_z << " " << out.length;
+    ASSERT_TRUE(out.hg);
+    for (double cx : {-0.3, 0.3}) EXPECT_TRUE(occ_at(*out.hg, cx, 2.0)) << cx << " lidar " << lidar_z;
+  }
+}
+
+// ---- driven bends (owner request 2026-10-30, the hairpin drive chain): the carrot chase's inside cut
+TEST(DrivenBends, CutCheckRefusesABendWithAPostInsideIt) {
+  // a 45 deg bend at the origin, a post on its inside, clear of the frame (plus margin) on both straight
+  // legs but inside the cut the chase takes
+  Cloud room = cat({floor_(-3, 3, -3, 3), wall(-0.05, 0.35, -0.05, 0.35)});   // the cell centred (-0.05, 0.35)
+  for (bool on : {true, false}) {
+    tc::Config c = CFG;
+    c.cut_check = on;
+    c.update();
+    tc::HeightGrid hg(room, std::make_shared<const tc::Config>(c));
+    auto win = hg.crop(V2(-2.5, -2), V2(2, 2));
+    Path P{V2(-2.0, 0.0), V2(0.0, 0.0), V2(1.4, 1.4)};
+    auto bad = win->follow_free(P);
+    printf("  cut check %d: %s\n", on, bad ? "refused" : "free");
+    EXPECT_EQ(bad.has_value(), on);
+  }
+}
+
+TEST(DrivenBends, TwoBendsCloseTogetherBecomeOnePivot) {
+  // two 45 deg bends 0.4 m apart in the open (each driven, 90 deg in all): one corner, a pivot there;
+  // without merging, two driven bends
+  Cloud fl = floor_(-4, 4, -4, 4);
+  for (double merge : {0.5, 0.0}) {
+    tc::Config c = CFG;
+    c.bend_merge = merge;
+    c.update();
+    tc::HeightGrid hg(fl, std::make_shared<const tc::Config>(c));
+    auto win = hg.crop(V2(-3, -3), V2(3, 3));
+    double d = 0.4 / std::sqrt(2.0);
+    Path P{V2(-2.0, 0.0), V2(0.0, 0.0), V2(d, d), V2(d, 2.0)};
+    auto r = tc::pivot_pass(*win, P, 0.0);
+    ASSERT_TRUE(r.ok) << r.reason;
+    if (merge > 0) {
+      ASSERT_EQ(r.pivots.size(), 1u);
+      EXPECT_NEAR(r.pivots[0].turn, M_PI / 2, tc::radians(10.0));
+      EXPECT_NEAR(r.pivots[0].centre.x(), d - CFG.off, 0.05);   // the corner where the two lines meet
+    } else {
+      EXPECT_TRUE(r.pivots.empty());
+    }
   }
 }
 
