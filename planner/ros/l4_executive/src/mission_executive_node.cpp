@@ -12,9 +12,10 @@
 //            in drive mode (Rover Guided position targets). In the air it lands first (here or at a clear
 //            spot nearby: the landing-spot search below). Done when the FC is within accept_radius or the
 //            track planner reports REACHED for this goal
-//   land     at [x, y]: fly there, ask the landing check (/planner/landing_spot) and require it to report
-//            the spot clear within ~landing_check_s (a not-clear answer is asked again until then: a
-//            person walking off clears it), then NAV_LAND (lands and drives on in GUIDED)
+//   land     at [x, y]: fly there, climb to the check height, ask the landing check (/planner/landing_spot);
+//            refused: the landing-spot search nearby, as a drive from the air (below; owner 2026-11-02), then
+//            NAV_LAND (lands and drives on in GUIDED). ~land_search false: require the spot clear within
+//            ~landing_check_s (a not-clear answer is asked again until then: a person walking off clears it)
 //   takeoff  height above the liftoff point (NAV_TAKEOFF in GUIDED). The executive first waits for the
 //            vehicle to stand still (< 2 cm over 1 s) for up to ~takeoff_settle_s (15 s). Not still by
 //            then: the mission stops, "not stationary before takeoff" (owner decision 2026-10-28), in
@@ -53,7 +54,8 @@
 //     takeoff or a stop leaves the vehicle in GUIDED with the bridge disabled
 //   * the FC leaves GUIDED on its own (failsafe, the pilot) or MAVROS loses the FC -> stop commanding for
 //     good; the FC's failsafe owns the vehicle
-//   * landing spot not reported clear within ~landing_check_s -> QRLOITER, mission stopped
+//   * no clear landing spot (the search) or, ~land_search false, the spot not reported clear within
+//     ~landing_check_s -> QRLOITER, mission stopped
 //   * a takeoff refused or not completed -> mission stopped; a refused takeoff leaves it on the ground in
 //     GUIDED, one that started and did not complete goes to QRLOITER
 //   * not standing still within ~takeoff_settle_s before a takeoff -> mission stopped on the ground,
@@ -145,10 +147,9 @@
 //      whole spin). At most one spin a landing. Still none: "no landing spot found nearby" (REFUSED in
 //      interactive mode: QRLOITER ~unreachable_hold_s, GUIDED, IDLE, as a refused spot; a mission stops in
 //      QRLOITER as on a spot not reported clear).
-//   4. found: LAND_MOVE. Within ~land_move_direct_max (0.9 m): straight there through the bridge's waypoint hold
-//      (land_move_direct: the bridge holds the executive's goal when within 1 m and eases onto it; SUPER stayed
-//      silent on such short goals from a hover in SITL). Farther: a fly leg to the spot at the current height
-//      through SUPER (go(): it faces the spot
+//   4. found: LAND_MOVE, at the check height: a fly leg to the spot through SUPER, however short (owner
+//      2026-11-02; ~land_move_direct_max, default 0, > 0 restores the former straight move through the bridge's
+//      waypoint hold below that distance, land_move_direct) (go(): it faces the spot
 //      first, so the nose-first approach keeps the spot in the lidar's view, and re-seeds SUPER, which then
 //      plans a move this short from its moving trajectory), then the waypoint hold over the spot facing the
 //      goal (the bridge holds the goal it was given when within its waypoint_goal_max 1 m, so the vehicle
@@ -156,9 +157,31 @@
 //      Refused as "not observed" (the lidar looks forward: over the spot it no longer sees the floor under the
 //      frame, and the 10 s window can lose the scans that chose it, SITL r5_c9): the same check once more as a
 //      radius-0 search, i.e. with the search's ~20 s of scans; clear there counts.
+//      The move's watchdog (2026-11-02): not 0.2 m closer within ~land_move_no_progress_s (4 s; SUPER's PlanFromRest
+//      failing on it) or not there within ~land_move_timeout_s (30 s): LAND_MOVE "gave_up", a hold where the vehicle
+//      is (also SUPER's goal), and back to 2 with that spot excluded (a move used up).
 //      Clear: NAV_LAND, then the drive. Refused: back to 2 from there, the refused spots excluded, at most
 //      ~land_search_tries (2) moves, then "landing spot not reported clear" (REFUSED / stop).
 // ~land_search false: the former behaviour (step 1 with ~landing_check_s, refused ends it).
+// A mission's land leg (owner 2026-11-02) lands the same way once over its spot: the check height, the check for
+// ~land_here_check_s, else the search (the candidates facing the drive leg that follows, else the leg's own
+// "yaw" or the yaw it has), the spin, the move, the check again; ~land_search false: its former check alone
+// (~landing_check_s, refused ends the mission).
+//
+// The check height (owner 2026-11-02). The landing check drops lidar returns nearer than its near_range (1.2 m)
+// to the sensor (on the real robot near floor reads 3-6 cm high); hovering at ~0.96 m that removed every floor
+// return under the robot ("not observed" 22-29 %, "no ground plane"). So before the landing check (step 1, and a
+// mission's land leg) the executive climbs to ~land_check_height (1.6 m) above the surface under the vehicle (the
+// bridge's "floor_below": the nearest surface, a table top or the floor), at most up to ~land_check_ceiling_clear
+// (0.6 m: SUPER's 0.5 m inflation and a cell, as the re-seed) below the bridge's "ceiling_above" (the lowest
+// return over the vehicle: a ceiling, the underside of a table or a shelf); no room: it checks from the height it
+// has. LAND_CLIMB: straight up through the bridge's waypoint hold (the goal straight over the vehicle, at most
+// ~land_move_direct_max a step, as land_move_direct), facing the drive goal, until within 0.1 m of the target or
+// ~yaw_settle_s; a ceiling that comes within ~land_check_ceiling_clear on the way stops it there. The search, the
+// spin and the landing move then run at that height (they keep the height they have), the check after a landing
+// move climbs again if the surface there is nearer (a table top), and NAV_LAND descends from there. Nothing to
+// climb (less than ~land_check_climb_min, 0.1 m), no "floor_below" (an older bridge, too few returns under the
+// vehicle) or ~land_check_height 0: no climb, the check from the height it has.
 //
 // One difference from the Python node: a MAVROS service that cannot be called (MAVROS gone) counts as a
 // refused command here (success false); the Python node raised ServiceException and died (RESULTS.md 7c).
@@ -288,7 +311,18 @@ class MissionExecutive {
     // a landing move this short goes straight through the bridge's waypoint hold, not SUPER (SITL c5, c7: SUPER
     // stayed silent on a 0.6 m goal from a hover, PlanFromRest as in Gate L2 b7); below the bridge's
     // ~waypoint_goal_max (1.0 m), within which it holds the goal it was given. 0: always SUPER
-    land_move_direct_max_ = l4::param_double(pnh_, "land_move_direct_max", 0.9);
+    // owner 2026-11-02: every landing move flies through SUPER (0); > 0 restores the direct hold move below it
+    land_move_direct_max_ = l4::param_double(pnh_, "land_move_direct_max", 0.0);
+    // the check height (header comment): above the surface under the vehicle, capped below the ceiling over it
+    land_check_height_ = l4::param_double(pnh_, "land_check_height", 1.6);   // 0: no climb
+    land_check_ceiling_clear_ = l4::param_double(pnh_, "land_check_ceiling_clear", 0.6);
+    land_check_climb_min_ = l4::param_double(pnh_, "land_check_climb_min", 0.1);
+    // a climb step through the bridge's waypoint hold: below its ~waypoint_goal_max (1.0 m)
+    land_check_climb_step_ = l4::param_double(pnh_, "land_check_climb_step", 0.9);
+    // a landing move's watchdog: not 0.2 m closer within this (SUPER not planning it), or not there within the
+    // timeout: that spot is given up, the next candidate searched
+    land_move_no_progress_s_ = l4::param_double(pnh_, "land_move_no_progress_s", 4.0);
+    land_move_timeout_s_ = l4::param_double(pnh_, "land_move_timeout_s", 30.0);
     bridge_ = {{"state", "OK"}, {"slam_ok", true}};
     bridge_ok_since_ = now();
 
@@ -661,6 +695,16 @@ class MissionExecutive {
                   std::optional<double> radius = std::nullopt);
   Why land_spin(int idx, double gx, double gy);
   Why land_move_direct(int idx, const Vec3& spot, double gx, double gy);
+  Why land_climb(int idx, std::optional<double> yaw);
+  Why land_here_or_nearby(const l4::ojson& leg, int idx, double gx, double gy);
+  // the landing heading: a land leg's own yaw (land_yaw_), else facing the drive goal (gx, gy; NaN: none: the
+  // yaw it has)
+  std::optional<double> land_face(double gx, double gy) {
+    if (land_yaw_) return land_yaw_;
+    if (!std::isfinite(gx) || !std::isfinite(gy)) return std::nullopt;
+    return heading_to(gx, gy);
+  }
+  std::optional<double> land_yaw_;
   Why waypoint(int idx, std::optional<double> yaw, const std::string& why);
   Why scan(const l4::ojson& leg, int idx);
   void run_interactive();
@@ -741,6 +785,8 @@ class MissionExecutive {
   std::string frozen_flight_mode_;
   bool land_search_ = true;
   double land_search_radius_, land_here_check_s_, land_search_timeout_s_, land_spin_rate_, land_move_direct_max_;
+  double land_check_height_, land_check_ceiling_clear_, land_check_climb_min_, land_check_climb_step_;
+  double land_move_no_progress_s_, land_move_timeout_s_;
   int land_search_tries_;
   int search_seq_ = 0;
   ros::Publisher yaw_pub_;
@@ -992,6 +1038,8 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
 
 Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   l4::ojson check;
+  // to the check height first, keeping the yaw it settled on (header comment)
+  if (Why w = land_climb(idx, std::nullopt)) return w;
   if (Why w = land_check(num(leg["at"][0]), num(leg["at"][1]), idx, landing_check_s_, check)) return w;
   return land_descend(idx, check);
 }
@@ -1096,8 +1144,22 @@ Why MissionExecutive::land_to_drive(const l4::ojson& leg, int idx, double gx, do
   if (!why) why = waypoint(idx, heading_to(gx, gy), "landing");
   if (why) return why;
   if (!land_search_) return land(land_leg, idx);
+  land_yaw_.reset();
+  return land_here_or_nearby(leg, idx, gx, gy);
+}
+
+// hovering over the spot with the yaw settled: climb to the check height, the landing check on the spot under
+// the vehicle, else the landing-spot search, spin, move (SUPER) and check again (header comment), then NAV_LAND.
+// (gx, gy): the drive goal the candidates face (NaN: none; then land_yaw_, a land leg's own yaw, or the yaw it has)
+Why MissionExecutive::land_here_or_nearby(const l4::ojson& leg, int idx, double gx, double gy) {
+  const auto p = pose_copy();
+  if (!p) return std::string("no FC pose");
+  Why why;
+  // to the check height (header comment): the check, the search, the spin and the moves run there
+  if (Why w = land_climb(idx, land_face(gx, gy))) return w;
   l4::ojson check;
-  why = land_check(num(land_leg["at"][0]), num(land_leg["at"][1]), idx, land_here_check_s_, check);
+  const auto here = pose_copy();
+  why = land_check((*here)[0], (*here)[1], idx, land_here_check_s_, check);
   if (!why) return land_descend(idx, check);
   if (*why != LAND_NOT_CLEAR) return why;
   std::vector<Vec3> tried = {*p};   // refused spots (fc)
@@ -1123,14 +1185,37 @@ Why MissionExecutive::land_to_drive(const l4::ojson& leg, int idx, double gx, do
     l4::ojson mv = leg;
     mv["type"] = "fly";
     mv["for"] = "landing spot";
-    if (d <= land_move_direct_max_) {
+    if (land_move_direct_max_ > 0 && d <= land_move_direct_max_) {
       why = land_move_direct(idx, Vec3((*spot)[0], (*spot)[1], z), gx, gy);
     } else {
+      // the move's own no-progress watchdog (owner 2026-11-02: SUPER's PlanFromRest failing ~90 times a second,
+      // "GeneratePolytopeFromLine failed", on a 1.08 m move from a hover at 1.53 m; the leg's 20 s no-progress
+      // and two re-seeds took 36 s): not 0.2 m closer within ~land_move_no_progress_s, or ~land_move_timeout_s
+      mv["no_progress_s"] = land_move_no_progress_s_;
+      mv["leg_timeout_s"] = land_move_timeout_s_;
       face_first_ = true;
       why = go(mv, idx, Vec3((*spot)[0], (*spot)[1], z), false);
-      if (!why) why = waypoint(idx, heading_to(gx, gy), "landing");
+      if (why && *why == "unreachable") {
+        // give that spot up: hold where the vehicle is (a goal at it: the hold's point, and SUPER's goal off the
+        // spot it could not plan to), settle, and the next candidate (the spot excluded; at most
+        // ~land_search_tries moves, then REFUSED as before)
+        const auto at = pose_copy();
+        report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"move", moves}, {"gave_up", true},
+                {"reason", "no progress toward the spot (SUPER)"},
+                {"off_m", at ? l4::ojson(l4::py_round(std::hypot((*at)[0] - (*spot)[0], (*at)[1] - (*spot)[1]), 3)) : l4::ojson(nullptr)}});
+        publish_yaw(std::nullopt);
+        if (at) publish_goal(*at);
+        sleep(0.3);
+        if (Why w = waypoint(idx, land_face(gx, gy), "landing")) return w;
+        tried.push_back(*spot);
+        if (at) tried.push_back(*at);
+        continue;
+      }
+      if (!why) why = waypoint(idx, land_face(gx, gy), "landing");
     }
     if (why) return why;
+    // over the spot: a nearer surface (a table top) is climbed away from too, as under the vehicle at first
+    if (Why w = land_climb(idx, land_face(gx, gy))) return w;
     const auto at = pose_copy();
     if (!at) return std::string("no FC pose");
     report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"arrived", true},
@@ -1172,7 +1257,7 @@ Why MissionExecutive::land_search(int idx, double gx, double gy, const std::vect
   {
     std::lock_guard<std::mutex> g(lock_);
     vp = anchor_.fc_to_planner(*here);
-    gp = anchor_.fc_to_planner(Vec3(gx, gy, (*here)[2]));
+    if (std::isfinite(gx) && std::isfinite(gy)) gp = anchor_.fc_to_planner(Vec3(gx, gy, (*here)[2]));
     l4::ojson ex = l4::ojson::array();
     for (const auto& t : tried) {
       const Vec3 q = anchor_.fc_to_planner(Vec3(t[0], t[1], (*here)[2]));
@@ -1180,14 +1265,16 @@ Why MissionExecutive::land_search(int idx, double gx, double gy, const std::vect
     }
     req["id"] = ++search_seq_;
     req["vehicle"] = {l4::py_round(vp[0], 3), l4::py_round(vp[1], 3), l4::py_round(vp[2], 3)};
-    req["goal"] = {l4::py_round(gp[0], 3), l4::py_round(gp[1], 3)};
+    if (std::isfinite(gx) && std::isfinite(gy)) req["goal"] = {l4::py_round(gp[0], 3), l4::py_round(gp[1], 3)};
+    else req["goal"] = nullptr;   // a land leg with no drive after it: the candidates keep the vehicle's yaw
     req["radius"] = r;
     req["exclude"] = ex;
     search_result_ = l4::ojson::object();
   }
   const int id = req["id"].get<int>();
   report({{"phase", "LAND_SEARCH"}, {"leg", idx}, {"search", n}, {"radius", r},
-          {"vehicle_fc", vec_json(*here)}, {"goal_fc", {gx, gy}}, {"excluded", tried.size()}});
+          {"vehicle_fc", vec_json(*here)},
+          {"goal_fc", std::isfinite(gx) ? l4::ojson::array({gx, gy}) : l4::ojson(nullptr)}, {"excluded", tried.size()}});
   std_msgs::String m;
   m.data = l4::dumps(req);
   const double t0 = now();
@@ -1247,14 +1334,113 @@ Why MissionExecutive::land_move_direct(int idx, const Vec3& spot, double gx, dou
   const Vec3 planner = publish_goal(spot);
   report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"direct", true}, {"goal_planner", vec_json(planner)}});
   sleep(0.3);   // the bridge has the goal before the new hold starts (its point is fixed then)
-  const std::optional<double> y = heading_to(gx, gy);
+  const std::optional<double> y = land_face(gx, gy);
   const double t0 = now();
   while (true) {
-    if (Why w = waypoint(idx, y ? y : heading_to(gx, gy), "landing")) return w;
+    if (Why w = waypoint(idx, y ? y : land_face(gx, gy), "landing")) return w;
     const auto p = pose_copy();
     if (!p || std::hypot((*p)[0] - spot[0], (*p)[1] - spot[1]) <= 0.15 || now() - t0 > yaw_settle_s_) return std::nullopt;
     sleep(0.5);   // settled short of the spot (the hold eases on slowly near it): settle again
   }
+}
+
+// before the landing check: climb to ~land_check_height above the surface under the vehicle (the bridge's
+// "floor_below"), at most up to ~land_check_ceiling_clear below its "ceiling_above" (header comment), facing yaw
+// (none: the yaw it has). Through the bridge's waypoint hold, as land_move_direct: the goal straight over the
+// vehicle (at most ~land_move_direct_max a step) and a waypoint yaw, which holds that goal. None when done, or
+// nothing to do; the check runs from the height reached
+Why MissionExecutive::land_climb(int idx, std::optional<double> yaw) {
+  if (land_check_height_ <= 0) return std::nullopt;
+  const auto here = pose_copy();
+  if (!here) return std::string("no FC pose");
+  auto bridge_num = [this](const char* k) -> std::optional<double> {
+    std::lock_guard<std::mutex> g(lock_);
+    const l4::ojson v = l4::get(bridge_, k);
+    if (v.is_number()) return v.get<double>();
+    return std::nullopt;
+  };
+  const std::optional<double> floor = bridge_num("floor_below"), ceiling = bridge_num("ceiling_above");
+  auto opt = [](std::optional<double> v) { return v ? l4::ojson(l4::py_round(*v, 3)) : l4::ojson(nullptr); };
+  l4::ojson r = {{"phase", "LAND_CLIMB"}, {"leg", idx}, {"from_z", l4::py_round((*here)[2], 3)},
+                 {"floor_below", opt(floor)}, {"ceiling_above", opt(ceiling)}, {"check_height", land_check_height_}};
+  if (!floor) {
+    r["climb"] = false;
+    r["reason"] = "no floor_below from the bridge: the check from this height";
+    report(r);
+    return std::nullopt;
+  }
+  const double want = (*here)[2] + land_check_height_ - *floor;
+  double target = want;
+  bool capped = false;
+  if (ceiling) {
+    const double cap = (*here)[2] + *ceiling - land_check_ceiling_clear_;
+    if (cap < target) {
+      target = cap;
+      capped = true;
+    }
+  }
+  r["target_z"] = l4::py_round(target, 3);
+  r["capped"] = capped;
+  if (target - (*here)[2] < land_check_climb_min_) {
+    r["climb"] = false;
+    r["reason"] = capped ? "no room under the ceiling" : "at the check height";
+    report(r);
+    return std::nullopt;
+  }
+  r["climb"] = true;
+  report(r);
+  const double t0 = now();
+  const double step_max = std::max(0.1, land_check_climb_step_);
+  const double x = (*here)[0], y = (*here)[1];
+  std::string stop_why = "reached";
+  double z = (*here)[2];
+  while (true) {
+    const double step_z = std::min(target, z + step_max);
+    // a new hold at the goal straight over the vehicle (land_move_direct)
+    publish_yaw(std::nullopt);
+    publish_goal(Vec3(x, y, step_z));
+    sleep(0.3);
+    if (Why w = waypoint(idx, yaw, "check height")) return w;
+    const double ts = now();
+    bool stepped = false;
+    while (!shutdown() && now() - ts < yaw_settle_s_) {
+      if (auto lost = fc_lost()) return lost;
+      if (auto fz = slam_frozen(idx)) return fz;
+      if (preempted()) return std::string(PREEMPTED);
+      const auto p = pose_copy();
+      if (p) z = (*p)[2];
+      const std::optional<double> c = bridge_num("ceiling_above");
+      if (c && *c < land_check_ceiling_clear_ - 0.1) {
+        // a ceiling well within the clearance (seen on the way up, lower than at the start): hold here
+        stop_why = "ceiling";
+        break;
+      }
+      if (std::abs(z - step_z) <= 0.1) {
+        stepped = true;
+        break;
+      }
+      sleep(0.05);
+    }
+    if (shutdown()) return std::string("shutdown");
+    if (stop_why == "ceiling") {
+      publish_yaw(std::nullopt);
+      const auto p = pose_copy();
+      if (p) publish_goal(*p);
+      sleep(0.3);
+      if (Why w = waypoint(idx, yaw, "check height")) return w;
+      break;
+    }
+    if (!stepped) {
+      stop_why = "not reached";
+      break;
+    }
+    if (step_z >= target - 1e-6) break;
+  }
+  const auto p = pose_copy();
+  report({{"phase", "LAND_CLIMB"}, {"leg", idx}, {"done", stop_why}, {"z", p ? l4::ojson(l4::py_round((*p)[2], 3)) : l4::ojson(nullptr)},
+          {"target_z", l4::py_round(target, 3)}, {"floor_below", opt(bridge_num("floor_below"))},
+          {"ceiling_above", opt(bridge_num("ceiling_above"))}, {"climb_s", l4::py_round(now() - t0, 2)}});
+  return std::nullopt;
 }
 
 // no spot found: hovering in place (the bridge's waypoint hold), turn a full 360 deg at ~land_spin_rate_deg so
@@ -1280,7 +1466,7 @@ Why MissionExecutive::land_spin(int idx, double gx, double gy) {
   }
   if (shutdown()) return std::string("shutdown");
   report({{"phase", "LAND_SPIN"}, {"leg", idx}, {"done", true}, {"spin_s", l4::py_round(now() - t0, 2)}});
-  return waypoint(idx, heading_to(gx, gy), "landing");
+  return waypoint(idx, land_face(gx, gy), "landing");
 }
 
 // at a waypoint, in the air with the bridge streaming in flight mode (owner 2026-10-29): face `yaw` (none:
@@ -1405,7 +1591,20 @@ void MissionExecutive::run() {
             y = heading_to(num(legs[idx + 1]["goal"][0]), num(legs[idx + 1]["goal"][1]));
           why = waypoint(idx, y, "landing");
         }
-        if (!why) why = land(leg, idx);
+        // owner 2026-11-02: a land leg lands as a click landing does: the check height, the check, else the
+        // search, the spin, the move (SUPER), the check again; the candidates face the drive that follows
+        if (!why && land_search_) {
+          double gx = std::numeric_limits<double>::quiet_NaN(), gy = gx;
+          if (idx + 1 < static_cast<int>(legs.size()) && legs[idx + 1]["type"] == "drive") {
+            gx = num(legs[idx + 1]["goal"][0]);
+            gy = num(legs[idx + 1]["goal"][1]);
+          }
+          land_yaw_ = leg_yaw(leg);
+          why = land_here_or_nearby(leg, idx, gx, gy);
+          land_yaw_.reset();
+        } else if (!why) {
+          why = land(leg, idx);
+        }
       }
     }
     if (!why) {

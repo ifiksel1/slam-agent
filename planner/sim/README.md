@@ -225,18 +225,31 @@ How it fits together:
 - `foxglove_bridge` (ROS 1, image `l4-sim-l2:foxglove`, `click_and_run/Dockerfile.foxglove`) in a
   container sharing the run's network namespace; `socat` relays it through a unix socket in the run
   directory to host TCP 8765. Clients may publish only the three click topics: no services, no params.
-- Landing to drive (2026-10-30). A drive click in the air first asks the landing check about the spot under the
-  vehicle (~2 s). If that is refused, the executive asks the landing check node for a spot within 2 m
+- Landing to drive (2026-10-30; check height, surfaces below, SUPER moves, land legs and line of sight
+  2026-11-02). A drive click in the air, and a mission's land leg, first climb to the check height
+  (`LAND_CLIMB`): `land_check_height` 1.6 m above the nearest surface under the vehicle (the bridge's
+  `floor_below`), capped `land_check_ceiling_clear` 0.6 m below the lowest return over it (`ceiling_above`); no
+  room: the check from the height it has. The check drops returns nearer than `near_range` 1.2 m to the lidar,
+  so from a ~0.96 m hover it saw no floor under the robot. Then the landing check on the spot under the vehicle
+  (~2 s). If that is refused, the executive asks the landing check node for a spot within 2 m
   (`/planner/landing_search`, phase `LAND_SEARCH`). The node checks a 0.2 m grid of candidates with the
-  check's own rules, nearest and toward the goal first. If none is found, the vehicle yaws 360 deg in place
-  (`LAND_SPIN`, 30 deg/s) and the search runs again. Still none: `REFUSED` "no landing spot found nearby".
-  A found spot: `LAND_MOVE`. Up to 0.9 m it moves straight through the bridge's waypoint hold; farther it
-  flies a SUPER leg. Then the check again over the spot, `LAND`, and the drive. A spot refused on arrival
-  starts another search, at most 2 moves. The candidates (green clear, red occupied / not flat, amber not
-  observed, grey not checked), the search circle and the chosen spot are on `/planner/landing_search_markers`
+  check's own rules, nearest and toward the goal first, candidates with an open straight line from the vehicle
+  (at the check height, the robot's 0.35 m radius) before blocked ones (`search_los_penalty` 10 m added to a
+  blocked one's cost: a ranking; a spot behind a partition is still taken when nothing open is clear, SUPER
+  then detours). Only surfaces at least `below_min` 0.3 m below the vehicle are floor (a ceiling or the
+  underside of a table over the vehicle never is); a table top or a platform below it is (`raised_surface`).
+  If none is found, the vehicle yaws 360 deg in place (`LAND_SPIN`, 30 deg/s) and the search runs again.
+  Still none: `REFUSED` "no landing spot found nearby" (a mission stops in QRLOITER). A found spot:
+  `LAND_MOVE`, a SUPER fly leg at the check height however short (`land_move_direct_max` 0; > 0 restores the
+  straight waypoint-hold move below it). Then the check again over the spot, `LAND` from the check height,
+  and the drive. A spot refused on arrival starts another search, at most 2 moves. The candidates (green
+  clear, red occupied / not flat, amber not observed, grey not checked), the search circle, the chosen spot
+  and the line to it (`land_search_los`: green open, amber blocked) are on `/planner/landing_search_markers`
   (in the layout). Executive params: `land_search`, `land_search_radius`, `land_here_check_s`,
-  `land_search_tries`, `land_spin_rate_deg`, `land_move_direct_max`. Landing check params: `search_*`,
-  `search_window_s` (node header comment).
+  `land_search_tries`, `land_spin_rate_deg`, `land_move_direct_max`, `land_check_height`,
+  `land_check_ceiling_clear`, `land_check_climb_min`, `land_check_climb_step`. Landing check params:
+  `search_*` (incl. `search_los_penalty`, `search_los_radius`, `search_los_min_points`), `below_min`,
+  `search_window_s` (node header comment). Bridge: `floor_min_down`, `floor_pct`, `floor_min_points`.
 - Why the spot under a hovering vehicle is so often refused:
   - "not observed" is geometry, on the robot as in SITL. The JT128 looks forward (a hemisphere), so from a
     hover it sees only ~40 % of the landing disc under the frame, against `observed_min` 0.7. The rest

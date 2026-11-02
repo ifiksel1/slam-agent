@@ -216,9 +216,18 @@ visualization_msgs::MarkerArray build_search_markers(const SearchResult& r, cons
   Marker d = mk("land_search_choice", Marker::CYLINDER);
   Marker f = mk("land_search_choice_footprint", Marker::LINE_STRIP);
   Marker t = mk("land_search_label", Marker::TEXT_VIEW_FACING);
+  Marker los = mk("land_search_los", Marker::LINE_STRIP);
   t.scale.z = 0.15;
   if (r.best) {
     const Candidate& b = r.cands[*r.best];
+    if (b.los_open && r.los_z) {
+      los.scale.x = 0.03;
+      los.color = *b.los_open ? col(GREEN[0], GREEN[1], GREEN[2], 0.9) : col(AMBER[0], AMBER[1], AMBER[2], 0.9);
+      los.points.push_back(pt(vehicle.x(), vehicle.y(), *r.los_z));
+      los.points.push_back(pt(b.spot.x(), b.spot.y(), *r.los_z));
+    } else {
+      los.action = Marker::DELETE;
+    }
     const double z = b.floor_z ? *b.floor_z : fz;
     const V2 ctr = check.centre(b.spot, b.yaw);
     d.pose.position.x = ctr.x();
@@ -237,8 +246,10 @@ visualization_msgs::MarkerArray build_search_markers(const SearchResult& r, cons
     t.pose.position.y = b.spot.y();
     t.pose.position.z = z + 0.7;
     t.color = col(GREEN[0], GREEN[1], GREEN[2], 1.0);
-    t.text = fmt("LANDING SPOT %.2f m away, margin %.2f m (%d/%zu checked)", b.dist, b.margin, r.evaluated, r.cands.size());
+    t.text = fmt("LANDING SPOT %.2f m away, margin %.2f m%s (%d/%zu checked)", b.dist, b.margin,
+                 b.los_open ? (*b.los_open ? ", line open" : ", line blocked: detour") : "", r.evaluated, r.cands.size());
   } else {
+    los.action = Marker::DELETE;
     d.action = Marker::DELETE;
     f.action = Marker::DELETE;
     t.pose.position.x = vehicle.x();
@@ -250,6 +261,7 @@ visualization_msgs::MarkerArray build_search_markers(const SearchResult& r, cons
   out.markers.push_back(d);
   out.markers.push_back(f);
   out.markers.push_back(t);
+  out.markers.push_back(los);
   return out;
 }
 

@@ -23,6 +23,13 @@ struct SearchParams {
                                  // waypoint_min_dist: no direction to face)
   double exclude_r = 0.3;        // candidates within this of an excluded point (spots already refused) are skipped
   double budget_s = 6.0;         // evaluation time cap (s): the candidates not evaluated by then stay unevaluated
+  // line of sight (owner 2026-11-02): the straight line from the vehicle to a candidate at the check height (the
+  // descent height; else the latest sensor's z), the robot's radius round it, against the window's returns
+  double los_penalty = 10.0;     // added to a blocked candidate's cost (m): above the cost spread within the radius
+                                 // (radius x (1 + goal_weight) x 2), so every open candidate ranks first; 0: off
+  double los_radius = 0.35;      // the robot's radius (half-diagonal 0.34 m): returns within this of the line and
+                                 // within this of the check height block it
+  int los_min_points = 3;        // at least this many such returns block it (not one speck)
 };
 
 struct Candidate {
@@ -37,6 +44,8 @@ struct Candidate {
   double margin = 0.0;      // clear candidates: distance to the nearest evaluated not-clear one (<= margin_max)
   std::string reason;       // the check's reason ("clear", "occupied: ...", ...), "excluded", "" (not evaluated)
   std::optional<double> floor_z;   // the check's floor at the disc (for the markers)
+  std::optional<bool> los_open;    // the line from the vehicle open at the check height (none: not checked)
+  int los_points = 0;              // the returns that block it
   Json status;              // the check's status JSON (evaluated candidates)
 };
 
@@ -46,6 +55,7 @@ struct SearchResult {
   int evaluated = 0;
   double elapsed_s = 0.0;
   bool budget_hit = false;
+  std::optional<double> los_z;    // the height the lines were checked at (none: not checked)
   Json summary;   // found, counts per reason word, the best's numbers
 };
 

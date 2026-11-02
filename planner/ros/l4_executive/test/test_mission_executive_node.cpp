@@ -130,6 +130,8 @@ struct World {
   std::vector<Eigen::Vector2d> answer_spots;   // the spots answered (fc)
   std::optional<Vec3> pos_at_land;             // where NAV_LAND came
   bool hold_moves = false;                     // the waypoint hold eases onto SUPER's goal within 1 m (the real bridge)
+  std::optional<double> floor_z;               // set: the bridge reports "floor_below" (the vehicle's height over it)
+  std::optional<double> ceiling_z;             // set: the bridge reports "ceiling_above" (from the vehicle up to it)
 
   ros::NodeHandle nh;
   std::vector<ros::ServiceServer> srvs;
@@ -182,6 +184,8 @@ struct World {
     answer_spots.clear();
     pos_at_land.reset();
     hold_moves = false;
+    floor_z.reset();
+    ceiling_z.reset();
     forbidden.clear();
     mode_cmds.clear();
     goals.clear();
@@ -455,6 +459,8 @@ struct World {
     pose_pub.publish(ps);
     ojson bs = bridge_state;
     if (bridge_mode) bs["mode"] = *bridge_mode;
+    if (floor_z && pos[2] - *floor_z > 0.3) bs["floor_below"] = pos[2] - *floor_z;
+    if (ceiling_z && *ceiling_z - pos[2] > 0.15) bs["ceiling_above"] = *ceiling_z - pos[2];
     std_msgs::String s;
     s.data = l4::dumps(bs);
     status_pub.publish(s);
@@ -704,16 +710,20 @@ TEST_F(Executive, S04_FcFailsafe) {
         "goals " + std::to_string(after_goals) + " modes " + join(after_modes));
 }
 
-// 5. landing spot not reported clear: QRLOITER and stop
+// 5. landing spot not reported clear and no clear spot nearby (the search, the spin, the search): QRLOITER, stop
 TEST_F(Executive, S05_LandingSpotNotClear) {
   {
     std::lock_guard<std::mutex> g(W->m);
     W->landing_clear = false;
+    W->search_answers = {std::nullopt};
   }
-  auto ph = run_executive({land(1.0, 0.0)});
+  auto ph = run_executive({land(1.0, 0.0)}, nullptr, nullptr, 60);
   auto modes = W->modes();
-  check("landing spot not clear -> QRLOITER, STOPPED",
-        last_is(ph, "STOPPED") && std::find(modes.begin(), modes.end(), 19) != modes.end(), join(ph));
+  auto last = W->last_status();
+  check("landing spot not clear -> QRLOITER, STOPPED \"no landing spot found nearby\"",
+        last_is(ph, "STOPPED") && std::find(modes.begin(), modes.end(), 19) != modes.end() &&
+        l4::get(last, "reason") == "no landing spot found nearby", join(ph) + " " + l4::dumps(last));
+  check("land leg: searched, spun, searched", contains(ph, "LAND_SEARCH") && contains(ph, "LAND_SPIN"), join(ph));
   check("no landing on a spot not reported clear", !contains(ph, "LAND"), join(ph));
 }
 
@@ -1549,7 +1559,7 @@ TEST_F(Executive, I7_RecheckRefusedTriesAnotherSpot) {
         W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
 }
 
-// I8. a spot 0.6 m away: no SUPER leg, the bridge's waypoint hold carries the vehicle onto it
+// I8. a spot 0.6 m away (owner 2026-11-02): a SUPER fly leg however short, not the direct waypoint-hold move
 TEST_F(Executive, I8_ShortMoveThroughTheWaypointHold) {
   {
     std::lock_guard<std::mutex> g(W->m);
@@ -1571,7 +1581,7 @@ TEST_F(Executive, I8_ShortMoveThroughTheWaypointHold) {
       if (l4::get(st, "phase") == "LEG" && l4::get(st, "for") == "landing spot") leg = true;
     }
   }
-  check("short move: direct, no SUPER leg", direct && !leg, join(ph));
+  check("short move: a SUPER leg, not direct", !direct && leg, join(ph));
   std::lock_guard<std::mutex> g(W->m);
   check("short move: landed on the spot (within 0.15 m)", W->pos_at_land && W->answer_spots.size() == 1 &&
         (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.15, W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
@@ -1597,6 +1607,185 @@ TEST_F(Executive, S31_MissionDriveLegFromTheAir) {
   std::vector<int> modes;
   for (auto& x : W->mode_cmds) modes.push_back(x.second);
   check("mission: GUIDED only", modes == std::vector<int>{15}, join(modes));
+}
+
+// the LAND_CLIMB reports and the landing check's spot heights (LAND_CHECK "spot_planner" z)
+static std::vector<ojson> climbs() {
+  std::lock_guard<std::mutex> g(W->m);
+  std::vector<ojson> out;
+  for (const auto& st : W->status)
+    if (l4::get(st, "phase") == "LAND_CLIMB") out.push_back(st);
+  return out;
+}
+static std::vector<double> check_heights() {
+  std::lock_guard<std::mutex> g(W->m);
+  std::vector<double> out;
+  for (const auto& st : W->status)
+    if (l4::get(st, "phase") == "LAND_CHECK" && st.contains("spot_planner")) out.push_back(st["spot_planner"][2].get<double>());
+  return out;
+}
+static std::string dstr(const std::vector<double>& v) {
+  std::string o;
+  for (double x : v) o += std::to_string(x) + " ";
+  return o;
+}
+
+// I9. the check height (owner 2026-11-02): hovering at 1.0 m over the floor, the executive climbs to
+// ~land_check_height (1.6 m) above it before the landing check, checks there and lands from there
+TEST_F(Executive, I9_ClimbsToTheCheckHeight) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.0;
+    W->hold_moves = true;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, send, 45, true, ojson::object(), SEARCH_ARGS);
+  check("climb: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  check("climb: LAND_CLIMB before LAND_CHECK", index_of(ph, "LAND_CLIMB") >= 0 && index_of(ph, "LAND_CHECK") > index_of(ph, "LAND_CLIMB"), join(ph));
+  const auto cl = climbs();
+  check("climb: target 1.6 m (floor 1.0 m below a 1.0 m hover), not capped", !cl.empty() && cl[0].contains("target_z") &&
+        std::abs(cl[0]["target_z"].get<double>() - 1.6) < 0.05 && cl[0]["capped"] == false, cl.empty() ? "none" : l4::dumps(cl[0]));
+  const auto hs = check_heights();
+  check("climb: the landing check asked from ~1.6 m", !hs.empty() && std::abs(hs[0] - 1.6) <= 0.12, dstr(hs));
+  std::lock_guard<std::mutex> g(W->m);
+  check("climb: NAV_LAND from ~1.6 m", W->pos_at_land && std::abs((*W->pos_at_land)[2] - 1.6) <= 0.12,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+  check("climb: never above the check height", W->max_z <= 1.7, std::to_string(W->max_z));
+  check("climb: straight up (landed under the hover)", W->pos_at_land && (W->pos_at_land->head<2>() - Eigen::Vector2d(2.0, 0.0)).norm() <= 0.35,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+  check("climb: GUIDED only, never arms", W->forbidden.empty(), join(W->forbidden));
+}
+
+// I10. a ceiling 2.0 m up: the climb stops ~land_check_ceiling_clear (0.6 m) below it, at 1.4 m; the check there
+TEST_F(Executive, I10_ClimbCappedUnderTheCeiling) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.0;
+    W->ceiling_z = 2.0;
+    W->hold_moves = true;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, send, 45, true, ojson::object(), SEARCH_ARGS);
+  check("capped climb: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  const auto cl = climbs();
+  check("capped climb: target 1.4 m, capped", !cl.empty() && cl[0].contains("target_z") &&
+        std::abs(cl[0]["target_z"].get<double>() - 1.4) < 0.05 && cl[0]["capped"] == true, cl.empty() ? "none" : l4::dumps(cl[0]));
+  const auto hs = check_heights();
+  check("capped climb: the landing check asked from ~1.4 m", !hs.empty() && std::abs(hs[0] - 1.4) <= 0.12, dstr(hs));
+  std::lock_guard<std::mutex> g(W->m);
+  check("capped climb: never within 0.5 m of the ceiling", W->max_z <= 1.5, std::to_string(W->max_z));
+}
+
+// I11. no room (a ceiling 1.5 m up, hovering at 1.0 m): no climb, the check from the hover; then as before
+TEST_F(Executive, I11_NoRoomToClimb) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.0;
+    W->ceiling_z = 1.5;
+    W->hold_moves = true;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, send, 45, true, ojson::object(), SEARCH_ARGS);
+  check("no room: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  const auto cl = climbs();
+  check("no room: LAND_CLIMB reports no climb", !cl.empty() && cl[0]["climb"] == false && cl[0]["capped"] == true,
+        cl.empty() ? "none" : l4::dumps(cl[0]));
+  std::lock_guard<std::mutex> g(W->m);
+  check("no room: stayed at the hover height", W->max_z <= 1.05, std::to_string(W->max_z));
+}
+
+// S32. a mission land leg climbs to the check height too (over a 0.7 m table top: 1.6 m above it, 2.3 m)
+TEST_F(Executive, S32_MissionLandLegClimbs) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.7;
+    W->hold_moves = true;
+  }
+  auto ph = run_executive({takeoff(1.5), fly(2.0, 0.0, 1.5), land(2.0, 0.0)}, nullptr, nullptr, 45, true, ojson::object(),
+                          {"_interactive:=false"});
+  check("land leg climb: DONE", last_is(ph, "DONE"), join(ph));
+  const auto cl = climbs();
+  check("land leg climb: target 2.3 m (1.6 m over the table)", !cl.empty() && cl[0].contains("target_z") &&
+        std::abs(cl[0]["target_z"].get<double>() - 2.3) < 0.05, cl.empty() ? "none" : l4::dumps(cl[0]));
+  const auto hs = check_heights();
+  check("land leg climb: the check from ~2.3 m", !hs.empty() && std::abs(hs.back() - 2.3) <= 0.12, dstr(hs));
+}
+
+// S33. a mission land leg whose spot is blocked (owner 2026-11-02): the check refuses it, the search finds a spot
+// 1.0 m away, SUPER flies there at the check height, the check again, NAV_LAND there; the drive after it: DONE
+TEST_F(Executive, S33_MissionLandLegSearches) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.0;
+    W->hold_moves = true;
+    W->search_answers = {Eigen::Vector2d(1.0, 0.0)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 0;
+  }
+  auto ph = run_executive({takeoff(1.0), fly(2.0, 0.0, 1.0), land(2.0, 0.0), drive(4.0, 2.0)}, nullptr, nullptr, 60, true,
+                          ojson::object(), {"_interactive:=false"});
+  check("land leg search: DONE", last_is(ph, "DONE"), join(ph));
+  check("land leg search: LAND_CLIMB, LAND_CHECK, LAND_SEARCH, LAND_MOVE, LAND",
+        index_of(ph, "LAND_CLIMB") >= 0 && index_of(ph, "LAND_CHECK") > index_of(ph, "LAND_CLIMB") &&
+        index_of(ph, "LAND_SEARCH") > index_of(ph, "LAND_CHECK") && index_of(ph, "LAND_MOVE") > index_of(ph, "LAND_SEARCH") &&
+        index_of(ph, "LAND", index_of(ph, "LAND_MOVE")) > 0, join(ph));
+  bool leg = false;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& st : W->status)
+      if (l4::get(st, "phase") == "LEG" && l4::get(st, "for") == "landing spot") leg = true;
+  }
+  check("land leg search: the move through SUPER", leg, join(ph));
+  const auto hs = check_heights();
+  check("land leg search: every check from ~1.6 m", hs.size() >= 2 && std::abs(hs.front() - 1.6) <= 0.12 && std::abs(hs.back() - 1.6) <= 0.15, dstr(hs));
+  std::lock_guard<std::mutex> g(W->m);
+  check("land leg search: the request faces the drive goal", !W->search_requests.empty() && W->search_requests[0]["goal"].is_array(),
+        W->search_requests.empty() ? "none" : l4::dumps(W->search_requests[0]));
+  check("land leg search: landed at the spot from ~1.6 m", W->pos_at_land && W->answer_spots.size() == 1 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.35 && std::abs((*W->pos_at_land)[2] - 1.6) <= 0.15,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+  std::vector<int> modes;
+  for (auto& x : W->mode_cmds) modes.push_back(x.second);
+  check("land leg search: GUIDED only, never arms", modes == std::vector<int>{15} && W->forbidden.empty(), join(modes));
+}
+
+// I12. SUPER cannot plan the landing move (owner 2026-11-02: PlanFromRest failing): no progress within
+// ~land_move_no_progress_s (4 s): that spot is given up, the next candidate searched (excluded), flown to, landed on
+TEST_F(Executive, I12_LandMoveWithoutProgressTriesTheNextSpot) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {Eigen::Vector2d(1.0, 0.0), Eigen::Vector2d(0.0, 1.2)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 1;
+    W->block = {2};   // goals: 0 the fly goal, 1 over the spot (land_to_drive), 2 the first landing move
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, send, 60, true, ojson::object(), SEARCH_ARGS);
+  check("move watchdog: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  std::optional<double> gave_t, move_t;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (size_t k = 0; k < W->status.size(); ++k) {
+      const auto& st = W->status[k];
+      if (l4::get(st, "phase") == "LAND_MOVE" && l4::get(st, "move") == 1 && st.contains("spot_fc") && !move_t) move_t = W->status_t[k];
+      if (l4::get(st, "phase") == "LAND_MOVE" && l4::get(st, "gave_up") == true && !gave_t) gave_t = W->status_t[k];
+    }
+  }
+  check("move watchdog: the first spot given up within ~10 s", gave_t && move_t && *gave_t - *move_t < 10.0,
+        gave_t && move_t ? std::to_string(*gave_t - *move_t) + " s" : "no give-up");
+  std::lock_guard<std::mutex> g(W->m);
+  check("move watchdog: a second search, the given-up spot excluded", W->search_requests.size() == 2 &&
+        W->search_requests[1]["exclude"].size() == 3, std::to_string(W->search_requests.size()));
+  check("move watchdog: landed at the second spot", W->pos_at_land && W->answer_spots.size() == 2 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[1]).norm() <= 0.35, W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
 }
 
 int main(int argc, char** argv) {

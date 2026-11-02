@@ -553,6 +553,190 @@ TEST(Search, StopsOnceTheChoiceCannotChange) {
     if (k.cost <= sp.tie_m + (1 + sp.goal_weight) * sp.margin_max - 1e-9) EXPECT_TRUE(k.evaluated || k.excluded);
 }
 
+// ---- Line of sight (owner 2026-11-02): open lines from the vehicle preferred, blocked ones still taken
+namespace {
+// a vertical wall from a to b, 0..h high, 4 cm grid
+Cloud wall(V2 a, V2 b, double h = 2.5) {
+  Cloud w;
+  const double L = (b - a).norm();
+  for (double t = 0; t <= L + 1e-9; t += 0.04)
+    for (double z = 0; z <= h + 1e-9; z += 0.04) {
+      const V2 p = a + (b - a) * (t / std::max(L, 1e-9));
+      w.push_back({p.x(), p.y(), z});
+    }
+  return w;
+}
+}  // namespace
+
+TEST(LineOfSight, OpenSpotFartherBeatsANearerOneBehindAWall) {
+  // the spot under the vehicle refused and boxes beside and behind it (0.4 m: under the line's band); a partition
+  // 0.4 m ahead (x), the goal ahead too. Without the preference the best spot is ahead, behind the partition
+  // (1.2 m, toward the goal); with it an open one beside or behind the vehicle, worse by the move and the goal
+  Cloud c = cat({floor_with_boxes({V2(0, 0), V2(0, 0.6), V2(0, -0.6), V2(-0.6, 0), V2(-0.6, 0.6), V2(-0.6, -0.6)}, 3.0),
+                 wall(V2(0.4, -2.6), V2(0.4, 2.6))});
+  SearchParams off;
+  off.los_penalty = 0.0;
+  LandingCheck a;
+  auto r0 = search_landing_spot(a, scans_of({c}), O, 0.0, V2(5, 0), 1.0, {}, off);
+  ASSERT_TRUE(r0.best) << r0.summary.dump();
+  EXPECT_TRUE(r0.summary["los"].is_null());
+  const auto& b0 = r0.cands[*r0.best];
+  EXPECT_GT(b0.spot.x(), 0.4) << b0.spot.transpose();   // behind the partition
+  // the same spot, checked: its line crosses the partition
+  SearchParams on;
+  LandingCheck b;
+  auto r1 = search_landing_spot(b, scans_of({c}), O, 0.0, V2(5, 0), 1.0, {}, on);
+  ASSERT_TRUE(r1.best) << r1.summary.dump();
+  const auto& b1 = r1.cands[*r1.best];
+  bool b0_blocked = false;
+  for (const auto& k : r1.cands)
+    if ((k.spot - b0.spot).norm() < 1e-9) b0_blocked = k.los_open && !*k.los_open;
+  EXPECT_TRUE(b0_blocked) << b0.spot.transpose();
+  ASSERT_TRUE(b1.los_open);
+  EXPECT_TRUE(*b1.los_open) << b1.spot.transpose();
+  EXPECT_TRUE(b1.clear);
+  EXPECT_GT(b1.cost, b0.cost + 0.3);   // costlier (farther from the goal) but open: no penalty in its cost
+  EXPECT_LT(b1.spot.x(), 0.4 - 0.35);
+  EXPECT_EQ(r1.summary["los_open"], true);
+  EXPECT_GT(r1.summary["los"]["blocked"].get<int>(), 0);
+  EXPECT_NEAR(r1.summary["los"]["z"].get<double>(), 1.0, 1e-9);
+  // each evaluated spot carries its line of sight
+  for (const auto& e : r1.summary["spots"]) EXPECT_EQ(e.size(), 5u);
+  // the markers: the line to the choice, green
+  auto m = ns(build_search_markers(r1, b, O, 2.0, "world", ros::Time(0), -1.0));
+  ASSERT_TRUE(m.count("land_search_los"));
+  EXPECT_EQ(m["land_search_los"].action, Marker::ADD);
+  EXPECT_EQ(m["land_search_los"].points.size(), 2u);
+  EXPECT_FLOAT_EQ(m["land_search_los"].color.g, GREEN[1]);
+}
+
+TEST(LineOfSight, ASpotBehindAWallIsStillTakenWhenNothingIsOpen) {
+  // the vehicle boxed in by partitions 0.8 m round it: every line blocked, the spots outside clear: one is taken
+  Cloud c = cat({floor_with_boxes({V2(0, 0)}, 3.0), wall(V2(-0.8, -0.8), V2(0.8, -0.8)), wall(V2(0.8, -0.8), V2(0.8, 0.8)),
+                 wall(V2(0.8, 0.8), V2(-0.8, 0.8)), wall(V2(-0.8, 0.8), V2(-0.8, -0.8))});
+  LandingCheck lc;
+  SearchParams sp;
+  auto r = search_landing_spot(lc, scans_of({c}), O, 0.0, V2(5, 0), 1.0, {}, sp);
+  ASSERT_TRUE(r.best) << r.summary.dump();
+  const auto& b = r.cands[*r.best];
+  EXPECT_TRUE(b.clear);
+  ASSERT_TRUE(b.los_open);
+  EXPECT_FALSE(*b.los_open);
+  EXPECT_GE(b.los_points, sp.los_min_points);
+  EXPECT_EQ(r.summary["los_open"], false);
+  auto m = ns(build_search_markers(r, lc, O, 2.0, "world", ros::Time(0), -1.0));
+  EXPECT_FLOAT_EQ(m["land_search_los"].color.g, AMBER[1]);
+  EXPECT_NE(m["land_search_label"].text.find("blocked"), std::string::npos) << m["land_search_label"].text;
+}
+
+// ---- Only surfaces below the vehicle (owner 2026-11-02: a search candidate on the ceiling)
+namespace {
+// the forward-facing lidar hovering at the origin, 1.6 m up: the floor seen only ahead of it (x > ahead), the
+// ceiling (2.6 m) seen all round
+Cloud ceiling_room(double ahead = 0.8, double ceiling = 2.6, double r = 3.0) {
+  Cloud f = filter(floor_(0, 0, r, 0, 0, 0.005, 0.05), [&](const tc::P3& p) { return p.x > ahead; });
+  return cat({f, floor_(0, 0, r, ceiling, 0, 0.005, 0.05)});
+}
+// a table top (z top, side x side, centred on c) over a floor of radius r; the floor under it hidden
+Cloud table_room(V2 c, double side, double top, double r = 3.0) {
+  Cloud f = filter(floor_(0, 0, r, 0, 0, 0.005, 0.04), [&](const tc::P3& p) {
+    return !(std::abs(p.x - c.x()) <= side / 2 && std::abs(p.y - c.y()) <= side / 2);
+  });
+  Cloud t = filter(floor_(c.x(), c.y(), side / 2, top, 0, 0.005, 0.04), [](const tc::P3&) { return true; });
+  // its edges down to the floor (the sides the lidar sees)
+  for (double z = 0.04; z < top; z += 0.04)
+    for (double u = -side / 2; u <= side / 2 + 1e-9; u += 0.04)
+      for (auto q : {V2(u, -side / 2), V2(u, side / 2), V2(-side / 2, u), V2(side / 2, u)}) t.push_back({c.x() + q.x(), c.y() + q.y(), z});
+  return cat({f, t});
+}
+}  // namespace
+
+TEST(BelowTheVehicle, CeilingIsNeverTheFloor) {
+  // behind the lidar (x < 0.8) only the ceiling: before 2026-11-02 the ground model took it for the floor there
+  // and the descent height (1.6 m) lay under it, so nothing was an obstacle and the spot read clear
+  const Cloud c = ceiling_room();
+  for (V2 spot : {V2(-1.2, 0.0), V2(-0.6, 0.8), V2(0.0, 0.0)}) {
+    LandingCheck lc;
+    auto [ok, st] = lc.evaluate(c, spot, 1.6, 0.0);
+    EXPECT_FALSE(ok) << spot.transpose() << " " << st.dump();
+    if (st.contains("ground_z")) EXPECT_LT(st["ground_z"].get<double>(), 1.6 - 0.3) << st.dump();
+    if (lc.viz.floor_z) EXPECT_LT(*lc.viz.floor_z, 1.3) << st.dump();
+  }
+  // the same with no descent height given: the latest scan's sensor (1.6 m up) is the vehicle
+  LandingCheck lc;
+  auto [ok, st] = lc.evaluate_scans({Scan{c, Eigen::Vector3d(0, 0, 1.6)}}, V2(-1.2, 0.0), std::nullopt, 0.0);
+  EXPECT_FALSE(ok) << st.dump();
+  EXPECT_TRUE(has(st, "not observed")) << st.dump();
+  EXPECT_NEAR(st["floor_max_z"].get<double>(), 1.3, 1e-9);
+  // the floor ahead is still a landing spot
+  LandingCheck ahead;
+  auto [ok2, st2] = ahead.evaluate(c, V2(2.0, 0.0), 1.6, 0.0);
+  EXPECT_TRUE(ok2) << st2.dump();
+  EXPECT_NEAR(st2["ground_z"].get<double>(), 0.0, 0.03);
+}
+
+TEST(BelowTheVehicle, SearchNeverPicksTheCeiling) {
+  LandingCheck lc;
+  SearchParams sp;
+  sp.budget_s = 60.0;
+  sp.goal_weight = 0.0;
+  auto r = search_landing_spot(lc, scans_of({ceiling_room()}), O, 0.0, std::nullopt, 1.6, {}, sp);
+  ASSERT_TRUE(r.best) << r.summary.dump();
+  int clear = 0;
+  for (const auto& k : r.cands) {
+    if (!k.clear) continue;
+    ++clear;
+    ASSERT_TRUE(k.floor_z);
+    EXPECT_LT(*k.floor_z, 0.05) << k.spot.transpose();   // the floor, never the ceiling (2.6 m)
+    EXPECT_GT(k.spot.x(), 0.8) << k.status.dump();       // only where the floor was seen
+  }
+  EXPECT_GT(clear, 0);
+  EXPECT_GT(r.cands[*r.best].spot.x(), 0.8);
+  // with no floor seen at all, only the ceiling: no spot, every candidate "not observed"
+  Cloud only_ceiling = floor_(0, 0, 3.0, 2.6, 0, 0.005, 0.05);
+  LandingCheck lc2;
+  auto r2 = search_landing_spot(lc2, scans_of({only_ceiling}), O, 0.0, std::nullopt, 1.6, {}, sp);
+  EXPECT_FALSE(r2.best) << r2.summary.dump();
+  EXPECT_EQ(r2.summary["reasons"].value("not observed", 0), r2.evaluated) << r2.summary.dump();
+}
+
+TEST(BelowTheVehicle, TableTopBelowTheVehicleIsALandingSpot) {
+  // a 2 m table top 0.75 m up, the vehicle 1.6 m up over it: a surface below the vehicle, a landing spot
+  const Cloud c = table_room(V2(0, 0), 2.0, 0.75);
+  LandingCheck lc;
+  auto [ok, st] = lc.evaluate(c, O, 1.6, 0.0);
+  EXPECT_TRUE(ok) << st.dump();
+  EXPECT_NEAR(st.value("ground_z", -1.0), 0.75, 0.03) << st.dump();
+  // near its edge (the disc over the edge) or a table smaller than the disc: not clear
+  for (auto [cl, spot] : std::vector<std::pair<Cloud, V2>>{{c, V2(0.75, 0.0)}, {c, V2(0.0, -0.8)},
+                                                           {table_room(V2(0, 0), 1.0, 0.75), O}}) {
+    LandingCheck e;
+    auto [ok2, st2] = e.evaluate(cl, spot, 1.6, 0.0);
+    EXPECT_FALSE(ok2) << spot.transpose() << " " << st2.dump();
+  }
+  // the search from over the table finds a spot on it (the floor round it is 0.75 m lower, not preferred:
+  // the nearest clear spot), never one on the ceiling over it
+  Cloud room = cat({c, floor_(0, 0, 3.0, 2.6, 0, 0.005, 0.05)});
+  LandingCheck s;
+  SearchParams sp;
+  sp.goal_weight = 0.0;
+  sp.budget_s = 60.0;
+  auto r = search_landing_spot(s, scans_of({room}), O, 0.0, std::nullopt, 1.6, {}, sp);
+  ASSERT_TRUE(r.best) << r.summary.dump();
+  EXPECT_NEAR(r.cands[*r.best].floor_z.value_or(-1), 0.75, 0.03) << r.cands[*r.best].status.dump();
+  for (const auto& k : r.cands)
+    if (k.clear) EXPECT_LT(k.floor_z.value_or(9), 1.3) << k.status.dump();
+}
+
+TEST(BelowTheVehicle, SurfaceJustUnderTheVehicleIsNot) {
+  // the same table with the vehicle 0.96 m up: 0.21 m over it, less than below_min (0.3 m): not a floor
+  const Cloud c = table_room(V2(0, 0), 2.0, 0.75);
+  LandingCheck lc;
+  auto [ok, st] = lc.evaluate(c, O, 0.96, 0.0);
+  EXPECT_FALSE(ok) << st.dump();
+  if (st.contains("ground_z")) EXPECT_LT(st["ground_z"].get<double>(), 0.66) << st.dump();
+}
+
 TEST(Search, TheBudgetCapsTheEvaluations) {
   SearchParams sp;
   sp.budget_s = 0.0;

@@ -716,8 +716,10 @@ TEST_F(Node, T11_CeilingOverTheVehicle) {
   // a /cloud_registered scan (raw frame): the lowest point within ~ceiling_radius (0.6 m) over the vehicle,
   // more than ~ceiling_min_up (0.15 m) above it, in the status as "ceiling_above"
   const Vec3 v = Feed().p_planner;   // (1.0, 0.5, 1.2) planner frame
-  const std::vector<Vec3> pts = {v + Vec3(0.2, 0.1, 1.1), v + Vec3(-0.3, 0.2, 1.3), v + Vec3(1.0, 0.0, 0.4),
-                                 v + Vec3(0.1, 0.0, 0.1), v + Vec3(0.0, 0.0, -1.2)};
+  std::vector<Vec3> pts = {v + Vec3(0.2, 0.1, 1.1), v + Vec3(-0.3, 0.2, 1.3), v + Vec3(1.0, 0.0, 0.4),
+                           v + Vec3(0.1, 0.0, 0.1), v + Vec3(0.0, 0.0, -1.2)};
+  // and the floor 1.2 m under it (status "floor_below": at least ~floor_min_points 10 points under it)
+  for (int i = 0; i < 12; ++i) pts.push_back(v + Vec3(-0.3 + 0.05 * i, 0.1, -1.2));
   sensor_msgs::PointCloud2 c;
   c.header.frame_id = "camera_init";
   c.height = 1;
@@ -746,9 +748,12 @@ TEST_F(Node, T11_CeilingOverTheVehicle) {
   auto st = status_json();
   ASSERT_TRUE(st["ceiling_above"].is_number()) << status_str();
   EXPECT_NEAR(st["ceiling_above"].get<double>(), 1.1, 1e-3);
+  ASSERT_TRUE(st["floor_below"].is_number()) << status_str();
+  EXPECT_NEAR(st["floor_below"].get<double>(), 1.2, 1e-3);
   // no scan for longer than ~ceiling_max_age (1.0 s): not reported
   feed(1.3);
   EXPECT_TRUE(status_json()["ceiling_above"].is_null()) << status_str();
+  EXPECT_TRUE(status_json()["floor_below"].is_null()) << status_str();
 }
 
 int main(int argc, char** argv) {

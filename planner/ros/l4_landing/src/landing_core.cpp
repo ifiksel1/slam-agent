@@ -56,6 +56,22 @@
 // occupied, and the plane, flatness and floor layer come from real returns only. The status gives
 // "observed_measured" (without them), "known_floor_cells" and "known_footprints".
 //
+// Only surfaces below the vehicle (owner 2026-11-02: a search candidate's floor was the ceiling). The floor is
+// looked for below the vehicle only: below_min (0.3 m, the vehicle's own body under its odometry point) under
+// the height it descends from (descend_from: the executive's vehicle z; none given: the latest scan's sensor
+// z; neither: no limit). Returns higher than that (the ceiling, the underside of a table or a shelf over the
+// vehicle, the vehicle's own level) never enter the ground model, the per-scan floor alignment, the plane's
+// seeds or its ground band, and do not count as the patch's points for "not observed"; they still count as
+// obstacles up to the descent height, as before. A plane that still comes out higher (a slope's extrapolation)
+// is not clear: "no ground plane below the vehicle". Before this, behind the forward-facing lidar (where it saw
+// only the ceiling) the ground model took the ceiling for the floor, the plane fitted it, and the descent
+// height lay below it, so nothing counted as an obstacle and the candidate read clear. A table top, a box or a
+// raised floor more than below_min under the vehicle is a floor (the 2 m search keeps them): with no cell near the
+// ground model (which holds the floor round a table: a sofa-like tile takes its neighbours' level) the plane is
+// seeded with every cell's lowest point instead ("raised_surface"), and a cell of the disc lower than
+// ground_band under that plane (the surface's edge inside the disc) is "not flat". Before 2026-11-02 such a
+// surface read "no ground plane".
+//
 // For the markers the last evaluation's geometry is kept in viz (plain numbers, no ROS).
 //
 // LIMITS: the disc is centred on the frame for the heading at the time of the check: a yaw during the
@@ -70,6 +86,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -186,6 +203,12 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
   for (auto& k : known) viz.known_floor.push_back(footprint_corners(V2(k.x, k.y), k.yaw));
   if (!known.empty()) st["known_footprints"] = int(known.size());
   const double box = align_radius + gcfg.tile;
+  // only surfaces below the vehicle are floor (header comment): the height a floor may reach
+  std::optional<double> ref_z = descend_from;
+  for (auto it = raw.rbegin(); !ref_z && it != raw.rend(); ++it)
+    if (it->sensor) ref_z = it->sensor->z();
+  const double floor_max = ref_z ? *ref_z - p.below_min : std::numeric_limits<double>::infinity();
+  if (ref_z) st["floor_max_z"] = r_(floor_max, 3);
   std::vector<tc::Cloud> crop;
   for (auto& S : raw) {
     tc::Cloud c;
@@ -200,8 +223,10 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
     }
     crop.push_back(std::move(c));
   }
-  tc::Cloud allp;
-  for (auto& c : crop) allp.insert(allp.end(), c.begin(), c.end());
+  tc::Cloud allp;   // the returns that can be floor (below the vehicle)
+  for (auto& c : crop)
+    for (auto& q : c)
+      if (q.z <= floor_max) allp.push_back(q);
   int npts = 0;
   for (auto& q : allp) npts += std::hypot(q.x - sx, q.y - sy) <= radius;
   st["points"] = npts;
@@ -223,7 +248,7 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
     if (multi) {
       std::map<int64_t, double> low;
       for (auto& q : S) {
-        if (!(std::hypot(q.x - sx, q.y - sy) <= align_radius)) continue;
+        if (!(std::hypot(q.x - sx, q.y - sy) <= align_radius) || q.z > floor_max) continue;
         double h = q.z - G.at(q.x, q.y);
         int64_t k = cell_key(q.x, q.y, spot, cell);
         auto it = low.find(k);
@@ -265,8 +290,9 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
   // the ground model, then the ground points within ground_band of it
   std::vector<int64_t> kk(N);
   for (size_t q = 0; q < N; ++q) kk[q] = cell_key(patch[q].x, patch[q].y, spot, cell);
-  std::map<int64_t, size_t> lowi;   // per cell (sorted) its lowest point, the first of equal ones
+  std::map<int64_t, size_t> lowi;   // per cell (sorted) its lowest point, the first of equal ones (below the vehicle)
   for (size_t q = 0; q < N; ++q) {
+    if (patch[q].z > floor_max) continue;
     auto it = lowi.find(kk[q]);
     if (it == lowi.end() || patch[q].z < patch[it->second].z) lowi[kk[q]] = q;
   }
@@ -277,6 +303,14 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
     auto& l = patch[lows[q]];
     keep[q] = std::abs(l.z - G.at(l.x, l.y)) < p.seed_band;
   }
+  // a raised surface (a table top, a platform) under the whole disc: no cell near the ground model (it holds the
+  // floor round it: a sofa-like tile takes its neighbours' level). Seeded with every cell's lowest point (below
+  // the vehicle); the plane is that surface, and a cell lower than ground_band under it (an edge inside the
+  // disc) refuses it below
+  size_t n_seeds = 0;
+  for (auto k : keep) n_seeds += k;
+  const bool raised = n_seeds < 10 && lows.size() >= 10;
+  if (raised) std::fill(keep.begin(), keep.end(), 1);
   std::optional<Eigen::Vector3d> coef;
   for (int it = 0; it < 5; ++it) {
     std::vector<size_t> sel;
@@ -306,7 +340,7 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
   std::vector<size_t> gi;
   for (size_t q = 0; q < N; ++q) {
     double r = patch[q].z - ((patch[q].x - sx) * (*coef)(0) + (patch[q].y - sy) * (*coef)(1) + (*coef)(2));
-    if (std::abs(r) < p.ground_band) gi.push_back(q);
+    if (std::abs(r) < p.ground_band && patch[q].z <= floor_max) gi.push_back(q);
   }
   if (gi.size() < 10) {
     st["reason"] = "no ground plane in the patch";
@@ -326,6 +360,22 @@ std::pair<bool, Json> LandingCheck::evaluate_scans(const std::vector<Scan>& raw,
   st["residual_m"] = r_(resid, 4);
   viz.floor_z = ground_z;
   viz.plane = std::make_pair(c(0), c(1));
+  if (raised) {
+    st["raised_surface"] = true;
+    int drops = 0;
+    for (size_t q : lows) {
+      auto& l = patch[q];
+      drops += l.z - ((l.x - sx) * c(0) + (l.y - sy) * c(1) + c(2)) < -p.ground_band;
+    }
+    if (drops > 0) {
+      st["reason"] = fmt("not flat: %d cells drop below the raised surface", drops);
+      return {false, st};
+    }
+  }
+  if (ground_z > floor_max) {
+    st["reason"] = fmt("no ground plane below the vehicle: floor at %.2f m, the vehicle at %.2f m", ground_z, *ref_z);
+    return {false, st};
+  }
 
   // (a) observed: share of 10 cm cells of the disc that hold ground returns
   int n = int(std::ceil(radius / cell));

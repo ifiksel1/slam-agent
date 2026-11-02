@@ -60,6 +60,9 @@ struct Params {
   int evidence_latest = 3;
   double near_range = 1.2, unaligned_min_h = 0.3;
   double footprint_offset = l4_track::ODOM_AHEAD;
+  // a floor lies at least this far under the height the vehicle descends from (else the latest sensor's z):
+  // nothing at or above the vehicle (a ceiling, the underside of a table over it) is taken for the floor
+  double below_min = 0.3;
 };
 
 class LandingCheck {

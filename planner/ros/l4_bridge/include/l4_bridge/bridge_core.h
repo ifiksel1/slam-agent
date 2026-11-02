@@ -379,6 +379,32 @@ class CeilingFinder {
   std::optional<double> best_;
 };
 
+// ---- the surface under the vehicle (landing check height, owner 2026-11-02) -----------------------------
+// The nearest surface below the vehicle: the points within `radius` of it horizontally and more than
+// `min_down` below it (the vehicle's own body), planner frame. below(): from the vehicle down to that surface
+// (m): the pct-th percentile of the points' depths (the nearest surface, not one stray return), none with
+// fewer than min_points such points. The bridge reports it in its status ("floor_below"); the executive climbs
+// to its landing check height above it.
+class FloorFinder {
+ public:
+  FloorFinder(const Vec3& at, double radius, double min_down, double pct = 10.0, int min_points = 10)
+      : at_(at), r2_(radius * radius), min_down_(min_down), pct_(pct), min_points_(min_points) {}
+  void add(double x, double y, double z) {
+    const double down = at_[2] - z;
+    if (!(down > min_down_)) return;   // also NaN
+    const double dx = x - at_[0], dy = y - at_[1];
+    if (!(dx * dx + dy * dy <= r2_)) return;   // also NaN
+    d_.push_back(down);
+  }
+  std::optional<double> below() const;
+
+ private:
+  Vec3 at_;
+  double r2_, min_down_, pct_;
+  int min_points_;
+  std::vector<double> d_;
+};
+
 // printf-style formatting into a std::string (the Python "%" reasons)
 std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
 

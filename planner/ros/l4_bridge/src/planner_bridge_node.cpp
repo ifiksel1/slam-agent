@@ -153,6 +153,11 @@
 // than ~ceiling_min_up (0.15 m) above it (bridge_core CeilingFinder). Status "ceiling_above": from the vehicle up
 // to that point (m), from a scan at most ~ceiling_max_age (1.0 s) old; null when no point is over the vehicle,
 // or no recent scan. The executive keeps SUPER's re-seed goal SUPER's inflation below it.
+// The surface under the vehicle (owner 2026-11-02, the landing check height): from the same scans, the points
+// within ~ceiling_radius of the vehicle horizontally and more than ~floor_min_down (0.3 m: the vehicle's own
+// body) below it; status "floor_below": from the vehicle down to their ~floor_pct (10th) percentile depth, the
+// nearest surface (a table top, else the floor), with at least ~floor_min_points (10) such points, from a scan at
+// most ~ceiling_max_age old; null otherwise. The executive climbs to its landing check height above it.
 // A flight HOLD holds the vehicle's position when the hold began (zero velocity): it never climbs, whatever
 // SUPER's last command was (k1: 1.046 m and 1.334 m held flat through both of SUPER's silences).
 //
@@ -305,6 +310,10 @@ class PlannerBridge {
     ceiling_radius_ = l4::param_double(pnh_, "ceiling_radius", 0.6);
     ceiling_min_up_ = l4::param_double(pnh_, "ceiling_min_up", 0.15);
     ceiling_max_age_ = l4::param_double(pnh_, "ceiling_max_age", 1.0);
+    // the surface under the vehicle (status "floor_below"; the executive's landing check height)
+    floor_min_down_ = l4::param_double(pnh_, "floor_min_down", 0.3);
+    floor_pct_ = l4::param_double(pnh_, "floor_pct", 10.0);
+    floor_min_points_ = l4::param_int(pnh_, "floor_min_points", 10);
     // the executive's go-ahead; ~require_enable false streams in every GUIDED (bench use only)
     enabled_ = !l4::param_bool(pnh_, "require_enable", true);
     liveness_.start();
@@ -387,7 +396,11 @@ class PlannerBridge {
     const size_t step = m->point_step;
     // the local ceiling over the vehicle (its newest planner-frame position), from the same points
     std::optional<CeilingFinder> ceil;
-    if (last_planner_) ceil.emplace(last_planner_->first, ceiling_radius_, ceiling_min_up_);
+    std::optional<FloorFinder> floor;
+    if (last_planner_) {
+      ceil.emplace(last_planner_->first, ceiling_radius_, ceiling_min_up_);
+      floor.emplace(last_planner_->first, ceiling_radius_, floor_min_down_, floor_pct_, floor_min_points_);
+    }
     if (step >= 12) {
       const size_t n = out.data.size() / step;
       for (size_t i = 0; i < n; ++i) {
@@ -397,11 +410,13 @@ class PlannerBridge {
         const float planner[3] = {xyz[2], xyz[0], xyz[1]};   // POSITION_MATRIX: (z, x, y)
         std::memcpy(d, planner, 12);
         if (ceil) ceil->add(planner[0], planner[1], planner[2]);
+        if (floor) floor->add(planner[0], planner[1], planner[2]);
       }
     }
     if (ceil) {
       t_ceiling_ = now();
       ceiling_ = ceil->above();
+      floor_ = floor->below();
     }
     out.header.frame_id = "world";
     pub_cloud_.publish(out);
@@ -848,6 +863,8 @@ class PlannerBridge {
     // the local ceiling over the vehicle (m above it; null: none seen over it, or no recent scan)
     const bool ceil_fresh = t_ceiling_ && t_now - *t_ceiling_ <= ceiling_max_age_;
     s["ceiling_above"] = ceil_fresh && ceiling_ ? l4::ojson(l4::py_round(*ceiling_, 3)) : l4::ojson(nullptr);
+    // the nearest surface under the vehicle (m below it; null: too few points under it, or no recent scan)
+    s["floor_below"] = ceil_fresh && floor_ ? l4::ojson(l4::py_round(*floor_, 3)) : l4::ojson(nullptr);
     std_msgs::String out;
     out.data = l4::dumps(s);
     pub_status_.publish(out);
@@ -899,6 +916,9 @@ class PlannerBridge {
          turn_catchup_ = 1.5, turn_max_lag_ = 0.5;
   double ceiling_radius_ = 0.6, ceiling_min_up_ = 0.15, ceiling_max_age_ = 1.0;
   std::optional<double> t_ceiling_, ceiling_;   // the newest scan's time and its ceiling over the vehicle
+  double floor_min_down_ = 0.3, floor_pct_ = 10.0;
+  int floor_min_points_ = 10;
+  std::optional<double> floor_;   // the newest scan's surface under the vehicle (m below it)
   RefBuffer ref_;                                       // SUPER's recent commands (planner frame, receive time)
   bool replay_on_ = false, replay_tick_ = false;        // replaying; this tick replayed
   double tau_ = 0.0;                                    // the replay time (receive time of SUPER's commands)

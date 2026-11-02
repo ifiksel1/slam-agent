@@ -398,6 +398,18 @@ double yaw_max_step(double rate_max, double dt, double dt_max) {
   return rate_max * std::max(0.0, std::min(dt, dt_max));
 }
 
+std::optional<double> FloorFinder::below() const {
+  if (static_cast<int>(d_.size()) < std::max(1, min_points_)) return std::nullopt;
+  std::vector<double> d = d_;
+  // numpy's linear percentile
+  const double k = std::clamp(pct_, 0.0, 100.0) / 100.0 * (d.size() - 1);
+  const size_t lo = static_cast<size_t>(std::floor(k)), hi = std::min(d.size() - 1, lo + 1);
+  std::nth_element(d.begin(), d.begin() + lo, d.end());
+  const double a = d[lo];
+  const double b = hi == lo ? a : *std::min_element(d.begin() + lo + 1, d.end());
+  return a + (b - a) * (k - lo);
+}
+
 Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, double goal_max) {
   if (goal_fc && (*goal_fc - p_now).norm() <= goal_max) return *goal_fc;
   return p_now;

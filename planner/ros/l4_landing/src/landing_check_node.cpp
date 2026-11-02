@@ -46,8 +46,10 @@
 //                                "exclude": [[x, y], ...] (spots already refused)}
 //   out: /planner/landing_search_result  std_msgs/String, JSON: {"id", "found", "spot": [x, y] (planner),
 //                                "yaw_deg", "dist_m", "cost", "margin_m", "candidates", "evaluated",
-//                                "reasons": {word: count}, "spots": [[x, y, word, number], ...] (each evaluated
-//                                candidate, landing_search.cpp), "budget_hit", "elapsed_s", "check": the chosen
+//                                "reasons": {word: count}, "spots": [[x, y, word, number, los_open], ...] (each
+//                                evaluated candidate, landing_search.cpp), "los": {"z", "radius", "penalty",
+//                                "blocked"} or null, "los_open", "los_points" (the chosen spot's line of sight from
+//                                the vehicle), "budget_hit", "elapsed_s", "check": the chosen
 //                                spot's status, "scans", "window_s"} or, none found, "first_reason"
 //        /planner/landing_search_markers  visualization_msgs/MarkerArray (DELETEALL, then):
 //                                  land_search_candidates  CUBE_LIST, 8 cm squares at the floor per candidate:
@@ -56,6 +58,8 @@
 //                                  land_search_radius  LINE_STRIP, the search circle (white)
 //                                  land_search_choice  CYLINDER, the chosen spot's disc (green)
 //                                  land_search_choice_footprint  LINE_STRIP, its frame and heading (white)
+//                                  land_search_los     LINE_STRIP, vehicle -> chosen spot at the check height:
+//                                                      green open, amber blocked (SUPER detours)
 //                                  land_search_label   TEXT_VIEW_FACING, the distance and margin, or "NO
 //                                                      LANDING SPOT"
 //                                cleared (DELETEALL) when the vehicle is more than ~marker_max_dist from it
@@ -63,6 +67,10 @@
 // spin's scans all count; the node keeps that much), the same check rules, ~search_step (0.2 m) grid,
 // ~search_goal_weight (0.5), ~search_tie_m (0.15), ~search_margin_max (0.6), ~search_budget_s (6 s): see
 // landing_search.cpp. The search runs on its own (a separate check object), so the spot check keeps ticking.
+//
+// Only surfaces below the vehicle are floor (owner 2026-11-02): at least ~below_min (0.3 m) under the spot's z
+// (the height it descends from; z <= 0: the latest /planner/odom's z), landing_core.cpp; the spot check and every
+// search candidate alike.
 //
 // Rules in landing_core.cpp (scan by scan: each scan's floor is fitted to the track planner's local
 // ground model, and the latest scans decide whether a cell is occupied). Anything uncertain is not clear.
@@ -116,6 +124,7 @@ class LandingCheckNode {
     p.floor_layer_max = getd(pnh_, "floor_layer_max", 0.20);
     p.near_range = getd(pnh_, "near_range", 1.2);
     p.footprint_offset = getd(pnh_, "footprint_offset", tc::ODOM_AHEAD);
+    p.below_min = getd(pnh_, "below_min", 0.3);   // a floor lies at least this far under the vehicle
     check_ = LandingCheck(p);
     search_check_ = LandingCheck(p);
     window_s_ = getd(pnh_, "window_s", 10.0);
@@ -127,6 +136,10 @@ class LandingCheckNode {
     sp_.heading_min_dist = getd(pnh_, "search_heading_min_dist", sp_.heading_min_dist);
     sp_.exclude_r = getd(pnh_, "search_exclude_r", sp_.exclude_r);
     sp_.budget_s = getd(pnh_, "search_budget_s", sp_.budget_s);
+    // line of sight (owner 2026-11-02, landing_search.cpp): a blocked candidate's cost + ~search_los_penalty
+    sp_.los_penalty = getd(pnh_, "search_los_penalty", sp_.los_penalty);
+    sp_.los_radius = getd(pnh_, "search_los_radius", sp_.los_radius);
+    sp_.los_min_points = int(getd(pnh_, "search_los_min_points", sp_.los_min_points));
     search_max_radius_ = getd(pnh_, "search_max_radius", 4.0);   // a request's radius is capped here
     voxel_ = getd(pnh_, "voxel", 0.05);
     spot_timeout_s_ = getd(pnh_, "spot_timeout_s", 2.0);

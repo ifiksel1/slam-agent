@@ -226,6 +226,28 @@ TEST(Output, CeilingOverTheVehicle) {
   EXPECT_NEAR(*c.above(), 1.10, 1e-9);
 }
 
+TEST(Output, FloorUnderTheVehicle) {
+  // hovering at 0.96 m over the floor (z 0); a table top (0.75 m) beside it; the vehicle's own body just below it
+  FloorFinder f(Vec3(0, 0, 0.96), 0.6, 0.3);
+  EXPECT_FALSE(f.below());
+  for (int i = 0; i < 5; ++i) f.add(0.1 * i, 0.0, 0.0);   // 5 floor points: too few
+  EXPECT_FALSE(f.below());
+  f.add(0.0, 0.1, 0.80);            // 0.16 m down: the vehicle's own level, not a surface
+  f.add(1.0, 0.0, 0.75);            // the table, 1.0 m away: outside the radius
+  f.add(std::nan(""), 0.0, 0.0);
+  f.add(0.0, 0.0, 2.5);             // the ceiling
+  EXPECT_FALSE(f.below());
+  for (int i = 0; i < 40; ++i) f.add(-0.3 + 0.015 * i, 0.2, 0.0 + 0.002 * (i % 5));   // the floor
+  ASSERT_TRUE(f.below());
+  EXPECT_NEAR(*f.below(), 0.952, 0.01);
+  // a table top under it (most of the column): the nearest surface
+  FloorFinder t(Vec3(0, 0, 1.6), 0.6, 0.3);
+  for (int i = 0; i < 30; ++i) t.add(-0.3 + 0.02 * i, 0.0, 0.75);
+  for (int i = 0; i < 10; ++i) t.add(0.5, -0.2 + 0.04 * i, 0.0);
+  ASSERT_TRUE(t.below());
+  EXPECT_NEAR(*t.below(), 0.85, 1e-9);
+}
+
 TEST(Output, Geofence) {
   Geofence f(Vec3(-1, -1, 0), Vec3(1, 1, 2));
   EXPECT_TRUE(f.inside(Vec3(0, 0, 1)));
