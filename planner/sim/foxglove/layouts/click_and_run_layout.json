@@ -117,6 +117,9 @@
     "/planner/landing_markers": {
      "visible": true
     },
+    "/planner/landing_search_markers": {
+     "visible": true
+    },
     "/planner/odom": {
      "visible": false
     }

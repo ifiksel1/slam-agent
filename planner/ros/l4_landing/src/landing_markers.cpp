@@ -162,4 +162,95 @@ visualization_msgs::MarkerArray build_markers(bool clear, const Json& st, const 
   return out;
 }
 
+visualization_msgs::MarkerArray build_search_markers(const SearchResult& r, const LandingCheck& check, const V2& vehicle, double radius,
+                                                     const std::string& frame, const ros::Time& stamp, double fallback_z) {
+  using visualization_msgs::Marker;
+  auto mk = [&](const std::string& ns, int typ) {
+    Marker m;
+    m.header.frame_id = frame;
+    m.header.stamp = stamp;
+    m.ns = ns;
+    m.id = 0;
+    m.type = typ;
+    m.action = Marker::ADD;
+    m.pose.orientation.w = 1.0;
+    return m;
+  };
+  visualization_msgs::MarkerArray out;
+  Marker clear_all = mk("", Marker::CUBE);
+  clear_all.action = Marker::DELETEALL;
+  out.markers.push_back(clear_all);
+  // the floor: the median of the evaluated candidates' floors (no floor known: fallback_z)
+  std::vector<double> fl;
+  for (const auto& c : r.cands)
+    if (c.floor_z) fl.push_back(*c.floor_z);
+  const double fz = fl.empty() ? fallback_z : l4_track::median(fl);
+
+  // the candidates: green clear, red occupied / not flat, amber not observed / uncertain, grey excluded or
+  // not evaluated
+  Marker cm = mk("land_search_candidates", Marker::CUBE_LIST);
+  cm.scale.x = cm.scale.y = 0.08;
+  cm.scale.z = 0.02;
+  for (const auto& c : r.cands) {
+    RGB rgb{0.55, 0.55, 0.55};
+    double alpha = 0.5;
+    if (c.evaluated) {
+      rgb = decision(c.clear, c.reason).second;
+      alpha = 0.9;
+    }
+    cm.points.push_back(pt(c.spot.x(), c.spot.y(), (c.floor_z ? *c.floor_z : fz) + 0.02));
+    cm.colors.push_back(col(rgb[0], rgb[1], rgb[2], alpha));
+  }
+  if (cm.points.empty()) cm.action = Marker::DELETE;
+  out.markers.push_back(cm);
+
+  Marker ring = mk("land_search_radius", Marker::LINE_STRIP);
+  ring.scale.x = 0.02;
+  ring.color = col(1.0, 1.0, 1.0, 0.6);
+  for (int k = 0; k <= 72; ++k) {
+    const double a = 2 * M_PI * k / 72;
+    ring.points.push_back(pt(vehicle.x() + radius * std::cos(a), vehicle.y() + radius * std::sin(a), fz + 0.01));
+  }
+  out.markers.push_back(ring);
+
+  Marker d = mk("land_search_choice", Marker::CYLINDER);
+  Marker f = mk("land_search_choice_footprint", Marker::LINE_STRIP);
+  Marker t = mk("land_search_label", Marker::TEXT_VIEW_FACING);
+  t.scale.z = 0.15;
+  if (r.best) {
+    const Candidate& b = r.cands[*r.best];
+    const double z = b.floor_z ? *b.floor_z : fz;
+    const V2 ctr = check.centre(b.spot, b.yaw);
+    d.pose.position.x = ctr.x();
+    d.pose.position.y = ctr.y();
+    d.pose.position.z = z + 0.006;
+    d.scale.x = d.scale.y = 2 * check.radius;
+    d.scale.z = 0.012;
+    d.color = col(GREEN[0], GREEN[1], GREEN[2], 0.5);
+    f.scale.x = 0.025;
+    f.color = col(1.0, 1.0, 1.0, 0.95);
+    const auto corners = check.footprint_corners(b.spot, b.yaw);
+    for (int q = 0; q <= 4; ++q) f.points.push_back(pt(corners[q % 4].x(), corners[q % 4].y(), z + 0.03));
+    f.points.push_back(pt(ctr.x(), ctr.y(), z + 0.03));   // the heading
+    f.points.push_back(pt(ctr.x() + std::cos(b.yaw) * FOOTPRINT_LEN / 2, ctr.y() + std::sin(b.yaw) * FOOTPRINT_LEN / 2, z + 0.03));
+    t.pose.position.x = b.spot.x();
+    t.pose.position.y = b.spot.y();
+    t.pose.position.z = z + 0.7;
+    t.color = col(GREEN[0], GREEN[1], GREEN[2], 1.0);
+    t.text = fmt("LANDING SPOT %.2f m away, margin %.2f m (%d/%zu checked)", b.dist, b.margin, r.evaluated, r.cands.size());
+  } else {
+    d.action = Marker::DELETE;
+    f.action = Marker::DELETE;
+    t.pose.position.x = vehicle.x();
+    t.pose.position.y = vehicle.y();
+    t.pose.position.z = fz + 0.7;
+    t.color = col(AMBER[0], AMBER[1], AMBER[2], 1.0);
+    t.text = fmt("NO LANDING SPOT within %.1f m (%d/%zu checked)", radius, r.evaluated, r.cands.size());
+  }
+  out.markers.push_back(d);
+  out.markers.push_back(f);
+  out.markers.push_back(t);
+  return out;
+}
+
 }  // namespace l4_landing

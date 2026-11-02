@@ -1,0 +1,23 @@
+# Mass Robotics 4th floor sim map (mr4f_1030): the ~12 m fly leg, SITL only. Needs its own start:
+#   MR4F_START="-12.11 15.39 -88" ~/sim/mr4f/map/closed_loop_mr4f.sh <run> ~/sim/mr4f/planner/missions/mr4f_aisle.yaml 600
+# The recording's start (-0.14, 0.04) is a closed office pocket with no 12 m flight out of it (see
+# mr4f_smoke.yaml). This start is on the recording's last drive, in the open north-south aisle west of the
+# office (x ~ -12..-13), heading south as the robot drove there. Drive 2 m south along the driven path, take
+# off, fly ~13 m south at 1.0 m along the aisle (>= 0.85 m clearance in the 0.45-1.55 m band the whole way,
+# 2.0-2.4 m drop ceiling / lights above) and land at (-12.08, 0.04) on the driven path (1.13 m from anything
+# 0.15-0.5 m, 1.31 m from 0.5-1.5 m, floor -0.05..0.13 m, nothing below 2.41 m overhead).
+# Waypoints in the map frame (closed_loop.sh / fly_mission.py convert them to the fc frame).
+name: mr4f_aisle
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 120
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: drive, goal: [-11.93, 13.35], speed: 0.5, accept_radius: 0.4}
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-12.08, 0.04, 1.00]}
+  - {type: land, at: [-12.08, 0.04]}

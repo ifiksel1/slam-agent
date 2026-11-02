@@ -9,8 +9,8 @@
 //   fly      goal [x, y, z] in the FC frame -> /planning/click_goal for SUPER (planner frame); the
 //            bridge in flight mode
 //   drive    goal [x, y] on the ground      -> /planning/drive_goal for the track planner, the bridge
-//            in drive mode (Rover Guided position targets); only after a land leg, or as the first legs
-//            of a mission that starts on the ground. Done when the FC is within accept_radius or the
+//            in drive mode (Rover Guided position targets). In the air it lands first (here or at a clear
+//            spot nearby: the landing-spot search below). Done when the FC is within accept_radius or the
 //            track planner reports REACHED for this goal
 //   land     at [x, y]: fly there, ask the landing check (/planner/landing_spot) and require it to report
 //            the spot clear within ~landing_check_s (a not-clear answer is asked again until then: a
@@ -115,8 +115,8 @@
 // frame): {"type": "drive", "goal": [x, y]} or {"type": "fly", "goal": [x, y, z], "yaw": deg (optional)},
 // filled with the file's defaults and checked like a mission leg (a bad one: "goal_rejected" in the status).
 // After /mission_executive/start it waits in GUIDED (IDLE) for a goal; each goal gets a number ("goal").
-//   drive  on the ground: a drive leg. In the air: a land leg where the vehicle is (fly there, face the goal,
-//          settle, the landing check, NAV_LAND), then the drive leg
+//   drive  on the ground: a drive leg. In the air: land first (face the goal, settle, the landing check on the
+//          spot under the vehicle, else the landing-spot search below, NAV_LAND), then the drive leg
 //   fly    on the ground: the bridge off, the takeoff (~takeoff_height of the file, the same standstill
 //          rule), then the fly leg; at the goal the waypoint yaw (the goal's "yaw", or the yaw it has) and a
 //          hover holding it until the next goal. From a hover the next fly leg first faces its goal
@@ -128,6 +128,37 @@
 // leaving GUIDED, a dead planner, a frozen SLAM pose, a takeoff that did not complete and a bridge that
 // did not switch stop for good (STOPPED), as in a mission. Nothing ends with a landing: the vehicle hovers
 // or stands until the next goal.
+//
+// Landing to drive: the landing-spot search (owner request 2026-10-30). In the air, a drive (an interactive drive
+// goal, or a mission drive leg that starts in the air; a mission's own land legs are unchanged) first lands:
+//   1. over where the vehicle is: face the drive goal, settle, ask the landing check about the spot under the
+//      vehicle for ~land_here_check_s (2 s). Clear: NAV_LAND (in GUIDED, as a land leg), then drive.
+//   2. refused: LAND_SEARCH. /planner/landing_search (std_msgs/String JSON, planner frame: the vehicle, the drive
+//      goal, ~land_search_radius (2 m), the spots already refused) to the landing check node, which evaluates
+//      a grid of candidate spots within the radius with the landing check's own rules (l4_landing
+//      landing_search.cpp: nearest and toward the goal first, ties to the most clear floor round the spot) and
+//      answers on /planner/landing_search_result (and /planner/landing_search_markers). No answer within
+//      ~land_search_timeout_s (10 s): as none found.
+//   3. none found: LAND_SPIN, hovering in place (the bridge's waypoint hold), a 360 deg yaw at
+//      ~land_spin_rate_deg (30 deg/s; the bridge caps 60) so the forward-facing lidar sees all round, then
+//      face the goal and settle, and LAND_SEARCH again (the check node searches the last ~20 s of scans: the
+//      whole spin). At most one spin a landing. Still none: "no landing spot found nearby" (REFUSED in
+//      interactive mode: QRLOITER ~unreachable_hold_s, GUIDED, IDLE, as a refused spot; a mission stops in
+//      QRLOITER as on a spot not reported clear).
+//   4. found: LAND_MOVE. Within ~land_move_direct_max (0.9 m): straight there through the bridge's waypoint hold
+//      (land_move_direct: the bridge holds the executive's goal when within 1 m and eases onto it; SUPER stayed
+//      silent on such short goals from a hover in SITL). Farther: a fly leg to the spot at the current height
+//      through SUPER (go(): it faces the spot
+//      first, so the nose-first approach keeps the spot in the lidar's view, and re-seeds SUPER, which then
+//      plans a move this short from its moving trajectory), then the waypoint hold over the spot facing the
+//      goal (the bridge holds the goal it was given when within its waypoint_goal_max 1 m, so the vehicle
+//      eases onto the spot), and the landing check again on the spot under the vehicle (~landing_check_s).
+//      Refused as "not observed" (the lidar looks forward: over the spot it no longer sees the floor under the
+//      frame, and the 10 s window can lose the scans that chose it, SITL r5_c9): the same check once more as a
+//      radius-0 search, i.e. with the search's ~20 s of scans; clear there counts.
+//      Clear: NAV_LAND, then the drive. Refused: back to 2 from there, the refused spots excluded, at most
+//      ~land_search_tries (2) moves, then "landing spot not reported clear" (REFUSED / stop).
+// ~land_search false: the former behaviour (step 1 with ~landing_check_s, refused ends it).
 //
 // One difference from the Python node: a MAVROS service that cannot be called (MAVROS gone) counts as a
 // refused command here (success false); the Python node raised ServiceException and died (RESULTS.md 7c).
@@ -167,6 +198,9 @@ using Why = std::optional<std::string>;
 
 // interactive: a newer goal replaced the running one
 const char* const PREEMPTED = "preempted by a new goal";
+const char* const LAND_NOT_CLEAR = "landing spot not reported clear";
+// the landing-spot search found no clear spot within ~land_search_radius, after a 360 deg spin
+const char* const NO_LAND_SPOT = "no landing spot found nearby";
 
 bool starts_with(const std::string& s, const std::string& p) { return s.rfind(p, 0) == 0; }
 
@@ -192,6 +226,8 @@ struct ExecAnchor {
     for (int i = 0; i < 3; ++i) out[i] = R(0, i) * d[0] + R(1, i) * d[1] + R(2, i) * d[2];
     return out;
   }
+
+  Vec3 planner_to_fc(const Vec3& p) const { return R * p + t; }
 };
 
 class MissionExecutive {
@@ -242,6 +278,17 @@ class MissionExecutive {
     frozen_flight_mode_ = l4::param_string(pnh_, "slam_frozen_flight_mode", "QRLAND");
     if (!allowed_mode(frozen_flight_mode_))
       throw std::invalid_argument("~slam_frozen_flight_mode: D5 allows GUIDED, QRLOITER, QRLAND, QRSMARTRTL only");
+    // landing to drive: the landing-spot search (header comment)
+    land_search_ = l4::param_bool(pnh_, "land_search", true);
+    land_search_radius_ = l4::param_double(pnh_, "land_search_radius", 2.0);
+    land_here_check_s_ = l4::param_double(pnh_, "land_here_check_s", 2.0);
+    land_search_timeout_s_ = l4::param_double(pnh_, "land_search_timeout_s", 10.0);
+    land_search_tries_ = l4::param_int(pnh_, "land_search_tries", 2);
+    land_spin_rate_ = l4::param_double(pnh_, "land_spin_rate_deg", 30.0) * (M_PI / 180.0);   // 0: no spin
+    // a landing move this short goes straight through the bridge's waypoint hold, not SUPER (SITL c5, c7: SUPER
+    // stayed silent on a 0.6 m goal from a hover, PlanFromRest as in Gate L2 b7); below the bridge's
+    // ~waypoint_goal_max (1.0 m), within which it holds the goal it was given. 0: always SUPER
+    land_move_direct_max_ = l4::param_double(pnh_, "land_move_direct_max", 0.9);
     bridge_ = {{"state", "OK"}, {"slam_ok", true}};
     bridge_ok_since_ = now();
 
@@ -254,10 +301,12 @@ class MissionExecutive {
                                   &MissionExecutive::on_landing_clear, this));
     subs_.push_back(nh_.subscribe("/planner/landing_status", 10, &MissionExecutive::on_landing_status, this));
     subs_.push_back(nh_.subscribe("/track_planner/status", 10, &MissionExecutive::on_track_status, this));
+    subs_.push_back(nh_.subscribe("/planner/landing_search_result", 10, &MissionExecutive::on_search_result, this));
     goal_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/planning/click_goal", 1, true);
     drive_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/planning/drive_goal", 1, true);
     leg_pub_ = nh_.advertise<std_msgs::String>("/mission_executive/leg", 1, true);
     spot_pub_ = nh_.advertise<geometry_msgs::PointStamped>("/planner/landing_spot", 1);
+    search_pub_ = nh_.advertise<std_msgs::String>("/planner/landing_search", 1);
     status_pub_ = nh_.advertise<std_msgs::String>("/mission_executive/status", 10, true);
     enable_pub_ = nh_.advertise<std_msgs::Bool>("/planner_bridge/enable", 1, true);
     publish_enable(false);
@@ -325,6 +374,13 @@ class MissionExecutive {
     if (s.is_discarded()) return;
     std::lock_guard<std::mutex> g(lock_);
     landing_status_ = s;
+  }
+
+  void on_search_result(const std_msgs::String::ConstPtr& m) {
+    l4::ojson s = l4::loads(m->data);
+    if (s.is_discarded() || !s.is_object()) return;
+    std::lock_guard<std::mutex> g(lock_);
+    search_result_ = s;
   }
 
   void on_track_status(const std_msgs::String::ConstPtr& m) {
@@ -598,6 +654,13 @@ class MissionExecutive {
   Why takeoff(const l4::ojson& height);
   Why go(const l4::ojson& leg, int idx, const Vec3& target, bool drive);
   Why land(const l4::ojson& leg, int idx);
+  Why land_check(double x, double y, int idx, double timeout, l4::ojson& check);
+  Why land_descend(int idx, const l4::ojson& check);
+  Why land_to_drive(const l4::ojson& leg, int idx, double gx, double gy);
+  Why land_search(int idx, double gx, double gy, const std::vector<Vec3>& tried, int n, std::optional<Vec3>& spot,
+                  std::optional<double> radius = std::nullopt);
+  Why land_spin(int idx, double gx, double gy);
+  Why land_move_direct(int idx, const Vec3& spot, double gx, double gy);
   Why waypoint(int idx, std::optional<double> yaw, const std::string& why);
   Why scan(const l4::ojson& leg, int idx);
   void run_interactive();
@@ -676,6 +739,10 @@ class MissionExecutive {
   double seed_dz_, seed_s_, stuck_s_, seed_ceiling_clear_;
   int stuck_max_;
   std::string frozen_flight_mode_;
+  bool land_search_ = true;
+  double land_search_radius_, land_here_check_s_, land_search_timeout_s_, land_spin_rate_, land_move_direct_max_;
+  int land_search_tries_;
+  int search_seq_ = 0;
   ros::Publisher yaw_pub_;
   // interactive ("click and run")
   std::string mission_path_;
@@ -695,6 +762,7 @@ class MissionExecutive {
   std::vector<std::string> texts_;
   std::optional<bool> landing_clear_;
   l4::ojson landing_status_ = l4::ojson::object();
+  l4::ojson search_result_ = l4::ojson::object();   // the landing check's latest search answer
   l4::ojson track_ = l4::ojson::object();   // the track planner's latest status
   int track_goals_ = 0;                     // its "new goal" acknowledgements: a REACHED counts only after ours
 
@@ -709,7 +777,7 @@ class MissionExecutive {
   std::string phase_ = "WAIT_ARMED";
 
   std::vector<ros::Subscriber> subs_;
-  ros::Publisher goal_pub_, drive_pub_, leg_pub_, spot_pub_, status_pub_, enable_pub_, mode_pub_, ground_pub_;
+  ros::Publisher goal_pub_, drive_pub_, leg_pub_, spot_pub_, search_pub_, status_pub_, enable_pub_, mode_pub_, ground_pub_;
   ros::ServiceServer start_srv_;
   ros::ServiceClient cmd_, takeoff_srv_, land_srv_;
 };
@@ -826,8 +894,12 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
   Vec3 planner = publish_goal(target, drive);
   if (!drive && !streaming_ && goal_settle_s_ > 0) sleep(goal_settle_s_);   // SUPER plans the new goal before anything streams
   bridge_enable(true);
-  report({{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"bridge_mode", mode}, {"goal_fc", vec_json(target)},
-          {"goal_planner", vec_json(planner)}});
+  {
+    l4::ojson r = {{"phase", "LEG"}, {"leg", idx}, {"type", kind}, {"bridge_mode", mode}, {"goal_fc", vec_json(target)},
+                   {"goal_planner", vec_json(planner)}};
+    if (leg.contains("for")) r["for"] = leg["for"];   // a landing move: "landing spot"
+    report(r);
+  }
   double t0 = now(), last_progress_t = t0;
   std::optional<double> best;
   std::optional<Vec3> moved_from;   // drive legs: driving on counts as progress (a detour round an obstacle
@@ -919,11 +991,19 @@ Why MissionExecutive::go(const l4::ojson& leg, int idx, const Vec3& target, bool
 }
 
 Why MissionExecutive::land(const l4::ojson& leg, int idx) {
+  l4::ojson check;
+  if (Why w = land_check(num(leg["at"][0]), num(leg["at"][1]), idx, landing_check_s_, check)) return w;
+  return land_descend(idx, check);
+}
+
+// ask the landing check about the spot at (x, y) (fc; z = the height we descend from: the vehicle's) and
+// require it reported clear within `timeout` (a not-clear answer is asked again until then: a person walking
+// off clears it); none when clear (check: its reason and time, for the LAND report)
+Why MissionExecutive::land_check(double x, double y, int idx, double timeout, l4::ojson& check) {
   {
     std::lock_guard<std::mutex> g(lock_);
     landing_clear_.reset();
     landing_status_ = l4::ojson::object();
-    texts_.clear();
   }
   // ask the landing check about this spot (planner frame; z = the height we descend from)
   geometry_msgs::PointStamped spot;
@@ -932,7 +1012,7 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   {
     std::lock_guard<std::mutex> g(lock_);
     const double z = pose_ ? (*pose_)[2] : 0.0;
-    p = anchor_.fc_to_planner(Vec3(num(leg["at"][0]), num(leg["at"][1]), z));
+    p = anchor_.fc_to_planner(Vec3(x, y, z));
   }
   spot.point.x = p[0];
   spot.point.y = p[1];
@@ -943,7 +1023,7 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   double last_spot = -1.0;
   std::optional<bool> clear;
   int answers = 0;
-  while (now() - t0 < landing_check_s_) {
+  while (now() - t0 < timeout) {
     if (preempted()) return std::string(PREEMPTED);   // interactive: before NAV_LAND only
     if (now() - last_spot >= 0.2) {
       spot.header.stamp = ros::Time::now();
@@ -956,7 +1036,7 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
       landing_clear_.reset();
     }
     if (clear) answers += 1;
-    if (clear && *clear) break;   // reported clear: land; not clear (yet): keep asking until landing_check_s
+    if (clear && *clear) break;   // reported clear: land; not clear (yet): keep asking until the timeout
     sleep(0.05);
   }
   l4::ojson why;
@@ -967,10 +1047,20 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   if (!(clear && *clear)) {
     report({{"phase", "LAND_CHECK"}, {"leg", idx}, {"clear", false}, {"answers", answers}, {"reason", why},
             {"waited_s", l4::py_round(now() - t0, 2)}});
-    return std::string("landing spot not reported clear");
+    return std::string(LAND_NOT_CLEAR);
+  }
+  check = {{"check", why}, {"check_s", l4::py_round(now() - t0, 2)}};
+  return std::nullopt;
+}
+
+// the spot is clear: NAV_LAND (QuadRover lands and drives on in GUIDED)
+Why MissionExecutive::land_descend(int idx, const l4::ojson& check) {
+  {
+    std::lock_guard<std::mutex> g(lock_);
+    texts_.clear();
   }
   bridge_enable(false);
-  report({{"phase", "LAND"}, {"leg", idx}, {"check", why}, {"check_s", l4::py_round(now() - t0, 2)}});
+  report({{"phase", "LAND"}, {"leg", idx}, {"check", l4::get(check, "check")}, {"check_s", l4::get(check, "check_s")}});
   mavros_msgs::CommandTOL srv;
   const double nan = std::numeric_limits<double>::quiet_NaN();
   srv.request.min_pitch = 0;
@@ -991,6 +1081,206 @@ Why MissionExecutive::land(const l4::ojson& leg, int idx) {
   landed_once_ = true;
   record_ground_spot("landed");
   return std::nullopt;
+}
+
+// in the air, to drive to (gx, gy) (fc): land first, where the vehicle is or at a clear spot nearby (the
+// landing-spot search, header comment); none once on the ground
+Why MissionExecutive::land_to_drive(const l4::ojson& leg, int idx, double gx, double gy) {
+  const auto p = pose_copy();
+  if (!p) return std::string("no FC pose");
+  l4::ojson land_leg = leg;
+  land_leg["type"] = "land";
+  land_leg["at"] = l4::ojson::array({l4::py_round((*p)[0], 3), l4::py_round((*p)[1], 3)});
+  // over the spot (owner 2026-10-29): face the drive (the tank starts aligned), hover with the yaw settled
+  Why why = go(land_leg, idx, *p, false);
+  if (!why) why = waypoint(idx, heading_to(gx, gy), "landing");
+  if (why) return why;
+  if (!land_search_) return land(land_leg, idx);
+  l4::ojson check;
+  why = land_check(num(land_leg["at"][0]), num(land_leg["at"][1]), idx, land_here_check_s_, check);
+  if (!why) return land_descend(idx, check);
+  if (*why != LAND_NOT_CLEAR) return why;
+  std::vector<Vec3> tried = {*p};   // refused spots (fc)
+  bool spun = false;
+  int searches = 0;
+  for (int moves = 0; moves < land_search_tries_;) {
+    std::optional<Vec3> spot;
+    if (Why w = land_search(idx, gx, gy, tried, ++searches, spot)) return w;
+    if (!spot) {
+      if (spun || land_spin_rate_ <= 0) return std::string(NO_LAND_SPOT);
+      if (Why w = land_spin(idx, gx, gy)) return w;
+      spun = true;
+      continue;
+    }
+    moves += 1;
+    const auto here = pose_copy();
+    const double z = here ? (*here)[2] : (*p)[2];
+    const double d = here ? std::hypot((*spot)[0] - (*here)[0], (*spot)[1] - (*here)[1]) : 0.0;
+    report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"spot_fc", vec_json(Vec3((*spot)[0], (*spot)[1], z))},
+            {"dist_m", l4::py_round(d, 3)}, {"move", moves}});
+    // a fly leg to the spot at this height (SUPER): facing the spot first (the nose-first approach keeps it in
+    // the lidar's view), then the waypoint hold over it facing the goal, which eases the vehicle onto it
+    l4::ojson mv = leg;
+    mv["type"] = "fly";
+    mv["for"] = "landing spot";
+    if (d <= land_move_direct_max_) {
+      why = land_move_direct(idx, Vec3((*spot)[0], (*spot)[1], z), gx, gy);
+    } else {
+      face_first_ = true;
+      why = go(mv, idx, Vec3((*spot)[0], (*spot)[1], z), false);
+      if (!why) why = waypoint(idx, heading_to(gx, gy), "landing");
+    }
+    if (why) return why;
+    const auto at = pose_copy();
+    if (!at) return std::string("no FC pose");
+    report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"arrived", true},
+            {"off_m", l4::py_round(std::hypot((*at)[0] - (*spot)[0], (*at)[1] - (*spot)[1]), 3)},
+            {"from_start_m", l4::py_round(std::hypot((*at)[0] - (*p)[0], (*at)[1] - (*p)[1]), 3)}});
+    // the landing check on the spot under the vehicle, where it will come down
+    why = land_check((*at)[0], (*at)[1], idx, landing_check_s_, check);
+    if (!why) return land_descend(idx, check);
+    if (*why != LAND_NOT_CLEAR) return why;
+    std::string reason;
+    {
+      std::lock_guard<std::mutex> g(lock_);
+      reason = l4::get(landing_status_, "reason", "").get<std::string>();
+    }
+    if (starts_with(reason, "not observed")) {
+      // over the spot the forward-facing lidar no longer sees the floor under the frame and the check's 10 s
+      // window may have lost the scans that chose it (SITL r5_c9): the same check on the spot under the vehicle
+      // with the search's window (a radius-0 search: the same rules, the scans of the last ~20 s)
+      std::optional<Vec3> same;
+      if (Why w = land_search(idx, gx, gy, {}, ++searches, same, 0.0)) return w;
+      if (same) return land_descend(idx, {{"check", "clear (the search window)"}, {"check_s", 0}});
+    }
+    tried.push_back(*spot);
+    tried.push_back(*at);
+  }
+  return std::string(LAND_NOT_CLEAR);
+}
+
+// ask the landing check node for a clear spot within ~land_search_radius (n: this landing's search count); spot:
+// the chosen one (fc, z = the vehicle's), none when none found or no answer within ~land_search_timeout_s
+Why MissionExecutive::land_search(int idx, double gx, double gy, const std::vector<Vec3>& tried, int n,
+                                  std::optional<Vec3>& spot, std::optional<double> radius) {
+  const double r = radius ? *radius : land_search_radius_;
+  spot.reset();
+  const auto here = pose_copy();
+  if (!here) return std::string("no FC pose");
+  l4::ojson req;
+  Vec3 vp, gp;
+  {
+    std::lock_guard<std::mutex> g(lock_);
+    vp = anchor_.fc_to_planner(*here);
+    gp = anchor_.fc_to_planner(Vec3(gx, gy, (*here)[2]));
+    l4::ojson ex = l4::ojson::array();
+    for (const auto& t : tried) {
+      const Vec3 q = anchor_.fc_to_planner(Vec3(t[0], t[1], (*here)[2]));
+      ex.push_back({l4::py_round(q[0], 3), l4::py_round(q[1], 3)});
+    }
+    req["id"] = ++search_seq_;
+    req["vehicle"] = {l4::py_round(vp[0], 3), l4::py_round(vp[1], 3), l4::py_round(vp[2], 3)};
+    req["goal"] = {l4::py_round(gp[0], 3), l4::py_round(gp[1], 3)};
+    req["radius"] = r;
+    req["exclude"] = ex;
+    search_result_ = l4::ojson::object();
+  }
+  const int id = req["id"].get<int>();
+  report({{"phase", "LAND_SEARCH"}, {"leg", idx}, {"search", n}, {"radius", r},
+          {"vehicle_fc", vec_json(*here)}, {"goal_fc", {gx, gy}}, {"excluded", tried.size()}});
+  std_msgs::String m;
+  m.data = l4::dumps(req);
+  const double t0 = now();
+  double sent = -1e9;
+  l4::ojson res;
+  while (!shutdown() && now() - t0 < land_search_timeout_s_) {
+    if (auto lost = fc_lost()) return lost;
+    if (auto fz = slam_frozen(idx)) return fz;
+    if (preempted()) return std::string(PREEMPTED);
+    if (now() - sent >= 4.0) {   // once, again if unanswered (a lost message; the node answers a repeat from its cache)
+      search_pub_.publish(m);
+      sent = now();
+    }
+    {
+      std::lock_guard<std::mutex> g(lock_);
+      if (l4::get(search_result_, "id") == id) res = search_result_;
+    }
+    if (!res.is_null()) break;
+    sleep(0.05);
+  }
+  if (shutdown()) return std::string("shutdown");
+  if (res.is_null()) {
+    report({{"phase", "LAND_SEARCH"}, {"leg", idx}, {"search", n}, {"found", false},
+            {"reason", "no answer from the landing search"}, {"waited_s", l4::py_round(now() - t0, 2)}});
+    return std::nullopt;
+  }
+  if (!l4::truthy(l4::get(res, "found", false)) || !l4::get(res, "spot").is_array()) {
+    report({{"phase", "LAND_SEARCH"}, {"leg", idx}, {"search", n}, {"found", false},
+            {"reasons", l4::get(res, "reasons")}, {"first_reason", l4::get(res, "first_reason")},
+            {"candidates", l4::get(res, "candidates")}, {"evaluated", l4::get(res, "evaluated")},
+            {"search_s", l4::get(res, "elapsed_s")}});
+    return std::nullopt;
+  }
+  Vec3 sp;
+  {
+    std::lock_guard<std::mutex> g(lock_);
+    sp = anchor_.planner_to_fc(Vec3(num(res["spot"][0]), num(res["spot"][1]), vp[2]));
+  }
+  spot = Vec3(sp[0], sp[1], (*here)[2]);
+  report({{"phase", "LAND_SEARCH"}, {"leg", idx}, {"search", n}, {"found", true},
+          {"spot_fc", {l4::py_round(sp[0], 3), l4::py_round(sp[1], 3)}}, {"dist_m", l4::get(res, "dist_m")},
+          {"margin_m", l4::get(res, "margin_m")}, {"cost", l4::get(res, "cost")},
+          {"candidates", l4::get(res, "candidates")}, {"evaluated", l4::get(res, "evaluated")},
+          {"reasons", l4::get(res, "reasons")}, {"search_s", l4::get(res, "elapsed_s")}});
+  return std::nullopt;
+}
+
+// a short landing move (within ~land_move_direct_max): the bridge's waypoint hold takes the executive's last goal
+// as its hold point when that is within its ~waypoint_goal_max of the vehicle, and eases the vehicle onto it
+// (capped like any target, zero velocity at the point). So: clear the waypoint yaw (the hold point is released),
+// send the spot as the goal (SUPER gets it too, unused while the hold runs), set the waypoint yaw facing the
+// drive goal (a new hold, at the spot), and wait until the vehicle is over the spot and settled. A straight move
+// at the hover height: the spot's disc (0.54 m round the frame, up to that height) is clear, the rest of the
+// <= 0.9 m line is what the vehicle has hovered next to
+Why MissionExecutive::land_move_direct(int idx, const Vec3& spot, double gx, double gy) {
+  publish_yaw(std::nullopt);
+  const Vec3 planner = publish_goal(spot);
+  report({{"phase", "LAND_MOVE"}, {"leg", idx}, {"direct", true}, {"goal_planner", vec_json(planner)}});
+  sleep(0.3);   // the bridge has the goal before the new hold starts (its point is fixed then)
+  const std::optional<double> y = heading_to(gx, gy);
+  const double t0 = now();
+  while (true) {
+    if (Why w = waypoint(idx, y ? y : heading_to(gx, gy), "landing")) return w;
+    const auto p = pose_copy();
+    if (!p || std::hypot((*p)[0] - spot[0], (*p)[1] - spot[1]) <= 0.15 || now() - t0 > yaw_settle_s_) return std::nullopt;
+    sleep(0.5);   // settled short of the spot (the hold eases on slowly near it): settle again
+  }
+}
+
+// no spot found: hovering in place (the bridge's waypoint hold), turn a full 360 deg at ~land_spin_rate_deg so
+// the forward-facing lidar sees all round, then face the goal and settle
+Why MissionExecutive::land_spin(int idx, double gx, double gy) {
+  std::optional<double> y0;
+  {
+    std::lock_guard<std::mutex> g(lock_);
+    y0 = yaw_;
+  }
+  if (!y0) return std::string("no FC yaw");
+  report({{"phase", "LAND_SPIN"}, {"leg", idx}, {"from_deg", l4::py_round(*y0 * (180.0 / M_PI), 1)},
+          {"rate_deg", l4::py_round(land_spin_rate_ * (180.0 / M_PI), 1)}});
+  const double t0 = now();
+  double done = 0.0;
+  while (!shutdown() && done < 2 * M_PI) {
+    if (auto lost = fc_lost()) return lost;
+    if (auto fz = slam_frozen(idx)) return fz;
+    if (preempted()) return std::string(PREEMPTED);
+    done = std::min(2 * M_PI, land_spin_rate_ * (now() - t0));
+    publish_yaw(wrap_pi(*y0 + done));
+    sleep(0.1);
+  }
+  if (shutdown()) return std::string("shutdown");
+  report({{"phase", "LAND_SPIN"}, {"leg", idx}, {"done", true}, {"spin_s", l4::py_round(now() - t0, 2)}});
+  return waypoint(idx, heading_to(gx, gy), "landing");
 }
 
 // at a waypoint, in the air with the bridge streaming in flight mode (owner 2026-10-29): face `yaw` (none:
@@ -1093,9 +1383,9 @@ void MissionExecutive::run() {
     } else if (type == "scan") {
       why = scan(leg, idx);
     } else if (type == "drive") {
-      if (flying_) {
-        why = std::string("drive leg while flying: the mission needs a land leg first");
-      } else {
+      // in the air: land first, facing the drive, here or at a clear spot nearby (the landing-spot search)
+      if (flying_) why = land_to_drive(leg, idx, num(leg["goal"][0]), num(leg["goal"][1]));
+      if (!why) {
         const auto p = pose_copy();
         const double z = p ? (*p)[2] : 0.0;
         why = go(leg, idx, Vec3(num(leg["goal"][0]), num(leg["goal"][1]), z), true);
@@ -1136,7 +1426,7 @@ void MissionExecutive::run() {
       set_mode("QRLOITER");
       return stop(w);
     }
-    if (w == "landing spot not reported clear" || w == "yaw did not settle") {
+    if (w == LAND_NOT_CLEAR || w == NO_LAND_SPOT || w == "yaw did not settle") {
       set_mode("QRLOITER");
       return stop(w);
     }
@@ -1195,18 +1485,13 @@ Why MissionExecutive::interactive_goal(const l4::ojson& leg, int n, bool& hoveri
     if (!why) hovering = true;
     return why;
   }
-  // drive: in the air, land where the vehicle is first (the landing check decides), facing the goal
+  // drive: in the air, land first, facing the goal: where the vehicle is, or at a clear spot nearby (the
+  // landing-spot search)
   if (flying_) {
     const auto p = pose_copy();
     if (!p) return std::string("no FC pose");
-    l4::ojson land_leg = leg;
-    land_leg["type"] = "land";
-    land_leg["at"] = l4::ojson::array({l4::py_round((*p)[0], 3), l4::py_round((*p)[1], 3)});
-    report({{"phase", "GOAL"}, {"goal", n}, {"landing_first", land_leg["at"]}});
-    why = go(land_leg, n, Vec3((*p)[0], (*p)[1], (*p)[2]), false);
-    if (!why) why = waypoint(n, heading_to(gx, gy), "landing");
-    if (!why) why = land(land_leg, n);
-    if (why) return why;
+    report({{"phase", "GOAL"}, {"goal", n}, {"landing_first", {l4::py_round((*p)[0], 3), l4::py_round((*p)[1], 3)}}});
+    if (Why w = land_to_drive(leg, n, gx, gy)) return w;
   }
   const auto p = pose_copy();
   return go(leg, n, Vec3(gx, gy, p ? (*p)[2] : 0.0), true);
@@ -1282,7 +1567,7 @@ void MissionExecutive::run_interactive() {
       if (flying_) set_mode("QRLOITER");
       return stop(w);
     }
-    const bool refused = w == "landing spot not reported clear" || w == "yaw did not settle" || w == "landing refused";
+    const bool refused = w == LAND_NOT_CLEAR || w == NO_LAND_SPOT || w == "yaw did not settle" || w == "landing refused";
     const std::string phase = refused ? "REFUSED" : "UNREACHABLE";
     if (!flying_) {
       bridge_enable(false);

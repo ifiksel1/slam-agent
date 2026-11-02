@@ -38,6 +38,32 @@
 //                                                      the robot sat (known floor) that reach the disc
 //                                  landing_label       TEXT_VIEW_FACING, decision + reason + layer
 //
+// The landing-spot search (owner request 2026-10-30; landing_search.cpp): the executive, in the air and about
+// to land to drive, asks for a spot near the vehicle when the spot under it is refused.
+//   in:  /planner/landing_search  std_msgs/String, JSON, planner frame: {"id": n, "vehicle": [x, y, z] (the
+//                                spot under the vehicle, z = the height it descends from, as landing_spot),
+//                                "goal": [x, y] or null (the drive goal: candidates face it), "radius": m,
+//                                "exclude": [[x, y], ...] (spots already refused)}
+//   out: /planner/landing_search_result  std_msgs/String, JSON: {"id", "found", "spot": [x, y] (planner),
+//                                "yaw_deg", "dist_m", "cost", "margin_m", "candidates", "evaluated",
+//                                "reasons": {word: count}, "spots": [[x, y, word, number], ...] (each evaluated
+//                                candidate, landing_search.cpp), "budget_hit", "elapsed_s", "check": the chosen
+//                                spot's status, "scans", "window_s"} or, none found, "first_reason"
+//        /planner/landing_search_markers  visualization_msgs/MarkerArray (DELETEALL, then):
+//                                  land_search_candidates  CUBE_LIST, 8 cm squares at the floor per candidate:
+//                                                      green clear, red occupied / not flat, amber not
+//                                                      observed / uncertain, grey excluded / not evaluated
+//                                  land_search_radius  LINE_STRIP, the search circle (white)
+//                                  land_search_choice  CYLINDER, the chosen spot's disc (green)
+//                                  land_search_choice_footprint  LINE_STRIP, its frame and heading (white)
+//                                  land_search_label   TEXT_VIEW_FACING, the distance and margin, or "NO
+//                                                      LANDING SPOT"
+//                                cleared (DELETEALL) when the vehicle is more than ~marker_max_dist from it
+// The search uses the scans of the last ~search_window_s (20 s, longer than window_s so that a 360 deg yaw
+// spin's scans all count; the node keeps that much), the same check rules, ~search_step (0.2 m) grid,
+// ~search_goal_weight (0.5), ~search_tie_m (0.15), ~search_margin_max (0.6), ~search_budget_s (6 s): see
+// landing_search.cpp. The search runs on its own (a separate check object), so the spot check keeps ticking.
+//
 // Rules in landing_core.cpp (scan by scan: each scan's floor is fitted to the track planner's local
 // ground model, and the latest scans decide whether a cell is occupied). Anything uncertain is not clear.
 #include <geometry_msgs/PointStamped.h>
@@ -56,6 +82,7 @@
 
 #include "l4_landing/landing_core.h"
 #include "l4_landing/landing_markers.h"
+#include "l4_landing/landing_search.h"
 
 using namespace l4_landing;
 namespace tc = l4_track;
@@ -90,7 +117,17 @@ class LandingCheckNode {
     p.near_range = getd(pnh_, "near_range", 1.2);
     p.footprint_offset = getd(pnh_, "footprint_offset", tc::ODOM_AHEAD);
     check_ = LandingCheck(p);
+    search_check_ = LandingCheck(p);
     window_s_ = getd(pnh_, "window_s", 10.0);
+    search_window_s_ = getd(pnh_, "search_window_s", 20.0);
+    sp_.step = getd(pnh_, "search_step", sp_.step);
+    sp_.goal_weight = getd(pnh_, "search_goal_weight", sp_.goal_weight);
+    sp_.tie_m = getd(pnh_, "search_tie_m", sp_.tie_m);
+    sp_.margin_max = getd(pnh_, "search_margin_max", sp_.margin_max);
+    sp_.heading_min_dist = getd(pnh_, "search_heading_min_dist", sp_.heading_min_dist);
+    sp_.exclude_r = getd(pnh_, "search_exclude_r", sp_.exclude_r);
+    sp_.budget_s = getd(pnh_, "search_budget_s", sp_.budget_s);
+    search_max_radius_ = getd(pnh_, "search_max_radius", 4.0);   // a request's radius is capped here
     voxel_ = getd(pnh_, "voxel", 0.05);
     spot_timeout_s_ = getd(pnh_, "spot_timeout_s", 2.0);
     odom_timeout_s_ = getd(pnh_, "odom_timeout_s", 0.5);
@@ -101,20 +138,26 @@ class LandingCheckNode {
     pub_clear_ = nh_.advertise<std_msgs::Bool>("/planner/landing_clear", 10);
     pub_status_ = nh_.advertise<std_msgs::String>("/planner/landing_status", 10);
     pub_markers_ = nh_.advertise<visualization_msgs::MarkerArray>("/planner/landing_markers", 2);
+    pub_search_ = nh_.advertise<std_msgs::String>("/planner/landing_search_result", 10);
+    pub_search_markers_ = nh_.advertise<visualization_msgs::MarkerArray>("/planner/landing_search_markers", 2, true);
     subs_.push_back(nh_.subscribe("/planner/odom", 20, &LandingCheckNode::on_odom, this));
     subs_.push_back(nh_.subscribe("/planner/cloud", 5, &LandingCheckNode::on_cloud, this));
     subs_.push_back(nh_.subscribe("/planner/landing_spot", 5, &LandingCheckNode::on_spot, this));
     subs_.push_back(nh_.subscribe(gs_topic, 5, &LandingCheckNode::on_ground_spots, this));
     subs_.push_back(nh_.subscribe("/planner_bridge/anchor", 5, &LandingCheckNode::on_anchor, this));
+    subs_.push_back(nh_.subscribe("/planner/landing_search", 5, &LandingCheckNode::on_search, this));
     timer_ = nh_.createTimer(ros::Duration(getd(pnh_, "tick_s", 0.25)), [this](const ros::TimerEvent&) { tick(); });
   }
 
  private:
   ros::NodeHandle nh_, pnh_;
-  LandingCheck check_;
-  double window_s_, voxel_, spot_timeout_s_, odom_timeout_s_, marker_max_dist_;
+  LandingCheck check_, search_check_;   // the search's own: it runs beside the spot check (viz is per object)
+  SearchParams sp_;
+  double window_s_, search_window_s_, search_max_radius_, voxel_, spot_timeout_s_, odom_timeout_s_, marker_max_dist_;
+  std::optional<V2> search_at_;   // where the last search's markers are (deleted once the vehicle is far)
+  std::optional<std::pair<std::string, std::string>> last_search_;   // (request, answer): a repeat is answered at once
   std::string frame_;
-  ros::Publisher pub_clear_, pub_status_, pub_markers_;
+  ros::Publisher pub_clear_, pub_status_, pub_markers_, pub_search_, pub_search_markers_;
   std::vector<ros::Subscriber> subs_;
   ros::Timer timer_;
   std::mutex mx_, busy_;
@@ -167,6 +210,106 @@ class LandingCheckNode {
     yaw_ = yaw_of(m->pose.pose.orientation);
     auto& p = m->pose.pose.position;
     odom_ = std::make_pair(mono(), Eigen::Vector3d(p.x, p.y, p.z));
+    if (search_at_ && std::hypot(p.x - search_at_->x(), p.y - search_at_->y()) > marker_max_dist_) {
+      // the robot left the search area: its markers go
+      visualization_msgs::Marker d;
+      d.action = visualization_msgs::Marker::DELETEALL;
+      d.header.frame_id = frame_;
+      d.header.stamp = ros::Time::now();
+      visualization_msgs::MarkerArray a;
+      a.markers.push_back(d);
+      pub_search_markers_.publish(a);
+      search_at_.reset();
+    }
+  }
+
+  // the landing-spot search: one request, one answer (and its markers)
+  void on_search(const std_msgs::String::ConstPtr& m) {
+    double t0 = mono();
+    {
+      // the executive repeats an unanswered request (a lost message); one already answered gets the same answer
+      // (a search takes up to ~search_budget_s; recomputing each repeat queued them up, SITL run 5)
+      std::lock_guard<std::mutex> l(mx_);
+      if (last_search_ && last_search_->first == m->data) {
+        std_msgs::String s;
+        s.data = last_search_->second;
+        pub_search_.publish(s);
+        return;
+      }
+    }
+    Json res;
+    V2 vehicle;
+    std::optional<V2> goal;
+    std::optional<double> descend;
+    double radius = 2.0;
+    std::vector<V2> exclude;
+    try {
+      auto d = nlohmann::json::parse(m->data);
+      res["id"] = d.value("id", 0);
+      auto& v = d.at("vehicle");
+      vehicle = V2(v.at(0).get<double>(), v.at(1).get<double>());
+      if (v.size() > 2 && v[2].get<double>() > 0) descend = v[2].get<double>();
+      if (d.contains("goal") && d["goal"].is_array() && d["goal"].size() >= 2)
+        goal = V2(d["goal"][0].get<double>(), d["goal"][1].get<double>());
+      radius = std::min(search_max_radius_, std::max(0.0, d.value("radius", 2.0)));
+      for (auto& e : d.value("exclude", nlohmann::json::array()))
+        if (e.is_array() && e.size() >= 2) exclude.push_back(V2(e[0].get<double>(), e[1].get<double>()));
+    } catch (const std::exception& e) {
+      ROS_WARN("landing check: malformed search request ignored: %s", e.what());
+      return;
+    }
+    std::vector<Scan> scans;
+    std::optional<double> yaw;
+    std::vector<GroundSpot> spots;
+    std::optional<std::array<double, 3>> anchor;
+    std::optional<std::pair<double, Eigen::Vector3d>> od;
+    std::string frame;
+    {
+      std::lock_guard<std::mutex> l(mx_);
+      const double now = mono();
+      for (auto& s : scans_)
+        if (now - s.t <= search_window_s_) scans.push_back({s.pts, s.sensor});
+      yaw = yaw_;
+      spots = ground_spots_;
+      anchor = anchor_;
+      od = odom_;
+      frame = frame_;
+    }
+    res["scans"] = int(scans.size());
+    res["window_s"] = search_window_s_;
+    res["radius"] = radius;
+    if (!yaw) {
+      res["found"] = false;
+      res["first_reason"] = "no heading: no /planner/odom yet";
+      std_msgs::String s;
+      s.data = res.dump();
+      pub_search_.publish(s);
+      return;
+    }
+    std::vector<KnownPose> known;
+    if (!spots.empty() && anchor) known = ground_spots_to_planner(spots, (*anchor)[0], (*anchor)[1], (*anchor)[2]);
+    SearchParams sp = sp_;
+    sp.radius = radius;
+    SearchResult r = search_landing_spot(search_check_, scans, vehicle, *yaw, goal, descend, known, sp, exclude);
+    for (auto it = r.summary.begin(); it != r.summary.end(); ++it) res[it.key()] = it.value();
+    res["elapsed_s"] = tc::pyround(mono() - t0, 3);
+    std_msgs::String s;
+    s.data = res.dump();
+    pub_search_.publish(s);
+    {
+      std::lock_guard<std::mutex> l(mx_);
+      last_search_ = std::make_pair(m->data, s.data);
+    }
+    ROS_INFO("landing check: search %s: %s, %d of %d candidates evaluated in %.2f s", res["id"].dump().c_str(),
+             r.best ? "found" : "none", r.evaluated, int(r.cands.size()), mono() - t0);
+    try {
+      double fallback = od ? od->second.z() - 1.0 : (descend ? *descend - 1.0 : 0.0);
+      pub_search_markers_.publish(build_search_markers(r, search_check_, vehicle, radius, frame, ros::Time::now(), fallback));
+      std::lock_guard<std::mutex> l(mx_);
+      search_at_ = vehicle;
+    } catch (const std::exception& e) {   // the markers never stop the answer
+      ROS_WARN_THROTTLE(10.0, "landing check: search markers failed: %s", e.what());
+    }
   }
 
   void on_cloud(const sensor_msgs::PointCloud2::ConstPtr& m) {
@@ -206,8 +349,9 @@ class LandingCheckNode {
     std::optional<Eigen::Vector3d> sensor;
     if (odom_ && now - odom_->first <= odom_timeout_s_) sensor = odom_->second;
     std::vector<Win> keep;
+    const double keep_s = std::max(window_s_, search_window_s_);   // the spot check uses the last window_s of it
     for (auto& s : scans_)
-      if (now - s.t <= window_s_) keep.push_back(std::move(s));
+      if (now - s.t <= keep_s) keep.push_back(std::move(s));
     keep.push_back({now, std::move(P), sensor});
     scans_.swap(keep);
   }
@@ -255,8 +399,10 @@ class LandingCheckNode {
       sp = *spot_;
       yaw = yaw_;
       od = odom_;
-      for (auto& s : scans_) scans.push_back({s.pts, s.sensor});
-      nscans = scans_.size();
+      const double now = mono();
+      for (auto& s : scans_)
+        if (now - s.t <= window_s_) scans.push_back({s.pts, s.sensor});
+      nscans = scans.size();
       spots = ground_spots_;
       anchor = anchor_;
       frame = frame_;

@@ -91,6 +91,7 @@ $H exec $name "rosparam load /planner/config/planner_bridge.yaml /planner_bridge
     /mavros/setpoint_raw/local /mavros/state /planning/pos_cmd /planning/click_goal \
     /planner_bridge/status /planner_bridge/anchor /mission_executive/status /mission_executive/leg \
     /planner/landing_spot /planner/landing_clear /planner/landing_status /planner/landing_markers \
+    /planner/landing_search /planner/landing_search_result /planner/landing_search_markers \
     /planner_bridge/set_mode /planner_bridge/mode /planner_bridge/mode_code /planner_bridge/enable /planner_bridge/yaw_cmd \
     /planning/drive_goal /track_planner/pos_cmd /track_planner/path /track_planner/status \
     /mavros/statustext/recv /mavros/local_position/velocity_local \

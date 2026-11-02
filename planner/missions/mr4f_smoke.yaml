@@ -1,0 +1,32 @@
+# Mass Robotics 4th floor sim map (mr4f_1030, the owner's 2026-10-30 drive + flights): smoke test, SITL only.
+# map ~/sim/maps/massrobotics_4f/mr4f_1030.pcd on Shannon; start -0.14, 0.04, yaw 85.7 (x, y, deg): where the
+# recording began, facing the robot's heading there. Goals are on the real driven path (open floor).
+#
+# The start lies in a closed office pocket (~11 m2 with >= 0.7 m clearance at 1.0 m, x -3.8..1.2,
+# y -3.2..3.5): desks (~0.73 m), partitions and walls fill the 0.5-1.6 m band all round it, so neither
+# the drone (robot_r 0.44, inflation 0.5, at any height 1.0-1.7 m) nor the track planner gets out of it:
+#   mr4f_s2  old fly leg (-0.50, -2.73) -> (-12.08, 0.04): 4 m into the pocket, boxed in by the
+#            desk/partition line at map x ~ -4.5, UNREACHABLE after 20 s without progress;
+#   mr4f_s3  drive west along the recording's south route to (-11.61, -0.24): NO_PATH (desks and a narrow
+#            passage near x ~ -9 within 0.3 m of the driven path);
+#   mr4f_s4  drive north-west along its last drive to (-11.33, 11.80): stuck at (-4.05, 2.54), NO_PATH
+#            ("no room to pivot" between the desks).
+# So the smoke test stays in the pocket: drive 2.8 m south (from the start's northward heading: a pivot
+# first), take off, fly ~5.8 m north-west at 1.0 m (>= 0.8 m clearance along the way) and land on the
+# driven path at (-3.00, 2.50) (0.75 m from anything 0.15-0.5 m, 1.18 m from 0.5-1.5 m, floor 0.01-0.13 m,
+# nothing below 2.41 m overhead).
+# Waypoints in the map frame (closed_loop.sh / fly_mission.py convert them to the fc frame).
+name: mr4f_smoke
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 120
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  - {type: drive, goal: [-0.50, -2.73], speed: 0.5, accept_radius: 0.4}
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-3.00, 2.50, 1.00]}
+  - {type: land, at: [-3.00, 2.50]}

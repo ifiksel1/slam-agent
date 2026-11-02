@@ -133,6 +133,30 @@ TEST(LandingCheckNode, AnswersTheExecutive) {
   ASSERT_TRUE(wait_for([] { return statuses.back().value("reason", "").rfind("occupied", 0) == 0; }, 5.0))
       << statuses.back().dump();
   EXPECT_FALSE(clears.back());
+  // the landing-spot search round the refused spot: an answer with the request's id, a clear spot off the box
+  // (toward the goal), and its markers
+  std::vector<nlohmann::json> results;
+  visualization_msgs::MarkerArray smarkers;
+  auto s4 = nh.subscribe<std_msgs::String>("/planner/landing_search_result", 10, (boost::function<void(const std_msgs::String::ConstPtr&)>)[&](const std_msgs::String::ConstPtr& m) { results.push_back(nlohmann::json::parse(m->data)); });
+  auto s5 = nh.subscribe<visualization_msgs::MarkerArray>("/planner/landing_search_markers", 10, (boost::function<void(const visualization_msgs::MarkerArray::ConstPtr&)>)[&](const visualization_msgs::MarkerArray::ConstPtr& m) { smarkers = *m; });
+  auto pq = nh.advertise<std_msgs::String>("/planner/landing_search", 10);
+  ASSERT_TRUE(wait_for([&] { return pq.getNumSubscribers() > 0; }, 10.0));
+  std_msgs::String q;
+  q.data = "{\"id\": 7, \"vehicle\": [0.0, 0.0, 2.0], \"goal\": [1.5, 0.0], \"radius\": 1.5, \"exclude\": [[0.0, 0.0]]}";
+  feed(true);
+  pq.publish(q);
+  ASSERT_TRUE(wait_for([&] { return !results.empty(); }, 10.0));
+  auto r = results.back();
+  EXPECT_EQ(r["id"], 7);
+  ASSERT_TRUE(r.value("found", false)) << r.dump();
+  EXPECT_GT(r["spot"][0].get<double>(), 0.2) << r.dump();   // toward the goal, off the box
+  EXPECT_GT(r["dist_m"].get<double>(), 0.3);
+  EXPECT_LE(r["dist_m"].get<double>(), 1.5 + 1e-9);
+  for (auto k : {"yaw_deg", "cost", "margin_m", "candidates", "evaluated", "reasons", "elapsed_s", "check", "scans", "window_s"})
+    EXPECT_TRUE(r.contains(k)) << k;
+  EXPECT_EQ(r["check"]["reason"], "clear");
+  ASSERT_TRUE(wait_for([&] { return smarkers.markers.size() >= 6; }, 3.0));
+  EXPECT_EQ(smarkers.markers[0].action, visualization_msgs::Marker::DELETEALL);
 }
 
 int main(int argc, char** argv) {

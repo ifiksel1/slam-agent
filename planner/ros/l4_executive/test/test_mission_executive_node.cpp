@@ -10,8 +10,10 @@
 // anchor) and the track planner (drives toward /planning/drive_goal on the ground, /track_planner/status).
 // Like QuadRover it refuses a takeoff while the tracks move faster than 0.2 m/s
 // (MAV_RESULT_TEMPORARILY_REJECTED); a slower creep (creep) passes that guard, and the executive must not
-// take off then. It records the executive's /mission_executive/ground_spots. Each scenario runs the real
-// executive (the mission_executive binary) as a child process.
+// take off then. It records the executive's /mission_executive/ground_spots. It plays the landing check's
+// landing-spot search too (/planner/landing_search -> /planner/landing_search_result: a spot at a set offset
+// from the vehicle, or none), and the landing check's answer can depend on where the vehicle is (clear_at).
+// Each scenario runs the real executive (the mission_executive binary) as a child process.
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
@@ -118,11 +120,21 @@ struct World {
   std::optional<double> yaw_at_land;           // the yaw when NAV_LAND came
   std::vector<double> yaw_at_goal;             // the yaw when each click_goal came
   double max_z = 0.0;                          // the highest the vehicle has been (m)
+  // the landing-spot search: answers per request in turn (the last one repeats); a value is the found spot's
+  // offset from the request's vehicle (planner frame), none: none found. search_answers empty: no answer
+  std::vector<std::optional<Eigen::Vector2d>> search_answers;
+  std::vector<ojson> search_requests;          // what the executive asked
+  std::vector<double> search_yaw_travel;       // yaw_travel at each request (a spin in between)
+  std::optional<Eigen::Vector2d> clear_at;     // set: the landing check is clear only within 0.35 m of it (fc)
+  int clear_answer = -1;                       // >= 0: clear_at becomes this answer's spot (fc) when it is sent
+  std::vector<Eigen::Vector2d> answer_spots;   // the spots answered (fc)
+  std::optional<Vec3> pos_at_land;             // where NAV_LAND came
+  bool hold_moves = false;                     // the waypoint hold eases onto SUPER's goal within 1 m (the real bridge)
 
   ros::NodeHandle nh;
   std::vector<ros::ServiceServer> srvs;
   std::vector<ros::Subscriber> subs;
-  ros::Publisher state_pub, pose_pub, text_pub, status_pub, anchor_pub, clear_pub, track_pub;
+  ros::Publisher state_pub, pose_pub, text_pub, status_pub, anchor_pub, clear_pub, track_pub, search_pub;
   ros::WallTimer timer;
 
   void reset() {
@@ -162,6 +174,14 @@ struct World {
     yaw_travel = 0.0;
     yaw_at_land.reset();
     yaw_at_goal.clear();
+    search_answers.clear();
+    search_requests.clear();
+    search_yaw_travel.clear();
+    clear_at.reset();
+    clear_answer = -1;
+    answer_spots.clear();
+    pos_at_land.reset();
+    hold_moves = false;
     forbidden.clear();
     mode_cmds.clear();
     goals.clear();
@@ -195,6 +215,32 @@ struct World {
     anchor_pub = nh.advertise<geometry_msgs::TransformStamped>("/planner_bridge/anchor", 10);
     clear_pub = nh.advertise<std_msgs::Bool>("/planner/landing_clear", 10);
     track_pub = nh.advertise<std_msgs::String>("/track_planner/status", 10);
+    search_pub = nh.advertise<std_msgs::String>("/planner/landing_search_result", 10);
+    subs.push_back(sub<std_msgs::String>(nh, "/planner/landing_search", 10, [this](const std_msgs::String::ConstPtr& s) {
+      std::lock_guard<std::mutex> g(m);
+      const ojson q = l4::loads(s->data);
+      search_requests.push_back(q);
+      search_yaw_travel.push_back(yaw_travel);
+      if (search_answers.empty()) return;   // no landing check: no answer
+      const size_t k = std::min(search_requests.size(), search_answers.size()) - 1;
+      ojson r = {{"id", q["id"]}, {"found", search_answers[k].has_value()}, {"candidates", 300}, {"evaluated", 40},
+                 {"reasons", {{"occupied", 40}}}};
+      if (search_answers[k]) {
+        const double x = q["vehicle"][0].get<double>() + (*search_answers[k])[0];
+        const double y = q["vehicle"][1].get<double>() + (*search_answers[k])[1];
+        r["spot"] = {x, y};
+        const Vec3 f = planner_to_fc(Vec3(x, y, 0.0));
+        answer_spots.push_back(f.head<2>());
+        if (clear_answer == int(search_requests.size()) - 1) clear_at = f.head<2>();
+        r["dist_m"] = search_answers[k]->norm();
+        r["margin_m"] = 0.4;
+      } else {
+        r["first_reason"] = "occupied: 8 cells";
+      }
+      std_msgs::String out;
+      out.data = l4::dumps(r);
+      search_pub.publish(out);
+    }));
     subs.push_back(nh.subscribe("/planning/click_goal", 10, &World::on_goal, this));
     subs.push_back(nh.subscribe("/planning/drive_goal", 10, &World::on_drive_goal, this));
     subs.push_back(sub<std_msgs::String>(nh, "/mission_executive/status", 100, [this](const std_msgs::String::ConstPtr& s) {
@@ -273,6 +319,7 @@ struct World {
     }
     landing = true;
     yaw_at_land = yaw;
+    pos_at_land = pos;
     target.reset();
     res.success = true;
     res.result = 0;
@@ -357,6 +404,11 @@ struct World {
         speed = 0.0;
         publish_track("REACHED", "");
       }
+    } else if (waypoint_hold && hold_moves && target && mode == 15 && enabled && (*target - pos).norm() <= 1.0) {
+      // the real bridge's waypoint hold: the goal it was given (within 1 m) is its hold point, eased onto
+      const Vec3 d = *target - pos;
+      if (d.norm() > 1e-6) pos += d / d.norm() * std::min(d.norm(), 0.5 * dt);
+      speed = std::min(d.norm(), 0.5 * dt) / dt;
     } else if (creep > 0 && pos[2] < 0.05) {
       pos[0] += creep * dt;
       speed = creep;
@@ -417,7 +469,7 @@ struct World {
     tf.transform.rotation.w = std::cos(anchor_yaw / 2);
     anchor_pub.publish(tf);
     std_msgs::Bool b;
-    b.data = landing_clear;
+    b.data = landing_clear && (!clear_at || (pos.head<2>() - *clear_at).norm() <= 0.35);
     clear_pub.publish(b);
   }
 
@@ -1283,6 +1335,8 @@ TEST_F(Executive, I1_InteractiveDriveFlyDrive) {
   check("interactive: GUIDED only", modes == std::vector<int>{15}, join(modes));
   check("interactive: never arms or touches parameters", W->forbidden.empty(), join(W->forbidden));
   check("interactive: bridge never in the wrong mode", W->mode_mismatch == 0, std::to_string(W->mode_mismatch));
+  check("interactive: a clear spot under the vehicle needs no landing-spot search", W->search_requests.empty(),
+        std::to_string(W->search_requests.size()));
 }
 
 // I2. a new goal mid-leg replaces the running one, in the air and on the ground
@@ -1356,6 +1410,193 @@ TEST_F(Executive, I3_InteractiveUnreachableThenNext) {
   auto modes = W->modes();
   check("interactive: QRLOITER only in the air (GUIDED, QRLOITER, GUIDED)", modes == std::vector<int>{15, 19, 15}, join(modes));
   check("interactive: unreachable: never STOPPED", !contains(ph, "STOPPED"), join(ph));
+}
+
+// ---- landing to drive: the landing-spot search (owner request 2026-10-30) ---------------------------------
+static const std::vector<std::string> SEARCH_ARGS = {"_interactive:=true", "_land_spin_rate_deg:=60"};
+static Eigen::Vector2d fc_to_planner2(const Eigen::Vector2d& p) {
+  std::lock_guard<std::mutex> g(W->m);
+  const double c = std::cos(W->anchor_yaw), s = std::sin(W->anchor_yaw);
+  const Eigen::Vector2d d = p - W->anchor_t.head<2>();
+  return Eigen::Vector2d(c * d[0] + s * d[1], -s * d[0] + c * d[1]);
+}
+static std::string v2(const Eigen::Vector2d& v) { return vstr(Vec3(v[0], v[1], 0.0)); }
+// fly to (2, 0, 1), then a drive click to `goal` from the air
+static std::function<void(double)> fly_then_drive(int& sent, Eigen::Vector2d goal) {
+  return [&sent, goal](double t) {
+    if (sent == 0 && t > 1.0) {
+      send_goal({{"type", "fly"}, {"goal", {2.0, 0.0, 1.0}}});
+      sent = 1;
+    } else if (sent == 1 && count_status("REACHED", 1)) {
+      send_goal({{"type", "drive"}, {"goal", {goal[0], goal[1]}}});
+      sent = 2;
+    }
+  };
+}
+
+// I4. the spot under the vehicle refused: the search's spot (1.2 m toward the goal), fly there, the check
+// again, land there facing the goal, drive on. With a rotated, offset anchor: the request in the planner frame
+TEST_F(Executive, I4_DriveFromTheAirLandsAtASearchedSpot) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->anchor_t = Vec3(1.0, 2.0, 0.0);
+    W->anchor_yaw = M_PI / 2;
+    W->search_answers = {Eigen::Vector2d(0.0, -1.2)};   // planner frame: fc +x 1.2 m
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);          // nothing clear under the vehicle
+    W->clear_answer = 0;                                // the only clear spot: the answer's
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, [&](double t) {
+    send(t);
+  }, 45, true, ojson::object(), SEARCH_ARGS);
+  check("search: the drive reached after landing at the searched spot", count_status("REACHED", 2) == 1, join(ph));
+  check("search: LAND_SEARCH, LAND_MOVE, then LAND", index_of(ph, "LAND_SEARCH") >= 0 && index_of(ph, "LAND_MOVE") > index_of(ph, "LAND_SEARCH") &&
+        index_of(ph, "LAND", index_of(ph, "LAND_MOVE")) > 0, join(ph));
+  const Eigen::Vector2d want_goal = fc_to_planner2(Eigen::Vector2d(5.0, 0.0)), want_veh = fc_to_planner2(Eigen::Vector2d(2.0, 0.0));
+  std::lock_guard<std::mutex> g(W->m);
+  check("search: one request", W->search_requests.size() == 1, std::to_string(W->search_requests.size()));
+  if (!W->search_requests.empty()) {
+    const ojson& q = W->search_requests[0];
+    const Eigen::Vector2d qg(q["goal"][0].get<double>(), q["goal"][1].get<double>()), qv(q["vehicle"][0].get<double>(), q["vehicle"][1].get<double>());
+    check("search: the request's goal and vehicle in the planner frame", (qg - want_goal).norm() < 0.05 && (qv - want_veh).norm() < 0.35,
+          "goal " + v2(qg) + " want " + v2(want_goal) + ", vehicle " + v2(qv) + " want " + v2(want_veh));
+    check("search: radius 2 m, the refused spot under the vehicle excluded", q["radius"].get<double>() == 2.0 && q["exclude"].size() == 1, l4::dumps(q));
+  }
+  const bool spot1 = W->answer_spots.size() == 1 && W->answer_spots[0][0] > 2.6 && std::abs(W->answer_spots[0][1]) < 0.35;
+  check("search: the spot 1.2 m fc +x of the vehicle", spot1, W->answer_spots.empty() ? "none" : v2(W->answer_spots[0]));
+  check("search: landed at the spot", spot1 && W->pos_at_land && (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.35,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+  check("search: landed facing the goal", W->yaw_at_land && ang(*W->yaw_at_land, 0.0) < 10.0 * M_PI / 180.0,
+        W->yaw_at_land ? std::to_string(deg(*W->yaw_at_land)) : "no landing");
+  check("search: drove to the goal", W->pos[2] < 0.05 && (W->pos.head<2>() - Eigen::Vector2d(5.0, 0.0)).norm() < 0.5, vstr(W->pos));
+  std::vector<int> modes;
+  for (auto& x : W->mode_cmds) modes.push_back(x.second);
+  check("search: GUIDED only, never arms", modes == std::vector<int>{15} && W->forbidden.empty(), join(modes));
+}
+
+// I5. no spot at first: a 360 deg spin in place, then the search again finds one
+TEST_F(Executive, I5_NoSpotSpinsThenFinds) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {std::nullopt, Eigen::Vector2d(1.0, 0.0)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 1;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(2.0, 3.0));
+  auto ph = run_executive({}, nullptr, send, 60, true, ojson::object(), SEARCH_ARGS);
+  check("spin: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  check("spin: LAND_SEARCH, LAND_SPIN, LAND_SEARCH, LAND_MOVE", index_of(ph, "LAND_SPIN") > index_of(ph, "LAND_SEARCH") &&
+        index_of(ph, "LAND_SEARCH", index_of(ph, "LAND_SPIN")) > 0 && index_of(ph, "LAND_MOVE") > index_of(ph, "LAND_SPIN"), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("spin: two searches", W->search_requests.size() == 2, std::to_string(W->search_requests.size()));
+  if (W->search_yaw_travel.size() == 2) {
+    const double turned = W->search_yaw_travel[1] - W->search_yaw_travel[0];
+    check("spin: a full turn between the searches", turned >= 2 * M_PI - 0.2, std::to_string(deg(turned)) + " deg");
+  }
+  check("spin: landed at the spot found after the spin", W->pos_at_land && W->answer_spots.size() == 1 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.35,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+}
+
+// I6. none within the radius even after the spin: REFUSED, QRLOITER then GUIDED, no landing, back to IDLE
+TEST_F(Executive, I6_NoSpotAfterTheSpinRefuses) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {std::nullopt};
+    W->landing_clear = false;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, [&](double t) {
+    send(t);
+  }, 45, true, ojson::object(), SEARCH_ARGS);
+  bool reason_ok = false;
+  for (const auto& st : W->status)
+    if (l4::get(st, "phase") == "REFUSED" && l4::get(st, "goal") == 2 && l4::get(st, "reason") == "no landing spot found nearby") reason_ok = true;
+  check("no spot: REFUSED \"no landing spot found nearby\"", reason_ok, join(ph));
+  check("no spot: one spin, then IDLE", count_status("LAND_SPIN") >= 1 && last_is(ph, "IDLE") && !contains(ph, "STOPPED"), join(ph));
+  check("no spot: no landing", !contains(ph, "LAND") && !contains(ph, "LAND_MOVE"), join(ph));
+  auto modes = W->modes();
+  check("no spot: QRLOITER then GUIDED", modes == std::vector<int>{15, 19, 15}, join(modes));
+  std::lock_guard<std::mutex> g(W->m);
+  check("no spot: two searches (before and after the spin)", W->search_requests.size() == 2, std::to_string(W->search_requests.size()));
+  check("no spot: still in the air", W->pos[2] > 0.5 && W->forbidden.empty(), vstr(W->pos));
+}
+
+// I7. the check on arrival refuses the first spot: a second search (that spot excluded), the second spot taken
+TEST_F(Executive, I7_RecheckRefusedTriesAnotherSpot) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {Eigen::Vector2d(1.0, 0.0), Eigen::Vector2d(0.0, 1.0)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 1;   // the first spot refused on arrival, the second clear
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(5.0, 0.0));
+  auto ph = run_executive({}, nullptr, send, 60, true, ojson::object(), SEARCH_ARGS);
+  check("re-check: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("re-check: two searches, the refused spots excluded", W->search_requests.size() == 2 && W->search_requests[1]["exclude"].size() == 3,
+        W->search_requests.size() == 2 ? l4::dumps(W->search_requests[1]) : std::to_string(W->search_requests.size()));
+  check("re-check: landed at the second spot", W->pos_at_land && W->answer_spots.size() == 2 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[1]).norm() <= 0.35 && (W->answer_spots[1] - W->answer_spots[0]).norm() > 0.6,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+}
+
+// I8. a spot 0.6 m away: no SUPER leg, the bridge's waypoint hold carries the vehicle onto it
+TEST_F(Executive, I8_ShortMoveThroughTheWaypointHold) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {Eigen::Vector2d(0.6, 0.0)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 0;
+    W->hold_moves = true;
+  }
+  goal_pub();
+  int sent = 0;
+  auto send = fly_then_drive(sent, Eigen::Vector2d(2.0, 3.0));
+  auto ph = run_executive({}, nullptr, send, 45, true, ojson::object(), SEARCH_ARGS);
+  check("short move: the drive reached", count_status("REACHED", 2) == 1, join(ph));
+  bool direct = false, leg = false;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& st : W->status) {
+      if (l4::get(st, "phase") == "LAND_MOVE" && l4::get(st, "direct") == true) direct = true;
+      if (l4::get(st, "phase") == "LEG" && l4::get(st, "for") == "landing spot") leg = true;
+    }
+  }
+  check("short move: direct, no SUPER leg", direct && !leg, join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("short move: landed on the spot (within 0.15 m)", W->pos_at_land && W->answer_spots.size() == 1 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.15, W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+}
+
+// S31. a mission drive leg that starts in the air lands first (the search), then drives: DONE
+TEST_F(Executive, S31_MissionDriveLegFromTheAir) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->search_answers = {Eigen::Vector2d(1.0, 0.0)};
+    W->clear_at = Eigen::Vector2d(-50.0, 0.0);
+    W->clear_answer = 0;
+  }
+  // a private _x:= argument stays on the parameter server: the interactive scenarios' would carry over
+  auto ph = run_executive({takeoff(1.0), fly(2.0, 0.0, 1.0), drive(4.0, 2.0)}, nullptr, nullptr, 45, true, ojson::object(),
+                          {"_interactive:=false"});
+  check("mission: drive leg from the air: DONE", last_is(ph, "DONE"), join(ph));
+  check("mission: landed through the search", contains(ph, "LAND_SEARCH") && contains(ph, "LAND_MOVE") && contains(ph, "LAND"), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("mission: landed at the spot, drove to the goal", W->pos_at_land && W->answer_spots.size() == 1 &&
+        (W->pos_at_land->head<2>() - W->answer_spots[0]).norm() <= 0.35 &&
+        W->pos[2] < 0.05 && (W->pos.head<2>() - Eigen::Vector2d(4.0, 2.0)).norm() < 0.5, vstr(W->pos));
+  std::vector<int> modes;
+  for (auto& x : W->mode_cmds) modes.push_back(x.second);
+  check("mission: GUIDED only", modes == std::vector<int>{15}, join(modes));
 }
 
 int main(int argc, char** argv) {

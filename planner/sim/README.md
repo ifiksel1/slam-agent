@@ -204,7 +204,7 @@ Shannon's desktop), layout `foxglove/layouts/click_and_run_layout.json`. The 3D 
 
 | tool | topic | goal (`/mission_executive/goal`, fc frame) |
 |---|---|---|
-| Publish point | `/click_and_run/drive` (PointStamped) | `drive` there; in the air it lands where it is first (landing check), then drives |
+| Publish point | `/click_and_run/drive` (PointStamped) | `drive` there; in the air it lands first (landing check under it, else the landing-spot search below), then drives |
 | Publish pose | `/click_and_run/fly` (PoseStamped) | `fly` there, `FLY_HEIGHT` (1.0 m) above the floor, ending facing the arrow; on the ground it takes off first |
 | Publish pose estimate | `/click_and_run/pose_estimate` | nothing (not used) |
 
@@ -225,6 +225,69 @@ How it fits together:
 - `foxglove_bridge` (ROS 1, image `l4-sim-l2:foxglove`, `click_and_run/Dockerfile.foxglove`) in a
   container sharing the run's network namespace; `socat` relays it through a unix socket in the run
   directory to host TCP 8765. Clients may publish only the three click topics: no services, no params.
+- Landing to drive (2026-10-30). A drive click in the air first asks the landing check about the spot under the
+  vehicle (~2 s). If that is refused, the executive asks the landing check node for a spot within 2 m
+  (`/planner/landing_search`, phase `LAND_SEARCH`). The node checks a 0.2 m grid of candidates with the
+  check's own rules, nearest and toward the goal first. If none is found, the vehicle yaws 360 deg in place
+  (`LAND_SPIN`, 30 deg/s) and the search runs again. Still none: `REFUSED` "no landing spot found nearby".
+  A found spot: `LAND_MOVE`. Up to 0.9 m it moves straight through the bridge's waypoint hold; farther it
+  flies a SUPER leg. Then the check again over the spot, `LAND`, and the drive. A spot refused on arrival
+  starts another search, at most 2 moves. The candidates (green clear, red occupied / not flat, amber not
+  observed, grey not checked), the search circle and the chosen spot are on `/planner/landing_search_markers`
+  (in the layout). Executive params: `land_search`, `land_search_radius`, `land_here_check_s`,
+  `land_search_tries`, `land_spin_rate_deg`, `land_move_direct_max`. Landing check params: `search_*`,
+  `search_window_s` (node header comment).
+- Why the spot under a hovering vehicle is so often refused:
+  - "not observed" is geometry, on the robot as in SITL. The JT128 looks forward (a hemisphere), so from a
+    hover it sees only ~40 % of the landing disc under the frame, against `observed_min` 0.7. The rest
+    comes only from the approach's scans, which leave the check's 10 s window when the click comes later.
+  - "occupied" at 0.11-0.20 m and "not flat" residuals of 0.03 m are the map's floor smear as SITL renders it
+    (the tower reads 1.28 m). That is a sim artifact: the check's thresholds are unchanged.
 - `closed_loop.sh` starts the click nodes through `FAULT_HOOK` (`click_and_run/nodes.sh`) and
   `fly_mission.py` arms SITL and starts the executive as for a mission. The bag (~25 GB an hour) is
   stopped at the start unless `RECORD=1` (then it records the clicks too).
+
+## Maps from recordings: Mass Robotics 4th floor (2026-10-30)
+
+`maps/massrobotics_4f/` builds a sim map from a flight recording and runs the closed loop and click and run on it.
+The offline tools are in `map_build/` (Python, offline only). The PCDs stay on Shannon (`~/sim/maps/<map>/`, gitignored here).
+
+```bash
+# on Shannon: workspace ~/sim/mr4f (an L2_BASE: planner_sim, planner, slam, runs, cpp_ws/install) and the scripts in ~/sim/mr4f/map
+~/sim/mr4f/map/closed_loop_mr4f.sh mr4f_s1 ~/sim/mr4f/planner/missions/mr4f_smoke.yaml 600   # one mission
+~/sim/mr4f/map/click_and_run_mr4f.sh          # click and run, Foxglove ws://<shannon>:8775 (stop: ... stop)
+```
+
+Map `mr4f_1030.pcd` comes from the owner's 2026-10-30 drive with two short flights (recording 10_30_2026_22_01_05, 668 s, 444 m).
+It is 5.18 M points on a 6 cm grid, about 70 x 67 m, with z up and the floor at 0.
+The start is -0.14, 0.04, yaw 85.7 deg: where the recording began, with the robot facing +y.
+
+How it was built (`build_mr4f_live.sh`):
+- **Odometry:** the recorded LIVE FAST-LIO `/Odometry` plus each scan in the IMU frame (`live_to_pgo_bag.py`).
+  The stack's SC-PGO runs alone on them (`run_pgo_live.sh` in `slam-pgo:tuned`).
+  A FAST-LIO replay of this recording started cold: it began armed and moving, ended 64 m from its start
+  (live: 10.6 m) and was unusable (`~/sim/maps/massrobotics_4f/replay_fastlio/`).
+- **SC-PGO:** 25 loops (15 pairs) accepted and 87 pairs rejected by the ICP check. The live odometry already matched the loops to 1-3 cm,
+  so the correction is at most 0.07 m (`pgo_compare/`: `pgo_report.txt`, `pgo_paths.png`, before/after top views).
+- **Ground constraint** (`build_sim_map.py --ground_level`): the live odometry's slow vertical drift (up to 1.06 m at 440-474 s)
+  warped the floor by 0.69 m (p5-p95 about a plane). Each keyframe is shifted so the floor it sees close by lies at z = 0,
+  which leaves 0.18 m. The floor seen on different passes agrees to 1-2 cm (`floor_consistency.py`).
+  There is no seam at the FC's EKF lane switch (396-407 s).
+- **Far floor smear:** points below 0.6 m seen from more than 6 m away are dropped, and a flat floor at z = 0 is filled under the footprint, because SITL's ground is flat.
+  The cost: a low obstacle (under 0.6 m) seen only from far is not in the map.
+- **Cleanup:** carving of moving objects (people), with `--span_max 4 --free_ratio 3 --free_min 4`.
+  The defaults thinned walls and glass partitions. Isolated specks are removed, and so is the robot's own corridor while driving (not under the flights).
+- **Ceiling:** about 2.4 m (drop ceiling, lights, ducts) and about 3.0-3.1 m, top 3.6 m.
+  So `super_closed_loop_mr4f.yaml` sets `virtual_ceil_height` to 3.0. The rest is as `super_closed_loop_hp.yaml`.
+  Not lower: ROG-Map takes the inflation off the virtual ceiling and ground twice, so the planner treats z outside
+  (ground + 1.1, ceiling - 1.2) m as occupied (planner frame). At 2.0 the start and the goal were "deeply occupied" (mr4f_s1).
+- **Views** (Shannon `~/sim/maps/massrobotics_4f/`): `mr4f_1030_top.png`, `mr4f_1030_floor.png` (floor height per 1 m cell)
+  and `mr4f_1030_removed.png` (what the cleanup removed).
+- **Missions:** the start is in a closed office pocket. It is about 11 m2 with at least 0.7 m clearance at 1.0 m.
+  Desks (about 0.73 m), partitions and walls fill the 0.5-1.6 m band around it.
+  Neither SUPER (robot_r 0.44, inflation 0.5, at any height from 1.0 to 1.7 m) nor the track planner can leave the pocket.
+  - mr4f_s2: a 12 m fly leg west went 4 m and was then boxed in.
+  - mr4f_s3 and mr4f_s4: driving out west or north-west gave NO_PATH.
+  - `mr4f_smoke.yaml` stays in the pocket: a 2.8 m drive, takeoff, a 5.8 m flight, and a landing.
+  - `mr4f_aisle.yaml` is the 13 m flight along the open aisle west of the office, at x about -12.
+    It needs its own start: `MR4F_START="-12.11 15.39 -88" ~/sim/mr4f/map/closed_loop_mr4f.sh <run> ~/sim/mr4f/planner/missions/mr4f_aisle.yaml 600`.

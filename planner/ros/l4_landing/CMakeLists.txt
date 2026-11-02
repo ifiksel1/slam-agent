@@ -19,8 +19,8 @@ catkin_package(
 
 include_directories(include ${catkin_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIR})
 
-# the check (ROS-free) and the marker helpers (ROS messages, no node)
-add_library(l4_landing_core STATIC src/landing_core.cpp src/landing_markers.cpp)
+# the check and the landing-spot search (ROS-free) and the marker helpers (ROS messages, no node)
+add_library(l4_landing_core STATIC src/landing_core.cpp src/landing_search.cpp src/landing_markers.cpp)
 set_target_properties(l4_landing_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_dependencies(l4_landing_core ${catkin_EXPORTED_TARGETS})
 target_link_libraries(l4_landing_core ${catkin_LIBRARIES})

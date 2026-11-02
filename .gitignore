@@ -21,3 +21,5 @@ li_init_result/
 # LI-Init calibration archive bags (multi-GB)
 bags/
 planner/sim/course/*.pcd
+# sim maps built from recordings (planner/sim/maps/<map>/): the PCDs live on Shannon (~/sim/maps/<map>/), not in git
+planner/sim/maps/**/*.pcd

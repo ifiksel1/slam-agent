@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "l4_landing/landing_core.h"
+#include "l4_landing/landing_search.h"
 
 namespace l4_landing {
 
@@ -30,5 +31,10 @@ std::pair<std::string, RGB> decision(bool clear, const std::string& reason);
 std::string label_text(bool clear, const Json& st);
 visualization_msgs::MarkerArray build_markers(bool clear, const Json& st, const Viz& viz, const std::string& frame,
                                               const ros::Time& stamp, double fallback_z);
+
+// /planner/landing_search_markers from a search (namespaces in the node's header comment): a DELETEALL first,
+// then the candidates, the search circle, and the chosen spot (disc, footprint, label) when one was found
+visualization_msgs::MarkerArray build_search_markers(const SearchResult& r, const LandingCheck& check, const V2& vehicle, double radius,
+                                                     const std::string& frame, const ros::Time& stamp, double fallback_z);
 
 }  // namespace l4_landing

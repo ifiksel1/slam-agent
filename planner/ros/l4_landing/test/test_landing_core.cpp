@@ -20,6 +20,7 @@
 
 #include "l4_landing/landing_core.h"
 #include "l4_landing/landing_markers.h"
+#include "l4_landing/landing_search.h"
 
 using namespace l4_landing;
 namespace tc = l4_track;
@@ -429,6 +430,193 @@ TEST(Markers, GroundSpotsToThePlannerFrame) {
   EXPECT_NEAR(out[0].x, px, 1e-9);
   EXPECT_NEAR(out[0].y, py, 1e-9);
   EXPECT_NEAR(out[0].yaw, pyaw, 1e-9);
+}
+
+// ---- The landing-spot search (owner request 2026-10-30): candidates within a radius, each by the check itself
+namespace {
+// a 0.6 m box standing on the floor at (cx, cy), the floor under it hidden
+Cloud floor_with_boxes(const std::vector<V2>& boxes, double r = 3.0, double size = 0.3, double h = 0.4) {
+  Cloud f = filter(floor_(0, 0, r, 0, 0, 0.005, 0.04), [&](const tc::P3& p) {
+    for (auto& b : boxes)
+      if (std::abs(p.x - b.x()) <= size / 2 && std::abs(p.y - b.y()) <= size / 2) return false;
+    return true;
+  });
+  for (auto& b : boxes) f = cat({f, box(b.x(), b.y(), h, size)});
+  return f;
+}
+SearchResult run_search(const Cloud& c, V2 vehicle, std::optional<V2> goal, SearchParams sp = SearchParams(),
+                        const std::vector<V2>& exclude = {}, double yaw = 0.0) {
+  LandingCheck lc;
+  return search_landing_spot(lc, scans_of({c}), vehicle, yaw, goal, 1.0, {}, sp, exclude);
+}
+}  // namespace
+
+TEST(Search, ABoxUnderTheVehicleFindsTheNearestClearSpot) {
+  Cloud c = floor_with_boxes({V2(0, 0)});
+  LandingCheck lc;
+  ASSERT_FALSE(lc.evaluate(c, O, 1.0, 0.0).first);   // the spot under the vehicle is refused
+  SearchParams sp;
+  sp.goal_weight = 0.0;
+  auto r = run_search(c, O, std::nullopt, sp);
+  ASSERT_TRUE(r.best) << r.summary.dump();
+  const auto& b = r.cands[*r.best];
+  EXPECT_TRUE(b.clear);
+  // the disc (0.542 m round the frame centre, 0.193 m behind the spot) clears the 0.3 m box: >= ~0.5 m away,
+  // and the nearest such spot is taken (well inside the 2 m radius)
+  EXPECT_GT(b.dist, 0.45);
+  EXPECT_LT(b.dist, 1.1);
+  EXPECT_TRUE(r.summary["found"].get<bool>());
+  EXPECT_GT(r.summary["reasons"].value("occupied", 0), 0) << r.summary.dump();
+  // what the search reports clear the check reports clear, with the candidate's heading
+  LandingCheck again;
+  EXPECT_TRUE(again.evaluate(c, b.spot, 1.0, b.yaw).first);
+}
+
+TEST(Search, PrefersSpotsTowardTheGoalAndFacesIt) {
+  Cloud c = floor_with_boxes({V2(0, 0)});
+  for (V2 goal : {V2(5, 0), V2(-5, 0), V2(0, 5)}) {
+    auto r = run_search(c, O, goal);
+    ASSERT_TRUE(r.best) << r.summary.dump();
+    const auto& b = r.cands[*r.best];
+    EXPECT_GT(b.spot.dot(goal.normalized()), 0.3) << b.spot.transpose() << " goal " << goal.transpose();
+    const V2 d = goal - b.spot;
+    EXPECT_NEAR(std::cos(b.yaw - std::atan2(d.y(), d.x())), 1.0, 1e-9);   // lands facing the goal
+  }
+}
+
+TEST(Search, CostOrderAndTheTieBreakByMargin) {
+  // obstacles round the vehicle: several clear spots cost about the same; the one with the most margin wins
+  Cloud c = floor_with_boxes({V2(0, 0), V2(1.3, 0), V2(-1.3, 0), V2(0, -1.3)});
+  SearchParams sp;
+  sp.goal_weight = 0.0;
+  sp.tie_m = 0.3;
+  auto r = run_search(c, O, std::nullopt, sp);
+  ASSERT_TRUE(r.best) << r.summary.dump();
+  for (size_t k = 1; k < r.cands.size(); ++k) EXPECT_LE(r.cands[k - 1].cost, r.cands[k].cost);
+  const auto& b = r.cands[*r.best];
+  double best_cost = 1e9;
+  for (auto& c2 : r.cands)
+    if (c2.clear) best_cost = std::min(best_cost, c2.cost);
+  for (auto& c2 : r.cands) {
+    if (!c2.clear) continue;
+    EXPECT_GE(c2.margin, 0.0);
+    EXPECT_LE(c2.margin, sp.margin_max + 1e-9);
+    if (c2.cost <= best_cost + sp.tie_m) EXPECT_GE(b.margin, c2.margin - 1e-9);   // the most margin in the tie
+  }
+  EXPECT_LE(b.cost, best_cost + sp.tie_m + 1e-9);
+  EXPECT_LT(b.margin, sp.margin_max + 1e-9);
+}
+
+TEST(Search, NoClearSpotWithinTheRadius) {
+  // posts every 0.6 m: no disc of 0.542 m fits anywhere
+  std::vector<V2> posts;
+  for (double x = -2.4; x <= 2.41; x += 0.6)
+    for (double y = -2.4; y <= 2.41; y += 0.6) posts.push_back(V2(x, y));
+  auto r = run_search(floor_with_boxes(posts, 3.0, 0.2, 0.5), O, V2(5, 0));
+  EXPECT_FALSE(r.best);
+  EXPECT_FALSE(r.summary["found"].get<bool>());
+  EXPECT_EQ(r.evaluated, int(r.cands.size()));   // nothing clear: every candidate evaluated
+  EXPECT_GT(r.summary["reasons"].value("occupied", 0), 0) << r.summary.dump();
+  EXPECT_TRUE(r.summary.contains("first_reason"));
+}
+
+TEST(Search, UnobservedGroundIsNotASpot) {
+  // the floor seen only beyond 3 m: every candidate within 2 m is "not observed"
+  Cloud c = filter(floor_(0, 0, 5.0, 0, 0, 0.005, 0.05), [](const tc::P3& p) { return std::hypot(p.x, p.y) > 3.0; });
+  auto r = run_search(c, O, std::nullopt);
+  EXPECT_FALSE(r.best);
+  EXPECT_EQ(r.summary["reasons"].value("not observed", 0), r.evaluated) << r.summary.dump();
+}
+
+TEST(Search, ExcludedSpotsAreSkipped) {
+  Cloud c = floor_(0, 0, 3.0, 0, 0, 0.005, 0.04);
+  auto r = run_search(c, O, std::nullopt);
+  ASSERT_TRUE(r.best);
+  EXPECT_LT(r.cands[*r.best].dist, 1e-9);   // open floor: the spot under the vehicle itself
+  auto r2 = run_search(c, O, std::nullopt, SearchParams(), {O});
+  ASSERT_TRUE(r2.best);
+  EXPECT_GT(r2.cands[*r2.best].dist, SearchParams().exclude_r);
+  for (auto& k : r2.cands)
+    if (k.dist <= SearchParams().exclude_r) {
+      EXPECT_TRUE(k.excluded);
+      EXPECT_FALSE(k.evaluated);
+    }
+}
+
+TEST(Search, StopsOnceTheChoiceCannotChange) {
+  Cloud c = floor_(0, 0, 3.0, 0, 0, 0.005, 0.04);
+  auto r = run_search(c, O, std::nullopt);
+  ASSERT_TRUE(r.best);
+  EXPECT_LT(r.evaluated, int(r.cands.size()) / 2) << r.summary.dump();   // open floor: only the nearest few
+  const SearchParams sp;
+  for (auto& k : r.cands)
+    if (k.cost <= sp.tie_m + (1 + sp.goal_weight) * sp.margin_max - 1e-9) EXPECT_TRUE(k.evaluated || k.excluded);
+}
+
+TEST(Search, TheBudgetCapsTheEvaluations) {
+  SearchParams sp;
+  sp.budget_s = 0.0;
+  double t = 0.0;
+  LandingCheck lc;
+  auto r = search_landing_spot(lc, scans_of({floor_with_boxes({V2(0, 0)})}), O, 0.0, std::nullopt, 1.0, {}, sp, {},
+                               [&]() { return t += 0.01; });
+  EXPECT_TRUE(r.budget_hit);
+  EXPECT_EQ(r.evaluated, 0);
+  EXPECT_FALSE(r.best);
+}
+
+TEST(Search, SameAnswerAsTheCheckOnTheRawWindow) {
+  // scans with their sensor 1 m over the vehicle: the near-range drop and the crop done once must give each
+  // candidate the check's own answer on the raw window
+  std::vector<Scan> scans;
+  for (int k = 0; k < 6; ++k) {
+    Cloud f = floor_with_boxes({V2(0.3, 0.2)}, 3.0);
+    scans.push_back({f, Eigen::Vector3d(0.05 * k, 0, 1.0)});
+  }
+  LandingCheck lc;
+  SearchParams sp;
+  sp.radius = 1.0;
+  sp.step = 0.25;
+  auto r = search_landing_spot(lc, scans, O, 0.2, V2(3, 1), 1.0, {}, sp);
+  int compared = 0;
+  for (auto& k : r.cands) {
+    if (!k.evaluated) continue;
+    LandingCheck raw;
+    auto [ok, st] = raw.evaluate_scans(scans, k.spot, 1.0, k.yaw);
+    EXPECT_EQ(ok, k.clear) << k.spot.transpose();
+    EXPECT_EQ(st.value("reason", ""), k.reason);
+    ++compared;
+  }
+  EXPECT_GT(compared, 3);
+  // under the sensor the near-range drop leaves the disc unobserved
+  bool under_unobserved = false;
+  for (auto& k : r.cands)
+    if (k.dist < 1e-9 && k.evaluated) under_unobserved = k.reason.rfind("not observed", 0) == 0;
+  EXPECT_TRUE(under_unobserved);
+}
+
+TEST(Search, Markers) {
+  Cloud c = floor_with_boxes({V2(0, 0)});
+  LandingCheck lc;
+  auto r = search_landing_spot(lc, scans_of({c}), O, 0.0, V2(4, 0), 1.0, {}, SearchParams());
+  ASSERT_TRUE(r.best);
+  auto arr = build_search_markers(r, lc, O, 2.0, "world", ros::Time(0), -1.0);
+  ASSERT_FALSE(arr.markers.empty());
+  EXPECT_EQ(arr.markers[0].action, Marker::DELETEALL);
+  auto m = ns(arr);
+  for (const char* k : {"land_search_candidates", "land_search_radius", "land_search_choice", "land_search_choice_footprint",
+                        "land_search_label"})
+    EXPECT_TRUE(m.count(k)) << k;
+  EXPECT_EQ(m["land_search_candidates"].points.size(), r.cands.size());
+  EXPECT_EQ(m["land_search_candidates"].colors.size(), r.cands.size());
+  EXPECT_EQ(m["land_search_choice"].action, Marker::ADD);
+  EXPECT_NEAR(m["land_search_choice"].scale.x, 2 * lc.radius, 1e-9);
+  EXPECT_NEAR(m["land_search_choice"].pose.position.z, 0.0, 0.05);   // on the floor, not the fallback
+  EXPECT_EQ(m["land_search_label"].text.rfind("LANDING SPOT", 0), 0u) << m["land_search_label"].text;
+  SearchResult none;
+  auto m2 = ns(build_search_markers(none, lc, O, 2.0, "world", ros::Time(0), -1.0));
+  EXPECT_EQ(m2["land_search_choice"].action, Marker::DELETE);
+  EXPECT_EQ(m2["land_search_label"].text.rfind("NO LANDING SPOT", 0), 0u);
 }
 
 // ---- real data
