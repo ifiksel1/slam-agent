@@ -12,8 +12,12 @@
 // Quaternions are [x, y, z, w]; angles in radians.
 #pragma once
 
+#include <cstdint>
+#include <deque>
+#include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Core>
@@ -293,6 +297,90 @@ double yaw_max_step(double rate_max, double dt, double dt_max);
 // leg from its committed trajectory, not from the odometry, so a hold at the goal starts the next plan
 // where the vehicle is (a hold 0.5 m short would make the next plan start 0.5 m away from it).
 Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, double goal_max);
+
+// The waypoint hold's point, clearance-checked (L2 5a, SITL lf16, 2026-11-02: a pillar that appeared 0.19 m from
+// the leg's goal; SUPER shifted its goal away from it and stopped clear, but the hold flew to the executive's raw
+// goal and the FC centre came to 0.08 m from the pillar). In order, the first candidate within goal_max of the
+// vehicle that `clear` accepts: the executive's goal ("goal"), the end of SUPER's committed trajectory, its
+// reached or shifted goal ("planner_goal"); else the vehicle ("vehicle"). clear: none checks nothing (the old
+// waypoint_hold_point).
+struct HoldPoint {
+  Vec3 p;
+  std::string from;   // "goal" | "planner_goal" | "vehicle"
+};
+HoldPoint waypoint_hold_point(const std::optional<Vec3>& goal_fc, const std::optional<Vec3>& planner_goal_fc,
+                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear);
+
+// ---- obstacles on the path ahead (L2 5a, SITL f25r, 2026-11-02) ---------------------------------------------
+// SUPER committed a trajectory 0.01 s before a pillar reached its map; every replan after that failed, and it
+// played the committed trajectory straight through the pillar (it never checks that trajectory against the map:
+// its EMER_STOP is never reached), with the bridge streaming it. The bridge's own check, defence in depth:
+
+// The occupied voxels of the latest `scans` scans (/planner/cloud, planner frame), each scan's points farther
+// than self_r from the vehicle at that scan only (the robot's own body; FAST-LIO's blind is 0.4 m on the robot).
+class ObstacleVoxels {
+ public:
+  explicit ObstacleVoxels(double voxel = 0.1, int scans = 3, double self_r = 0.4);
+  // a scan at time t, the vehicle (planner frame) then (none: no self filter); add() its points; end_scan()
+  void begin_scan(double t, const std::optional<Vec3>& vehicle);
+  void add(double x, double y, double z);
+  void end_scan();
+  // the occupied voxels whose centre lies within r of p
+  int count_within(const Vec3& p, double r) const;
+  std::optional<double> newest() const { return scans_.empty() ? std::nullopt : std::optional<double>(scans_.back().first); }
+  size_t size() const { return occ_.size(); }
+  double voxel, self_r;
+  int scans;
+
+ private:
+  static int64_t key(int64_t i, int64_t j, int64_t k);
+  std::deque<std::pair<double, std::vector<int64_t>>> scans_;   // each kept scan's voxels
+  std::unordered_map<int64_t, int> occ_;                         // voxel -> kept scans with it
+  std::vector<int64_t> cur_;
+  std::optional<Vec3> veh_;
+  double t_cur_ = 0.0;
+  bool open_ = false;
+};
+
+// SUPER's committed position trajectory (quadrotor_msgs/PolynomialTrajectory on /planning_cmd/poly_traj, which
+// SUPER publishes with each successful plan): pieces of `order`, coefficients highest power first (SUPER's
+// Piece::getCoeffMat rows), the start time t0 (s, ROS time, SUPER's clock).
+struct PolyTraj {
+  double t0 = 0.0;
+  int order = 7;
+  std::vector<double> dur;
+  std::vector<double> cx, cy, cz;   // (order + 1) per piece
+  bool empty() const { return dur.empty(); }
+  double duration() const;
+  Vec3 pos(double t) const;         // at absolute time t, clamped to the trajectory
+  Vec3 end() const { return pos(t0 + duration()); }
+};
+
+// The positions the vehicle is about to be sent toward: SUPER's committed trajectory from t_from to t_to
+// (absolute, every dt; none: left out) and the straight segment from the vehicle to the target being streamed
+// (every step m), less those within skip of the vehicle: the points round where the vehicle already is (just
+// beyond the self filter) are not a path ahead to stop for (Gate L2 oxg3: a single tick, 2 voxels at the vehicle,
+// held a tight pass 4.2 s).
+std::vector<Vec3> path_samples(const std::optional<PolyTraj>& traj, double t_from, double t_to, double dt,
+                               const Vec3& vehicle, const Vec3& target, double step, double skip = 0.0);
+
+// HOLD "path_blocked" (latched): the first sample with at least min_voxels occupied voxels within r is blocked.
+// It clears when the path checks clear for release_s without a break and, once SUPER's trajectories are seen,
+// on a trajectory received after the block began (SUPER's new plan; the blocked one is never resumed).
+class PathGuard {
+ public:
+  explicit PathGuard(double r = 0.30, int min_voxels = 2, double release_s = 0.3);
+  // -> blocked. traj_rcv: when the trajectory in use arrived (none: no trajectory seen)
+  bool update(double now, const ObstacleVoxels& obs, const std::vector<Vec3>& samples, std::optional<double> traj_rcv);
+  void reset();
+  double r, release_s;
+  int min_voxels;
+  bool blocked = false;
+  std::optional<double> since;      // the block began
+  std::optional<Vec3> at;           // the first blocked sample (planner frame), from the last check that found one
+  int voxels = 0;                   // occupied voxels within r of it
+  std::optional<double> clear_since;
+};
 
 // The departure from a waypoint hold (Gate L2 b5). When the executive clears the waypoint yaw and sends
 // the next goal, SUPER's command is first still its hover round the old goal, then a new plan that

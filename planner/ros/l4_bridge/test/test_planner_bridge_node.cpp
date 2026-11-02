@@ -21,6 +21,7 @@
 #include <mavros_msgs/PositionTarget.h>
 #include <mavros_msgs/State.h>
 #include <nav_msgs/Odometry.h>
+#include <quadrotor_msgs/PolynomialTrajectory.h>
 #include <quadrotor_msgs/PositionCommand.h>
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -75,7 +76,53 @@ struct Feed {
   std::optional<Vec3> cmd_pos;
   Vec3 cmd_vel = Vec3(0.4, 0.0, 0.0);
   ros::Publisher* cmd_pub = nullptr;
+  uint8_t flag = 0;                                  // the command's trajectory_flag (3, 4: the track planner's stop)
+  const sensor_msgs::PointCloud2* cloud = nullptr;   // published at 10 Hz (raw frame, /cloud_registered)
 };
+
+// a cloud of planner-frame points as FAST-LIO's /cloud_registered (raw frame, float32 x y z)
+sensor_msgs::PointCloud2 raw_cloud(const std::vector<Vec3>& planner_pts) {
+  sensor_msgs::PointCloud2 c;
+  c.header.frame_id = "camera_init";
+  c.height = 1;
+  c.width = uint32_t(planner_pts.size());
+  const char* names[3] = {"x", "y", "z"};
+  for (int k = 0; k < 3; ++k) {
+    sensor_msgs::PointField f;
+    f.name = names[k];
+    f.offset = uint32_t(4 * k);
+    f.datatype = sensor_msgs::PointField::FLOAT32;
+    f.count = 1;
+    c.fields.push_back(f);
+  }
+  c.point_step = 12;
+  c.row_step = 12 * c.width;
+  c.is_dense = true;
+  c.data.resize(c.row_step);
+  for (size_t i = 0; i < planner_pts.size(); ++i) {
+    const Vec3 r = position_matrix().transpose() * planner_pts[i];
+    const float xyz[3] = {float(r[0]), float(r[1]), float(r[2])};
+    std::memcpy(c.data.data() + 12 * i, xyz, 12);
+  }
+  return c;
+}
+
+// SUPER's committed trajectory: one straight piece from p0 at velocity v for dur s, starting now
+quadrotor_msgs::PolynomialTrajectory line_traj(const Vec3& p0, const Vec3& v, double dur) {
+  quadrotor_msgs::PolynomialTrajectory t;
+  t.header.stamp = ros::Time::now();
+  t.type = quadrotor_msgs::PolynomialTrajectory::POSITION_TRAJ | quadrotor_msgs::PolynomialTrajectory::HEART_BEAT;
+  t.piece_num_pos = 1;
+  t.order_pos = 7;
+  t.start_WT_pos = ros::Time::now();
+  t.time_pos = {dur};
+  for (int k = 0; k < 8; ++k) {
+    t.coef_pos_x.push_back(k == 6 ? v[0] : k == 7 ? p0[0] : 0.0);
+    t.coef_pos_y.push_back(k == 6 ? v[1] : k == 7 ? p0[1] : 0.0);
+    t.coef_pos_z.push_back(k == 6 ? v[2] : k == 7 ? p0[2] : 0.0);
+  }
+  return t;
+}
 
 }  // namespace
 
@@ -89,7 +136,8 @@ class Node : public ::testing::Test {
   static inline std::string status;
   static inline std::optional<int> mode_code;
   static inline std::optional<std::string> mode_out;
-  static inline ros::Publisher pub_cloud, pub_odom, pub_vis, pub_fc, pub_state, pub_cmd, pub_drive, pub_enable, pub_mode;
+  static inline ros::Publisher pub_cloud, pub_odom, pub_vis, pub_fc, pub_state, pub_cmd, pub_drive, pub_enable, pub_mode,
+      pub_traj;
   static inline std::vector<ros::Subscriber> subs;
 
   static void SetUpTestSuite() {
@@ -119,6 +167,7 @@ class Node : public ::testing::Test {
     pub_drive = nh->advertise<quadrotor_msgs::PositionCommand>("/track_planner/pos_cmd", 50);
     pub_enable = nh->advertise<std_msgs::Bool>("/planner_bridge/enable", 1, true);
     pub_mode = nh->advertise<std_msgs::String>("/planner_bridge/set_mode", 1, true);
+    pub_traj = nh->advertise<quadrotor_msgs::PolynomialTrajectory>("/planning_cmd/poly_traj", 5);
     spinner = new ros::AsyncSpinner(2);
     spinner->start();
     wsleep(3.0);
@@ -190,8 +239,10 @@ class Node : public ::testing::Test {
         c.velocity.z = f.cmd_vel[2];
         c.acceleration.x = 0.2;
         c.yaw = 0.1;
+        c.trajectory_flag = f.flag;
         (f.cmd_pub ? f.cmd_pub : &pub_cmd)->publish(c);
       }
+      if (f.cloud && k % 10 == 0) pub_cloud.publish(*f.cloud);
       ++k;
       wsleep(0.01);
     }
@@ -370,8 +421,13 @@ TEST_F(Node, T9a_DriveModeTakesOnlyTheTrackPlanner) {
   }
   const double t0 = wall();
   feed(0.4, f);
-  // a hold on the ground sends nothing: Rover Guided stops at the last target it had
-  EXPECT_EQ(last(t0 + 0.1).size(), 0u);
+  // a hold on the ground stops the rover: a zero-speed, zero-turn-rate target (mask 1479, no position) at the
+  // full rate (owner task 2026-11-02; before, nothing, and Rover drove on to its last target)
+  {
+    auto held = last(t0 + 0.1);
+    EXPECT_GT(held.size(), 10u);
+    for (const auto& h : held) EXPECT_TRUE(h.type_mask == 1479 && h.velocity.x == 0.0 && h.velocity.y == 0.0);
+  }
   // the track planner's target 3 m ahead: a target drive_lookahead (2.5 m) toward it
   const double t1 = wall();
   Feed d;
@@ -473,7 +529,7 @@ TEST_F(Node, T9d_FcPoseStaleHoldsAtTheLastGoodPosition) {
   EXPECT_FALSE(o2.back().velocity.x == 0.0 && o2.back().velocity.y == 0.0);
 }
 
-TEST_F(Node, T9e_FcPoseStaleInDriveModeSendsNothing) {
+TEST_F(Node, T9e_FcPoseStaleInDriveModeStops) {
   const Vec3 ground(1.0, 0.5, 0.2);
   Feed carrot;
   carrot.p_planner = ground;
@@ -487,7 +543,13 @@ TEST_F(Node, T9e_FcPoseStaleInDriveModeSendsNothing) {
   Feed nofc = carrot;
   nofc.fc = false;
   feed(0.8, nofc);
-  EXPECT_EQ(last(t0 + 0.4).size(), 0u);   // Rover Guided brakes at its last target
+  {
+    // the drive stop (no position in it: the stale FC pose is not needed), at the heading the rover had
+    auto held = last(t0 + 0.4);
+    EXPECT_GT(held.size(), 10u);
+    for (const auto& h : held) EXPECT_TRUE(h.type_mask == 1479 && h.velocity.x == 0.0 && h.velocity.y == 0.0);
+    for (const auto& h : held) EXPECT_EQ(h.yaw_rate, 0.0f);
+  }
   auto st = status_json();
   EXPECT_EQ(st["state"], "HOLD");
   EXPECT_EQ(st["reason"], "fc_pose_stale");
@@ -505,7 +567,7 @@ TEST_F(Node, T9e_FcPoseStaleInDriveModeSendsNothing) {
 TEST_F(Node, T9f_DriveReverseThenHoldStops) {
   // a dead end: the track planner's command with its velocity against its yaw backs up to the end point:
   // a Rover Guided velocity + heading target (mask 2503: no position), ENU velocity (0, -speed) = NED vx
-  // -speed (Rover: reverse), the yaw held; a HOLD sends a zero-speed one
+  // -speed (Rover: reverse), the yaw held; a HOLD sends the drive stop (mask 1479)
   const Vec3 ground(1.0, 0.5, 0.2);
   Feed back;
   back.p_planner = ground;
@@ -531,7 +593,7 @@ TEST_F(Node, T9f_DriveReverseThenHoldStops) {
   feed(0.8, stop);   // the planner stops: HOLD
   auto held = last(t1 + 0.5);
   EXPECT_GT(held.size(), 5u);
-  for (const auto& h : held) EXPECT_TRUE(h.type_mask == 2503 && h.velocity.y == 0.0);
+  for (const auto& h : held) EXPECT_TRUE(h.type_mask == 1479 && h.velocity.y == 0.0);
   EXPECT_EQ(status_json()["state"], "HOLD");
   // a forward target afterwards: position targets again, no more reverse stops
   const double t2 = wall();
@@ -546,6 +608,91 @@ TEST_F(Node, T9f_DriveReverseThenHoldStops) {
   EXPECT_EQ(o.back().type_mask, 2552);
   set_mode("flight");
   feed(0.6);
+}
+
+TEST_F(Node, T9f2_TrackPlannerStopStopsAtOnceAndResumes) {
+  // the track planner's stop (NO_PATH: trajectory_flag 4; REACHED: 3) stops the rover within a tick or two, not
+  // after the ~0.3 s planner_timeout; its next ordinary command resumes the drive targets
+  const Vec3 ground(1.0, 0.5, 0.2);
+  Feed carrot;
+  carrot.p_planner = ground;
+  carrot.cmd_pos = Vec3(ground + Vec3(2.0, 0.0, 0.0));
+  carrot.cmd_vel = Vec3::Zero();
+  carrot.cmd_pub = &pub_drive;
+  set_mode("drive");
+  feed(0.8, carrot);
+  EXPECT_TRUE(has("\"state\": \"STREAM\""));
+  for (uint8_t flag : {uint8_t(4), uint8_t(3)}) {
+    Feed stop = carrot;
+    stop.flag = flag;
+    stop.cmd_pos = ground;
+    const double t0 = wall();
+    feed(0.6, stop);
+    auto out = since_t(t0);
+    ASSERT_FALSE(out.empty());
+    double t_first = -1;
+    for (const auto& [t, m] : out)
+      if (m.type_mask == 1479) {
+        t_first = t;
+        break;
+      }
+    EXPECT_GE(t_first, t0);
+    EXPECT_LT(t_first - t0, 0.12) << "stop after " << t_first - t0 << " s";
+    for (const auto& [t, m] : out)
+      if (t > t_first) EXPECT_TRUE(m.type_mask == 1479 && m.velocity.x == 0.0 && m.velocity.y == 0.0);
+    auto st = status_json();
+    EXPECT_EQ(st["state"], "HOLD");
+    EXPECT_EQ(st["reason"], flag == 4 ? "track planner stop (NO_PATH)" : "track planner stop (REACHED)");
+    const double t1 = wall();
+    feed(0.5, carrot);   // a path again
+    auto o = last(t1 + 0.2);
+    ASSERT_FALSE(o.empty());
+    EXPECT_EQ(o.back().type_mask, 2552);
+  }
+  set_mode("flight");
+  feed(0.6);
+}
+
+TEST_F(Node, T9f3_PathBlockedHoldsUntilANewClearPlan) {
+  // flight (L2 5a, f25r): SUPER's committed trajectory runs through a wall that the latest scans show 1.5 m ahead:
+  // HOLD path_blocked, a zero-velocity target at the vehicle; a new trajectory away from it releases the hold
+  const Vec3 a(1.0, 0.5, 1.2);
+  std::vector<Vec3> pts;
+  for (double y = -0.5; y <= 1.5; y += 0.05)
+    for (double z = 0.2; z <= 2.2; z += 0.05) pts.push_back(Vec3(a[0] + 1.5, y, z));
+  const auto cloud = raw_cloud(pts);
+  Feed f;
+  f.p_planner = a;
+  f.cloud = &cloud;
+  feed(0.6, f);
+  EXPECT_TRUE(has("\"state\": \"STREAM\""));   // the wall alone: SUPER's command 0.3 m ahead is clear
+  pub_traj.publish(line_traj(a, Vec3(1.0, 0.0, 0.0), 3.0));   // through the wall
+  const double t0 = wall();
+  feed(0.6, f);
+  auto st = status_json();
+  EXPECT_EQ(st["state"], "HOLD");
+  EXPECT_EQ(st["reason"], "path_blocked");
+  EXPECT_TRUE(st["path_block"]["blocked"].get<bool>());
+  EXPECT_FALSE(st["slam_hold"].get<bool>());
+  auto held = last(t0 + 0.2);
+  EXPECT_GT(held.size(), 10u);
+  for (const auto& m : held) {
+    EXPECT_EQ(m.type_mask, 2048);
+    EXPECT_TRUE(zero_vel(m));
+    near_xyz(m.position, ANCHOR.pos(a));
+  }
+  // the same trajectory sent again (SUPER's replans fail, its committed one stays): still blocked
+  pub_traj.publish(line_traj(a, Vec3(1.0, 0.0, 0.0), 3.0));
+  feed(0.6, f);
+  EXPECT_EQ(status_json()["reason"], "path_blocked");
+  // a new plan sideways, clear of the wall: released after path_block_release_s
+  pub_traj.publish(line_traj(a, Vec3(0.0, -1.0, 0.0), 3.0));
+  feed(0.8, f);
+  st = status_json();
+  EXPECT_EQ(st["state"], "STREAM");
+  EXPECT_FALSE(st["path_block"]["blocked"].get<bool>());
+  EXPECT_EQ(st["path_block"]["holds"], 1);
+  EXPECT_LT(st["path_block"]["check_ms_max"].get<double>(), 5.0);
 }
 
 TEST_F(Node, T9g_PlannerDiesInFlightHoldsAndNeverResumes) {
@@ -614,8 +761,8 @@ TEST_F(Node, T9g_PlannerDiesInFlightHoldsAndNeverResumes) {
 }
 
 TEST_F(Node, T9h_PlannerDiesWhileDrivingStopsAtOnce) {
-  // the track planner (10 Hz) in its own process, killed -9 mid-drive: a zero-speed velocity + heading
-  // target (mask 2503) at the rover's own heading, streamed at the full rate, never the run-out position
+  // the track planner (10 Hz) in its own process, killed -9 mid-drive: the drive stop (zero speed, zero turn
+  // rate, mask 1479), streamed at the full rate, never the run-out position
   // target again
   const Vec3 ground(1.0, 0.5, 0.2);
   Feed quiet;
@@ -642,7 +789,7 @@ TEST_F(Node, T9h_PlannerDiesWhileDrivingStopsAtOnce) {
   EXPECT_EQ(st["mode"], "drive");
   std::optional<double> first_stop;
   for (const auto& [t, m] : since_t(t_kill))
-    if (m.type_mask == 2503) {
+    if (m.type_mask == 1479) {
       first_stop = t;
       break;
     }
@@ -651,17 +798,17 @@ TEST_F(Node, T9h_PlannerDiesWhileDrivingStopsAtOnce) {
   auto after = last(*first_stop);
   EXPECT_GT(after.size(), 30u);           // streamed, not a single message
   for (const auto& m : after) {
-    EXPECT_EQ(m.type_mask, 2503);         // never the run-out position target again
+    EXPECT_EQ(m.type_mask, 1479);         // never the run-out position target again
     EXPECT_EQ(m.velocity.x, 0.0);
     EXPECT_EQ(m.velocity.y, 0.0);
-    EXPECT_NEAR(m.yaw, ANCHOR.psi, 1e-3); // the rover's heading, not the carrot's
+    EXPECT_EQ(m.yaw_rate, 0.0f);          // no turn: not toward the carrot
   }
   // the track planner comes back: still stopped
   trk = start_planner("fake_track", "/track_planner/pos_cmd", ground + Vec3(2.0, 0.0, 0.0), Vec3::Zero(), 10);
   const double t1 = wall();
   feed(2.0, quiet);
   EXPECT_EQ(status_json()["reason"], "planner_dead");
-  for (const auto& m : last(t1)) EXPECT_TRUE(m.type_mask == 2503 && m.velocity.y == 0.0);
+  for (const auto& m : last(t1)) EXPECT_TRUE(m.type_mask == 1479 && m.velocity.y == 0.0);
   kill9(trk);
   set_mode("flight");
   new_leg_with_this_node_as_planner();

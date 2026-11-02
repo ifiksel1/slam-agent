@@ -509,6 +509,76 @@ TEST(Synthetic, MemoryHoldsWallFromAfarNotPersonBeside) {
   EXPECT_TRUE(held && person_gone && out.ok && out.length > 4.8) << held << person_gone << " " << out.length;
 }
 
+// the newest observation wins (L2 5b, SITL f13r/lf17, 2026-11-02): a box that appears in a cell the scans saw
+// through for 5 s is an obstacle with the first scan that hits it. The decayed counts alone (seen through ~25x,
+// hit once) cleared it as "moved" and the plan went straight through it
+namespace {
+Cloud box_(double cx, double cy, double sx, double sy, double h) {
+  return cat({wall(cx - sx / 2, cy - sy / 2, cx + sx / 2, cy - sy / 2, 0.0, h), wall(cx + sx / 2, cy - sy / 2, cx + sx / 2, cy + sy / 2, 0.0, h),
+              wall(cx + sx / 2, cy + sy / 2, cx - sx / 2, cy + sy / 2, 0.0, h), wall(cx - sx / 2, cy + sy / 2, cx - sx / 2, cy - sy / 2, 0.0, h)});
+}
+// a box appearing at (0, 1.5) after 5 s of scans seeing through it; mem_hit_hold < 0: the old rule
+std::pair<bool, tc::PlanResult> box_appears(double hit_hold) {
+  tc::LiveWindow lw(tc::live_config(), 3.0);
+  lw.mem_hit_hold = hit_hold;
+  const Eigen::Vector3d s(0, 0, 0.08);
+  Cloud scene = cat({floor_(-3, 3, -1, 5), wall(-2.5, 4.0, 2.5, 4.0)});
+  for (double t : tc::arange(0.0, 5.0, 0.2)) {
+    lw.add_scan(t, F(scene), s);
+    lw.plan(V2(0, 0), V2(0, 3));
+  }
+  lw.add_scan(5.0, F(cat({scene, box_(0.0, 1.5, 0.5, 0.5, 1.2)})), s);
+  tc::PlanResult out = lw.plan(V2(0, 0), V2(0, 3));
+  auto c = out.hg->cell(V2(0.0, 1.27));   // the box's near face
+  return {bool(out.hg->occ[out.hg->idx(c.first, c.second)]), out};
+}
+}  // namespace
+
+TEST(NewestWins, BoxAppearingInACellLongSeenFreeIsAnObstacleAtOnce) {
+  auto [occ_old, old] = box_appears(-1.0);
+  auto [occ, out] = box_appears(0.3);
+  const auto cfg = tc::live_config();
+  auto obs = band_xy(box_(0.0, 1.5, 0.5, 0.5, 1.2), cfg);
+  auto fc = out.ok ? frame_clear(out.path, obs, cfg) : std::make_pair(true, 0.0);
+  // the old rule cleared the box (the test exercises the case); now it is occupied and the plan, if any, keeps
+  // the frame clear of it
+  EXPECT_TRUE(!occ_old && occ && fc.first) << "old occ " << occ_old << " occ " << occ << " ok " << out.ok << " worst "
+                                           << fc.second;
+}
+
+TEST(NewestWins, WalkingPersonClearedBehindHerKeptWhereSheIs) {
+  // 2 s of scans seeing through y = 2, then a person (0.2 m) walks across it at 1 m/s, x -1.25 -> 1.25
+  for (double hold : {-1.0, 0.3}) {
+    tc::LiveWindow lw(tc::live_config(), 3.0);
+    lw.mem_hit_hold = hold;
+    const Eigen::Vector3d s(0, 0, 0.08);
+    Cloud scene = cat({floor_(-3, 3, -1, 5), wall(-2.5, 4.0, 2.5, 4.0)});
+    tc::PlanResult out;
+    for (double t : tc::arange(0.0, 2.0, 0.1)) {
+      lw.add_scan(t, F(scene), s);
+      out = lw.plan(V2(0, 0), V2(0, 3));
+    }
+    double x = -1.25;
+    for (double t : tc::arange(2.0, 4.55, 0.1)) {
+      x = -1.25 + (t - 2.0);
+      lw.add_scan(t, F(cat({scene, box_(x, 2.0, 0.2, 0.2, 1.7)})), s);
+      out = lw.plan(V2(0, 0), V2(0, 3));
+    }
+    auto occ_at = [&](double px, double py) {
+      auto c = out.hg->cell(V2(px, py));
+      return bool(out.hg->occ[out.hg->idx(c.first, c.second)]);
+    };
+    bool trail_cleared = !occ_at(-0.5, 1.95) && !occ_at(0.0, 1.95) && !occ_at(0.5, 1.95);
+    bool here = occ_at(x, 1.92);
+    if (hold < 0) {
+      // the old rule: the person where she stands now, in cells seen through for 2 s, read "moved" (free)
+      EXPECT_FALSE(here) << "old rule: x " << x;
+    } else {
+      EXPECT_TRUE(trail_cleared && here) << "trail cleared " << trail_cleared << " here " << here << " x " << x;
+    }
+  }
+}
+
 // the SITL container mouth (k5/k6, 2026-10-29): the robot stands in a floor gap (no floor in the map)
 // whose nearest seen tile is a lower floor (-0.25) beside it; ahead, past the gap, a tunnel whose floor
 // is 0.15 m above the robot's side. With the per-scan evidence flat at the robot's (stand-in) floor

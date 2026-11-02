@@ -13,7 +13,12 @@
 //                               while pivoting or turning), position + yaw, zero velocity (D4: position
 //                               + yaw, mask 2552). Reversing out of a dead end (l4_track::plan_reverse):
 //                               the FC's end point, a velocity of ~reverse_speed against the yaw, the
-//                               heading held (the bridge's reverse: bridge_core.reverse_speed). Not
+//                               heading held (the bridge's reverse: bridge_core.reverse_speed). The stop
+//                               (owner task 2026-11-02, L2 5b): in NO_PATH and REACHED (with a goal) a command
+//                               at the robot with trajectory_flag ABORT (4, NO_PATH) or COMPLETED (3, REACHED),
+//                               at once on the change and then at 10 Hz: the bridge stops the rover (a
+//                               zero-speed velocity + heading target) instead of waiting ~0.3 s for the
+//                               commands to go stale while Rover drives on to the last run-out target. Not
 //                               SUPER's /planning/pos_cmd: SUPER keeps publishing toward its last goal
 //                               after a landing, and the bridge takes each mode's commands from its own
 //                               planner's topic only
@@ -96,6 +101,9 @@ using tc::V2;
 
 namespace {
 constexpr double MAX_DRIVE_SPEED = 1.0;   // the robot's driving speed cap, m/s (owner 2026-10-29)
+// the stop's trajectory_flag (quadrotor_msgs PositionCommand TRAJECTORY_STATUS_COMPLETED, ..._ABORT): the planner
+// bridge's drive stop (planner_bridge_node.cpp DRIVE_STOP_*)
+constexpr uint8_t STOP_REACHED = 3, STOP_NO_PATH = 4;
 
 double getd(ros::NodeHandle& nh, const std::string& name, double def) {
   double v = def;
@@ -225,6 +233,9 @@ class TrackPlanner {
     win_ = std::make_unique<tc::LiveWindow>(cfg_, getd(pnh_, "window_s", 3.0), getd(pnh_, "chunk_s", 0.5), 2,
                                             std::nullopt, getd(pnh_, "mem_tau", 10.0), getd(pnh_, "mem_hits", 1.5),
                                             getd(pnh_, "mem_clear_ratio", 1.5));
+    // the newest observation wins (L2 5b, 2026-11-02): a cell hit within ~mem_hit_hold s of the newest scan is
+    // never cleared as moved (< 0: off, the decayed counts alone)
+    win_->mem_hit_hold = getd(pnh_, "mem_hit_hold", 0.3);
     accept_ = getd(pnh_, "accept_radius", 0.3);
     std::string cmd_topic;
     pnh_.param<std::string>("cmd_topic", cmd_topic, "/track_planner/pos_cmd");
@@ -368,6 +379,7 @@ class TrackPlanner {
       if (tc::norm2(pos.head<2>() - goal) < accept_) {
         set_path(std::nullopt);
         set_state("REACHED");
+        publish_stop();
         return;
       }
       pivoting = phase_ == "pivot";
@@ -403,7 +415,9 @@ class TrackPlanner {
       // turn over pivot_done needs the circle where it stands: d7 sat 21 s in NO_PATH)
       phase_ = "drive";
       std::string why = out.reason + (out.reverse_reason.empty() ? "" : "; reverse: " + out.reverse_reason);
+      const bool change = state_ != "NO_PATH";
       set_state("NO_PATH", why);
+      if (change) publish_stop();   // at once: the bridge stops the rover now, not ~0.3 s later
       return;
     }
     if (pivoting && route) {
@@ -450,9 +464,28 @@ class TrackPlanner {
     return h;
   }
 
+  // (st_mx_ held) the stop: NO_PATH / REACHED (the bridge's drive stop); a command at the robot, heading held
+  void publish_stop() {
+    if (!odom_ || !goal_) return;
+    quadrotor_msgs::PositionCommand cmd;
+    cmd.header.stamp = ros::Time::now();
+    cmd.header.frame_id = "world";
+    cmd.position.x = odom_->x();
+    cmd.position.y = odom_->y();
+    cmd.position.z = odom_->z();
+    cmd.yaw = yaw_ ? *yaw_ : 0.0;
+    cmd.trajectory_flag = state_ == "REACHED" ? STOP_REACHED : STOP_NO_PATH;
+    pub_cmd_.publish(cmd);
+  }
+
   void stream() {
-    // no command when idle, reached or without a path: the bridge then holds (zero velocity)
+    // no driving command when idle, reached or without a path: in NO_PATH and REACHED the stop (the bridge
+    // stops the rover); idle: nothing (the bridge holds)
     std::lock_guard<std::mutex> l(st_mx_);
+    if (state_ == "NO_PATH" || state_ == "REACHED") {
+      publish_stop();
+      return;
+    }
     if (state_ != "DRIVING" || !cur_.path || !odom_) return;
     V2 p2 = odom_->head<2>();
     V2 c, vel(0, 0);

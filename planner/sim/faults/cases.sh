@@ -30,6 +30,7 @@ GCS=""             # "--gcs": mav_watch is the GCS link
 PARMS="SERIAL3_PROTOCOL 2"
 HOLD=15            # END_HOLD_S
 MAXS=150
+GONE=10            # observe this long after the executive exits (inject.py --gone_hold)
 ACT=()
 case $case_ in
   list) grep -E "^  [a-z_]+\)" $0 | sed 's/).*//'; exit 0 ;;
@@ -47,6 +48,14 @@ case $case_ in
   stale_fly_freeze)    TRIG=$FLY; ACT=('render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;
   stale_drive_stop)    TRIG=$DRV; ACT=('render:{"stale": "stop"}' "sleep:8" 'render:{"stale": "none"}') ;;
   stale_drive_freeze)  TRIG=$DRV; ACT=('render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;
+  # 2b manual: a frozen pose in a manual flight (no executive, no planner bridge): mid fly leg 3 the executive and
+  #   the planner bridge are killed, QRLOITER set (the pilot's mode), and 0.3 s later the pose freezes while
+  #   QRLoiter brakes from ~1 m/s (MAV_CMD_DO_SET_MODE 19: MAVROS's set_mode does not know the QR names). Only the SLAM-to-FC bridge's own detection can act (vision cut, owner 2026-11-02)
+  manual_fly_freeze)   TRIG=$FLY; HOLD=34; MAXS=30   # MAXS: inject.py's pgrep sees its own --action args as the executive
+                       ACT=("pkill:-9 -f '^/ws[^ ]*/lib/l4_executive/mission_executive'"
+                            "shell:rosservice call /mavros/cmd/command \"{command: 176, param1: 1, param2: 19}\""
+                            "pkill:-9 -f '^/ws[^ ]*/lib/l4_bridge/planner_bridge'" "sleep:0.3"
+                            'render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;
   # 3 SLAM reset: laserMapping restart (2 s gap, new origin) or an instant pose jump (new origin, no gap)
   reset_fly)           TRIG=$FLY; ACT=('render:{"reset": {"gap_s": 2.0}}') ;;
   jump_fly)            TRIG=$FLY; ACT=('render:{"reset": {"gap_s": 0.0}}') ;;
@@ -58,6 +67,13 @@ case $case_ in
   #   box (a person's legs, a crate) 1.5 m ahead while driving
   obst_fly)            TRIG=$FLY; ACT=("box_ahead:2.5:0.6,0.6,3.0:1.5") ;;
   obst_drive)          TRIG=$DRV; ACT=("box_ahead:1.5:0.5,0.5,1.2:0.6") ;;
+  # 5a near: the pillar 1.8 m ahead (its face 1.5 m), mid fly leg 3: SUPER's committed trajectory runs into it
+  #   before its map has it and its replans fail (the f25r path); the bridge's path_blocked must hold
+  obst_fly_near)       TRIG=$FLY; ACT=("box_ahead:1.8:0.6,0.6,3.0:1.5") ;;
+  # no fault: the Gate L2 obstacle course (planner_sim/course/hp_gate_l2.pcd, missions/gate_l2_hp_course.yaml;
+  #   d12/d13/d18): no false path_blocked, the drive stops; clearance: course/clearance.py
+  gate_l2)             MAP=$PS/course/hp_gate_l2.pcd; MISSION=$BASE/planner/missions/gate_l2_hp_course.yaml
+                       TRIG="start"; MAXS=300; ACT=(none) ;;
   # 6 landing spot occupied: a 0.6 m crate on the spot (-6, -9) as the land leg starts its fly-over
   land_occupied)       TRIG="leg_type=fly,leg=5"; ACT=("box_at:-6.0,-9.0,0.3:0.6,0.6,0.6") ;;
   # 7 link loss: the GCS heartbeat (robot's FS_GCS_ENABLE 1, FS_GCS_TIMEOUT 2, FS_ACTION 3) stops;
@@ -80,7 +96,7 @@ hook=$F/hooks/$run.sh
   echo "# $case_ ($run), written by faults/cases.sh"
   [ -n "${HOOK_PRE:-}" ] && echo "$HOOK_PRE   # HOOK_PRE"
   printf 'nohup python3 -u /planner_sim/faults/mav_watch.py %s > /dev/null 2>&1 &   # its record: logs/mav_watch.jsonl\n' "$GCS"
-  printf 'exec python3 -u /planner_sim/faults/inject.py --case %q --trigger %q --end_hold %q --max_s %q' "$case_" "$TRIG" "$HOLD" "$MAXS"
+  printf 'exec python3 -u /planner_sim/faults/inject.py --case %q --trigger %q --end_hold %q --max_s %q --gone_hold %q' "$case_" "$TRIG" "$HOLD" "$MAXS" "$GONE"
   for a in "${ACT[@]}"; do printf ' --action %q' "$a"; done
   echo
 } > $hook
@@ -88,7 +104,7 @@ hook=$F/hooks/$run.sh
 cd $BASE
 RENDER_SCRIPT=/planner_sim/faults/render_fault.py SITL_ARGS="--serial3=tcp:4" EXTRA_PARMS="$PARMS" \
   END_HOLD_S=$HOLD FAULT_HOOK="bash /planner_sim/faults/hooks/$run.sh" \
-  RECORD_EXTRA="/sim/truth /sim_fault/state /sim_fault/cmd /fault/events" \
+  RECORD_EXTRA="/sim/truth /sim_fault/state /sim_fault/cmd /fault/events /planning_cmd/poly_traj /fastlio_mavros_bridge/frozen_status /mavros/rc/out" \
   $PS/closed_loop.sh $run $MAP 0 0 -90.7 $MISSION $CFG 400
 echo "case $case_ in $run:"
 grep -h "SIGALRM" $BASE/runs/$run/logs/sitl_stdout.log 2>/dev/null | head -3 && echo "SITL WATCHDOG RESET: rerun this case"

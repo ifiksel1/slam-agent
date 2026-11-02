@@ -2711,7 +2711,7 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
                 : V2(hi.x() + 10.0, hi.y() + 10.0);
   int nny = int(std::ceil((top.y() - new_lo.y()) / r)), nnx = int(std::ceil((top.x() - new_lo.x()) / r));
   std::vector<float> h(size_t(nny) * nnx, 0.f), m(h.size(), 0.f), w(h.size(), 0.f), u(h.size(), 0.f), lw(h.size(), 0.f);
-  std::vector<double> t(h.size(), 0.0);
+  std::vector<double> t(h.size(), 0.0), th(h.size(), -INF);
   if (have) {
     int di = int(std::nearbyint((lo.y() - new_lo.y()) / r)), dj = int(std::nearbyint((lo.x() - new_lo.x()) / r));
     for (int i = 0; i < ny; ++i)
@@ -2723,6 +2723,7 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
         u[a] = u_[b];
         lw[a] = l_[b];
         t[a] = t_[b];
+        th[a] = th_[b];
       }
   }
   lo = new_lo;
@@ -2734,6 +2735,7 @@ void EvidenceMemory::ensure(const V2& lo_, const V2& hi) {
   u_.swap(u);
   l_.swap(lw);
   t_.swap(t);
+  th_.swap(th);
   have = true;
 }
 
@@ -2761,7 +2763,10 @@ void EvidenceMemory::add(const HeightGrid& hg, const Evidence& ev, double now) {
     l_[a] = float(l_[a] * f);
     t_[a] = now;
   }
-  for (int k : ev.hit) h_[at(k)] += 1.0f;
+  for (int k : ev.hit) {
+    h_[at(k)] += 1.0f;
+    th_[at(k)] = std::max(th_[at(k)], now);
+  }
   for (int k : ev.free) m_[at(k)] += 1.0f;
   for (int k : ev.wall) w_[at(k)] += 1.0f;
   for (int k : ev.under) u_[at(k)] += 1.0f;
@@ -2792,6 +2797,16 @@ void EvidenceMemory::read(const HeightGrid& hg, double now, std::vector<double>&
       w[b] = double(w_[a]) * f;
       u[b] = double(u_[a]) * f;
       l[b] = double(l_[a]) * f;
+    }
+}
+
+void EvidenceMemory::hit_age(const HeightGrid& hg, double now, std::vector<double>& age) {
+  auto [di, dj] = view(hg);
+  age.assign(size_t(hg.ny) * hg.nx, INF);
+  for (int i = 0; i < hg.ny; ++i)
+    for (int j = 0; j < hg.nx; ++j) {
+      const double th = th_[size_t(i + di) * nx + j + dj];
+      if (std::isfinite(th)) age[size_t(i) * hg.nx + j] = now - th;
     }
 }
 
@@ -2898,18 +2913,25 @@ void LiveWindow::correct(HeightGrid& hg) {
     mem->add(eg, ev, sc.t);
   }
   done = recent.back().seq;
-  std::vector<double> h, m, w, u, l;
+  std::vector<double> h, m, w, u, l, hit_age;
   mem->read(hg, now, h, m, w, u, l);
+  if (mem_hit_hold >= 0) mem->hit_age(hg, now, hit_age);
   const bool oh = c.overhang_clear > c.z_lo;
   hg.seen_free.assign(h.size(), 0);
   for (size_t q = 0; q < h.size(); ++q) {
-    bool moved = hg.occ[q] && m[q] >= 1.0 && m[q] > mem_clear_ratio * h[q];
+    // the newest observation wins (L2 5b, 2026-11-02): hit within mem_hit_hold of the newest scan, a cell is
+    // not cleared as moved nor counted seen free, however often it was seen through before. The decayed
+    // counts alone (10 s) kept a box that appeared in a cell seen through for seconds "moved" (free) for
+    // seconds (SITL f13r: the rover drove into it; first NO_PATH 8.9 s later). A person or door that moves
+    // away is still cleared: its old cells are seen through, not hit, by the newest scans
+    const bool hit_now = mem_hit_hold >= 0 && hit_age[q] <= mem_hit_hold + 1e-9;
+    bool moved = hg.occ[q] && m[q] >= 1.0 && m[q] > mem_clear_ratio * h[q] && !hit_now;
     // an overhang: nothing in (z_lo, overhang_clear] here or next to it in the window's points (overhang_ok),
     // and the space beneath seen through lately more often than hit (mem_clear_ratio): passable, not held as
     // a wall from afar either
     bool beneath = oh && hg.overhang_ok[q] && u[q] >= c.overhang_seen && u[q] > mem_clear_ratio * l[q];
     // seen through more than hit lately (a reverse may use it); under an overhang, seen through beneath it
-    hg.seen_free[q] = (m[q] >= 1.0 && m[q] > h[q]) || (beneath && (hg.seen_up[q] || h[q] >= 1.0));
+    hg.seen_free[q] = (m[q] >= 1.0 && m[q] > h[q] && !hit_now) || (beneath && (hg.seen_up[q] || h[q] >= 1.0));
     bool held = w[q] >= mem_hits && h[q] > m[q] && !beneath;
     hg.occ[q] = (hg.occ[q] && !moved && !beneath) || held;
   }

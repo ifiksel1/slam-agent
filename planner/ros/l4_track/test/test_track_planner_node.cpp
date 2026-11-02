@@ -103,14 +103,20 @@ TEST(TrackPlannerNode, PlansStreamsAndReaches) {
   EXPECT_LE(c.position.x, 3.0 + 1e-6);
   EXPECT_LE(c.position.x - (-0.193), 2.1 * 1.0 + 1e-6);
   EXPECT_NEAR(c.yaw, 0.0, 1e-6);
-  // at the goal: REACHED, no more commands
+  // at the goal: REACHED, then only the stop (trajectory_flag COMPLETED, 3: the bridge's drive stop) at ~10 Hz,
+  // at the robot, no more driving commands
   po.publish(odom(2.9, 0.0));
   ASSERT_TRUE(wait_for([] { return statuses.back()["state"] == "REACHED"; }, 5.0));
   ros::WallDuration(0.3).sleep();
   ros::spinOnce();
   size_t n = cmds.size();
-  wait_for([] { return false; }, 0.5);
-  EXPECT_EQ(cmds.size(), n);
+  wait_for([] { return false; }, 1.0);
+  ASSERT_GE(cmds.size(), n + 5);
+  for (size_t k = n; k < cmds.size(); ++k) {
+    EXPECT_EQ(cmds[k].trajectory_flag, 3);
+    EXPECT_NEAR(cmds[k].position.x, 2.9, 1e-6);
+    EXPECT_EQ(cmds[k].velocity.x, 0.0);
+  }
 }
 
 int main(int argc, char** argv) {

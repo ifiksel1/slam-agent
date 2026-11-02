@@ -1,3 +1,6 @@
+SUPERSEDED 2026-11-02: applied in a different form, airborne-gated (owner decision 2026-11-02), in
+overrides/FAST-LIO/src/fastlio_mavros_bridge.py (FrozenPoseCheck / AirborneGate / FrozenVisionCut). Do not apply this diff.
+
 Proposed (NOT deployed, 2026-10-30): frozen-pose check in the SLAM-to-FC bridge
 (overrides/FAST-LIO/src/fastlio_mavros_bridge.py, the node that publishes /mavros/vision_pose/pose).
 

@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <random>
 
@@ -845,6 +847,219 @@ TEST(TurnSlow, ReplayedCornerStaysOnThePathCappedChaseCutsIt) {
   }
   EXPECT_LT(worst_replay, 0.01);   // on the path (interpolation between two 10 ms samples at the corner)
   EXPECT_GT(worst_chase, 0.05);
+}
+
+// ---- the path ahead (L2 5a, SITL f25r / lf16, 2026-11-02) -------------------------------------------------
+
+namespace {
+// the surface of an upright box (planner frame), every `step`
+std::vector<Vec3> box_surface(const Vec3& lo, const Vec3& hi, double step = 0.05) {
+  std::vector<Vec3> out;
+  for (double x = lo[0]; x <= hi[0] + 1e-9; x += step)
+    for (double y = lo[1]; y <= hi[1] + 1e-9; y += step)
+      for (double z = lo[2]; z <= hi[2] + 1e-9; z += step) {
+        const bool face = std::abs(x - lo[0]) < 1e-9 || std::abs(x - hi[0]) < step - 1e-9 || std::abs(y - lo[1]) < 1e-9 ||
+                          std::abs(y - hi[1]) < step - 1e-9 || std::abs(z - hi[2]) < step - 1e-9;
+        if (face) out.push_back(Vec3(x, y, z));
+      }
+  return out;
+}
+void scan(ObstacleVoxels& o, double t, const std::vector<Vec3>& pts, const std::optional<Vec3>& vehicle) {
+  o.begin_scan(t, vehicle);
+  for (auto& p : pts) o.add(p[0], p[1], p[2]);
+  o.end_scan();
+}
+// a straight trajectory: one piece of order 7, from p0 at velocity v for dur s, starting at t0
+PolyTraj line(double t0, const Vec3& p0, const Vec3& v, double dur) {
+  PolyTraj t;
+  t.t0 = t0;
+  t.dur = {dur};
+  for (int k = 0; k < 8; ++k) {
+    t.cx.push_back(k == 6 ? v[0] : k == 7 ? p0[0] : 0.0);
+    t.cy.push_back(k == 6 ? v[1] : k == 7 ? p0[1] : 0.0);
+    t.cz.push_back(k == 6 ? v[2] : k == 7 ? p0[2] : 0.0);
+  }
+  return t;
+}
+}  // namespace
+
+TEST(PathBlock, VoxelsKeepTheLatestScansButNotTheRobotsOwnBody) {
+  ObstacleVoxels o(0.1, 3, 0.4);
+  const Vec3 veh(0.0, 0.0, 1.0);
+  // a point 0.3 m from the vehicle (its own frame, a prop guard) is left out; one 1.0 m away is kept
+  scan(o, 0.0, {Vec3(0.3, 0.0, 1.0), Vec3(1.0, 0.0, 1.0)}, veh);
+  EXPECT_EQ(o.count_within(Vec3(0.3, 0.0, 1.0), 0.15), 0);
+  EXPECT_EQ(o.count_within(Vec3(1.0, 0.0, 1.0), 0.15), 1);
+  EXPECT_EQ(o.count_within(Vec3(1.0, 0.0, 1.0), 0.0), 0);
+  // three more scans without it: the oldest drops out
+  for (double t : {0.1, 0.2}) scan(o, t, {Vec3(5.0, 5.0, 1.0)}, veh);
+  EXPECT_EQ(o.count_within(Vec3(1.0, 0.0, 1.0), 0.15), 1);
+  scan(o, 0.3, {Vec3(5.0, 5.0, 1.0)}, veh);
+  EXPECT_EQ(o.count_within(Vec3(1.0, 0.0, 1.0), 0.15), 0);
+  EXPECT_EQ(o.size(), 1u);
+  EXPECT_NEAR(*o.newest(), 0.3, 1e-12);
+  // negative coordinates land in their own voxels
+  scan(o, 0.4, {Vec3(-1.05, -2.05, -0.05)}, std::nullopt);
+  EXPECT_EQ(o.count_within(Vec3(-1.05, -2.05, -0.05), 0.1), 1);
+}
+
+TEST(PathBlock, PolyTrajEvaluatesSupersPiecesHighestPowerFirst) {
+  // x(t) = 1 + 2 t + 3 t^2 on piece 0 (1 s), then x = 6 + 8 t on piece 1 (0.5 s)
+  PolyTraj t;
+  t.t0 = 10.0;
+  t.dur = {1.0, 0.5};
+  t.cx = {0, 0, 0, 0, 0, 3, 2, 1, 0, 0, 0, 0, 0, 0, 8, 6};
+  t.cy.assign(16, 0.0);
+  t.cz.assign(16, 0.0);
+  t.cz[7] = 1.2;
+  t.cz[15] = 1.2;
+  EXPECT_NEAR(t.duration(), 1.5, 1e-12);
+  EXPECT_NEAR(t.pos(10.5)[0], 1 + 1 + 0.75, 1e-12);
+  EXPECT_NEAR(t.pos(11.0)[0], 6.0, 1e-12);
+  EXPECT_NEAR(t.pos(11.25)[0], 8.0, 1e-12);
+  EXPECT_NEAR(t.pos(9.0)[0], 1.0, 1e-12);    // before: the start
+  EXPECT_NEAR(t.pos(20.0)[0], 10.0, 1e-12);  // after: the end
+  EXPECT_NEAR(t.end()[0], 10.0, 1e-12);
+  EXPECT_NEAR(t.pos(10.7)[2], 1.2, 1e-12);
+}
+
+TEST(PathBlock, APillarOnTheCommittedTrajectoryBlocksATightPassDoesNot) {
+  const Vec3 veh(0.0, 0.0, 1.0);
+  // f25r: a 0.6 x 0.6 x 3 m pillar 1.4 m ahead on SUPER's straight committed trajectory (1 m/s; the 1.5 s
+  // horizon reaches 1.5 m ahead: a pillar appearing farther ahead is caught as the vehicle closes in)
+  const auto pillar = box_surface(Vec3(1.4, -0.3, 0.0), Vec3(2.0, 0.3, 3.0));
+  ObstacleVoxels o(0.1, 3, 0.4);
+  scan(o, 0.0, pillar, veh);
+  const PolyTraj tr = line(0.0, veh, Vec3(1.0, 0.0, 0.0), 4.0);
+  PathGuard g(0.30, 2, 0.3);
+  auto s = path_samples(tr, 0.0 - 0.5, 0.0 + 1.5, 0.05, veh, veh + Vec3(0.05, 0, 0), 0.05);
+  EXPECT_TRUE(g.update(0.0, o, s, 0.0));
+  ASSERT_TRUE(g.at.has_value());
+  EXPECT_NEAR((*g.at)[0], 1.15, 0.11);   // the first sample within 0.30 m of the pillar's face (voxel centres)
+  // a horizon that ends 0.5 m short of it: clear (it is checked again as the vehicle moves on)
+  PathGuard g2(0.30, 2, 0.3);
+  EXPECT_FALSE(g2.update(0.0, o, path_samples(tr, 0.0, 0.9, 0.05, veh, veh, 0.05), 0.0));
+  // a tight pass: the trajectory 0.40 m beside a wall along its whole length (the clean runs' least clearance
+  // of SUPER's reference to the scans was 0.372 m: d13, L1-L3, k1 container, d12, lf16) is not blocked
+  std::vector<Vec3> wall;
+  for (double x = -1.0; x <= 4.0; x += 0.05)
+    for (double z = 0.0; z <= 2.5; z += 0.05) wall.push_back(Vec3(x, 0.40, z));
+  ObstacleVoxels ow(0.1, 3, 0.4);
+  scan(ow, 0.0, wall, veh);
+  PathGuard g3(0.30, 2, 0.3);
+  EXPECT_FALSE(g3.update(0.0, ow, path_samples(tr, -0.5, 1.5, 0.05, veh, veh + Vec3(0.3, 0, 0), 0.05), 0.0));
+  // the same wall 0.25 m beside the path: blocked (the frame reaches 0.25 m from the FC centre)
+  std::vector<Vec3> wall2;
+  for (auto p : wall) wall2.push_back(p - Vec3(0.0, 0.15, 0.0));
+  ObstacleVoxels ow2(0.1, 3, 0.4);
+  scan(ow2, 0.0, wall2, std::nullopt);
+  PathGuard g4(0.30, 2, 0.3);
+  EXPECT_TRUE(g4.update(0.0, ow2, path_samples(tr, -0.5, 1.5, 0.05, veh, veh, 0.05), 0.0));
+  // a wall 0.25 m beside the vehicle only (its voxels within 0.30 m of the vehicle itself, not of the path
+  // ahead): with the near samples skipped (path_block_skip 0.25 m) not blocked; without, blocked
+  std::vector<Vec3> side;
+  for (double x = -0.3; x <= 0.2; x += 0.05)
+    for (double z = 0.5; z <= 1.5; z += 0.05) side.push_back(Vec3(x, 0.25, z));
+  ObstacleVoxels os(0.1, 3, 0.0);
+  scan(os, 0.0, side, std::nullopt);
+  const PolyTraj away = line(0.0, veh, Vec3(0.0, -1.0, 0.0), 2.0);
+  PathGuard g7(0.30, 2, 0.3), g8(0.30, 2, 0.3);
+  EXPECT_FALSE(g7.update(0.0, os, path_samples(away, -0.5, 1.5, 0.05, veh, veh, 0.05, 0.25), 0.0));
+  EXPECT_TRUE(g8.update(0.0, os, path_samples(away, -0.5, 1.5, 0.05, veh, veh, 0.05, 0.0), 0.0));
+  // one stray return (a single voxel) does not block
+  ObstacleVoxels o1(0.1, 3, 0.4);
+  scan(o1, 0.0, {Vec3(1.0, 0.0, 1.0)}, veh);
+  PathGuard g5(0.30, 2, 0.3);
+  EXPECT_FALSE(g5.update(0.0, o1, path_samples(tr, -0.5, 1.5, 0.05, veh, veh, 0.05), 0.0));
+  // the segment from the vehicle to the target: SUPER's reference already beyond the pillar (it played its
+  // trajectory on while the bridge held), its new trajectory starting there: blocked by the segment
+  const PolyTraj beyond = line(0.0, Vec3(3.0, 0.0, 1.0), Vec3(1.0, 0.0, 0.0), 2.0);
+  PathGuard g6(0.30, 2, 0.3);
+  EXPECT_TRUE(g6.update(0.0, o, path_samples(beyond, -0.5, 1.5, 0.05, veh, Vec3(3.0, 0.0, 1.0), 0.05), 0.0));
+}
+
+TEST(PathBlock, LatchedUntilANewPlanChecksClearForTheReleaseTime) {
+  const Vec3 veh(0.0, 0.0, 1.0);
+  const auto pillar = box_surface(Vec3(1.4, -0.3, 0.0), Vec3(2.0, 0.3, 3.0));
+  ObstacleVoxels o(0.1, 3, 0.4);
+  scan(o, 0.0, pillar, veh);
+  const PolyTraj through = line(0.0, veh, Vec3(1.0, 0.0, 0.0), 4.0);
+  const PolyTraj around = line(1.0, veh, Vec3(0.0, 1.0, 0.0), 3.0);   // a new plan, sideways
+  auto S = [&](const PolyTraj& tr, double t) { return path_samples(tr, t - 0.5, t + 1.5, 0.05, veh, veh, 0.05); };
+  PathGuard g(0.30, 2, 0.3);
+  EXPECT_TRUE(g.update(0.1, o, S(through, 0.1), 0.0));
+  EXPECT_NEAR(*g.since, 0.1, 1e-12);
+  // the old (blocked) trajectory never releases it, even if its samples read clear (the pillar out of the scans)
+  ObstacleVoxels empty(0.1, 3, 0.4);
+  scan(empty, 0.5, {}, veh);
+  for (double t = 0.2; t < 1.0; t += 0.02) EXPECT_TRUE(g.update(t, empty, S(through, t), 0.0));
+  // the same blocked trajectory sent again after the block (SUPER's committed one): still blocked
+  for (double t = 1.0; t < 1.5; t += 0.02) EXPECT_TRUE(g.update(t, o, S(through, t), 0.9));
+  // a new clear plan: released after release_s (0.3 s) of clear checks, not before
+  bool released = false;
+  double t_rel = 0;
+  for (double t = 1.5; t < 2.2; t += 0.02)
+    if (!g.update(t, o, S(around, t), 1.4) && !released) {
+      released = true;
+      t_rel = t;
+    }
+  EXPECT_TRUE(released);
+  EXPECT_NEAR(t_rel - 1.5, 0.3, 0.03);
+  EXPECT_FALSE(g.blocked);
+  // without SUPER's trajectories (none ever seen): the segment alone, released after release_s clear
+  PathGuard h(0.30, 2, 0.3);
+  EXPECT_TRUE(h.update(0.0, o, path_samples(std::nullopt, 0, 0, 0.05, veh, Vec3(2.0, 0, 1.0), 0.05), std::nullopt));
+  EXPECT_TRUE(h.update(0.2, o, path_samples(std::nullopt, 0, 0, 0.05, veh, Vec3(0.3, 0, 1.0), 0.05), std::nullopt));
+  EXPECT_FALSE(h.update(0.55, o, path_samples(std::nullopt, 0, 0, 0.05, veh, Vec3(0.3, 0, 1.0), 0.05), std::nullopt));
+}
+
+TEST(PathBlock, CheapEnoughForTheTick) {
+  // a dense scan (30 000 points round the vehicle, 3 scans kept) and a 2 s trajectory plus a 1 m segment: one check
+  std::mt19937_64 rng(3);
+  std::uniform_real_distribution<double> U(-8.0, 8.0), Z(0.0, 3.0);
+  ObstacleVoxels o(0.1, 3, 0.4);
+  for (int k = 0; k < 3; ++k) {
+    std::vector<Vec3> pts;
+    for (int i = 0; i < 30000; ++i) {
+      Vec3 p(U(rng), U(rng), Z(rng));
+      if (std::hypot(p[0], p[1]) > 2.5) pts.push_back(p);   // the open space round the path
+    }
+    scan(o, 0.1 * k, pts, Vec3(0, 0, 1.0));
+  }
+  const PolyTraj tr = line(0.0, Vec3(0, 0, 1.0), Vec3(1.0, 0.0, 0.0), 4.0);
+  PathGuard g(0.30, 2, 0.3);
+  const auto w0 = std::chrono::steady_clock::now();
+  const int N = 200;
+  for (int i = 0; i < N; ++i) g.update(0.3, o, path_samples(tr, -0.5, 1.5, 0.05, Vec3(0, 0, 1.0), Vec3(1.0, 0, 1.0), 0.05), 0.0);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count() / N;
+  EXPECT_FALSE(g.blocked);
+  EXPECT_LT(ms, 2.0) << ms << " ms per check (the tick is 20 ms)";
+  std::printf("path check: %.3f ms per check, %zu voxels\n", ms, o.size());
+}
+
+TEST(WaypointHold, ClearanceCheckedGoalElseSupersGoalElseTheVehicle) {
+  // lf16: the pillar landed 0.19 m from the leg's goal; SUPER stopped at its shifted goal, clear of it
+  const Vec3 p_now(1.0, 2.0, 1.0), goal(1.3, 2.3, 1.0), super(1.0, 1.8, 1.0);
+  const Vec3 pillar_c(1.6, 2.3, 1.0);   // 0.3 m from the goal: within 0.44
+  auto clear = [&](const Vec3& c) { return (c - pillar_c).norm() > 0.44; };
+  auto hp = waypoint_hold_point(goal, super, p_now, 1.0, clear);
+  EXPECT_EQ(hp.from, "planner_goal");
+  EXPECT_TRUE(hp.p.isApprox(super));
+  // the goal clear: the goal, as before
+  hp = waypoint_hold_point(goal, super, p_now, 1.0, [](const Vec3&) { return true; });
+  EXPECT_EQ(hp.from, "goal");
+  EXPECT_TRUE(hp.p.isApprox(goal));
+  // neither clear (or SUPER's goal unknown / too far): the vehicle
+  hp = waypoint_hold_point(goal, std::nullopt, p_now, 1.0, clear);
+  EXPECT_EQ(hp.from, "vehicle");
+  EXPECT_TRUE(hp.p.isApprox(p_now));
+  hp = waypoint_hold_point(goal, Vec3(1.6, 2.1, 1.0), p_now, 1.0, clear);
+  EXPECT_EQ(hp.from, "vehicle");
+  hp = waypoint_hold_point(goal, Vec3(3.0, 2.0, 1.0), p_now, 1.0, clear);
+  EXPECT_EQ(hp.from, "vehicle");
+  // no clearance check (no recent scan): the old rule
+  hp = waypoint_hold_point(goal, super, p_now, 1.0, nullptr);
+  EXPECT_EQ(hp.from, "goal");
 }
 
 int main(int argc, char** argv) {

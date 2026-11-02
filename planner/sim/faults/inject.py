@@ -27,6 +27,7 @@ ACTION (in order; each one is logged on /fault/events):
                        SZ, centre height CZ (map frame), as render:{"box": ...}
   box_at:X,Y,Z:SX,SY,SZ     a box centred at map (X, Y, Z)
   sleep:S
+  shell:CMD            run CMD in a shell (e.g. a MAVROS mode change for the manual-flight cases)
   none                 observe only (e.g. a goal inside an obstacle: the trigger marks the leg start)
 
 The observation ends END_HOLD_S - 1 s after the executive reports DONE or STOPPED (fly_mission.py
@@ -57,6 +58,7 @@ ap.add_argument("--trigger", required=True)
 ap.add_argument("--action", action="append", default=[])
 ap.add_argument("--end_hold", type=float, default=15.0)
 ap.add_argument("--max_s", type=float, default=150.0)
+ap.add_argument("--gone_hold", type=float, default=10.0, help="observe this long after the executive exits")
 ap.add_argument("--out", default="/run/fault_result.json")
 args = ap.parse_args()
 
@@ -237,6 +239,9 @@ if fired_by:
             boxes.append((np.array(c) - np.array(size) / 2, np.array(c) + np.array(size) / 2))
             cmd_pub.publish(String(data=json.dumps({"box": {"id": bid, "center": c, "size": size}})))
             event("box", id=bid, center=[round(x, 3) for x in c], size=size)
+        elif kind == "shell":
+            r = subprocess.run(rest, shell=True, capture_output=True, text=True)
+            event("shell", cmd=rest, returncode=r.returncode, out=(r.stdout + r.stderr).strip()[-200:])
         elif kind == "sleep":
             time.sleep(float(rest))
             event("slept", s=float(rest))
@@ -259,7 +264,7 @@ while not rospy.is_shutdown() and t_fault is not None:
         break
     if t_exec_end is None and not exec_alive():
         end_why = "executive process gone"
-        time.sleep(min(args.end_hold, 10.0))
+        time.sleep(min(args.end_hold, args.gone_hold))
         break
     if now - t_fault >= args.max_s:
         end_why = "max_s %.0f s after the fault" % args.max_s

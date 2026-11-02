@@ -42,12 +42,21 @@
 //
 // It never arms, never changes modes and never sets parameters (D5): mode changes belong to the mission
 // executive. In HOLD in flight it streams a zero-velocity target at the current position, so a fault
-// never leaves the FC coasting on the last velocity until Q_GUID_TIMEOUT (D4). In HOLD in drive mode it
-// streams nothing (except for a dead planner or during a reverse, below): Rover Guided drives on to the
-// last target it was sent (at most ~drive_lookahead ahead, in the direction of travel), counts it
-// reached and brakes to a stop. A position hold at the vehicle does not stop a rover: taken while it
-// moves, the point is soon behind it and Rover Guided orbits it (SITL cl36, ~0.28 m/s for 15 s); a
-// zero-speed heading target let SITL's rover lurch into reverse and creep (cl37, cl38).
+// never leaves the FC coasting on the last velocity until Q_GUID_TIMEOUT (D4). In HOLD (and WAIT) in drive
+// mode it streams the drive stop (owner task 2026-11-02, L2 5b and note 3): a zero-speed, zero-turn-rate
+// target (mask 1479: velocity + yaw rate, no position, no heading; Rover Guided TurnRateAndSpeed, its
+// throttle stop controller), at the full rate, whatever the reason (the track planner's stop on NO_PATH or
+// REACHED, planner stale, planner_dead, slam_frozen, a SLAM hold, fc_pose_stale, the geofence). Before, a
+// hold sent nothing and Rover Guided drove on to the last (run-out) target, up to ~1 m ahead: into the box
+// that had caused the NO_PATH (SITL lf17, the centre inside it 1.4 s after it appeared), and it circled
+// that target instead of stopping (L2 faults 0, 1b, 1d, 2c, 3c, 4b). A position hold at the vehicle does
+// not stop a rover either: taken while it moves, the point is soon behind it and Rover Guided orbits it
+// (SITL cl36, ~0.28 m/s for 15 s). A zero-speed *heading* target (mask 2503, the stop until 2026-11-02) let
+// SITL's rover lurch into reverse and creep (cl37, cl38), and creep on at 0.02-0.05 m/s while it steered to
+// the heading (ox17: 0.19 m in 14 s, toward the box that had stopped it): the stop holds no heading.
+// The track planner publishes its stop itself (trajectory_flag COMPLETED on REACHED, ABORT on NO_PATH, at
+// its 10 Hz and at once on the change), so the bridge stops the rover without waiting ~planner_timeout:
+// HOLD with reason "track planner stop (NO_PATH)" / "(REACHED)"; its next ordinary command resumes.
 //
 // Reversing (owner 2026-10-28, dead ends). A track planner command whose velocity points against its
 // yaw means: back straight up, holding the yaw, until the FC is at the command's position
@@ -76,8 +85,8 @@
 // unregistered: at once; no answer for ~planner_hung_s 1.0 s: hung) -> HOLD with reason "planner_dead"
 // (HoldLogic), latched:
 //   * flight: the usual HOLD, a zero-velocity target at the FC position, at the full rate;
-//   * drive: a zero-speed velocity + heading target (mask 2503, as the reverse HOLD) at the heading the
-//     rover had at the death, streamed at the full rate: the rover stops where it is;
+//   * drive: the drive stop (zero speed, zero turn rate, mask 1479), streamed at the full rate: the rover
+//     stops where it is;
 //   * no command clears it, even from a restarted planner: the leg is over. Only the executive enabling
 //     the bridge again (false -> true, a new leg) does, and it latches again at once if that planner is
 //     still gone. A planner that never sent a command in this mode, and none known from before, keeps the
@@ -174,14 +183,16 @@
 // twist at least ~freeze_twist_min (0.2 m/s). Then HOLD with reason "slam_frozen", latched (HoldLogic):
 //   * flight: the usual HOLD at the FC position (zero velocity); the mission executive switches to QRLAND
 //     (D5) and stops the mission: nothing that holds a position can be trusted with a frozen pose;
-//   * drive: the zero-speed velocity + heading stop of a dead planner, at the heading the rover has; the
+//   * drive: the drive stop of a dead planner (zero speed, zero turn rate); the
 //     executive stops the mission in GUIDED;
 //   * only a new leg (the executive enabling the bridge again) clears it, and it latches again at once while
 //     the pose is still frozen. ~freeze_enable false turns the check off.
 // Status: "slam_frozen" {"repeats", "for_s", "evidence"} while a repeat run lasts (null otherwise); "slam_hold"
 // stays false (the executive does not wait it out as a SLAM reset: it lands or stops).
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <functional>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -192,6 +203,7 @@
 #include <mavros_msgs/PositionTarget.h>
 #include <mavros_msgs/State.h>
 #include <nav_msgs/Odometry.h>
+#include <quadrotor_msgs/PolynomialTrajectory.h>
 #include <quadrotor_msgs/PositionCommand.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
@@ -223,6 +235,16 @@ constexpr uint16_t MASK_DRIVE = IGNORE_VX | IGNORE_VY | IGNORE_VZ | IGNORE_AFX |
 // reversing (dead ends): velocity + yaw, no position (Rover Guided HeadingAndSpeed; a negative NED vx
 // backs up holding the yaw; stops by itself 3 s after the last target)
 constexpr uint16_t MASK_REVERSE = IGNORE_PX | IGNORE_PY | IGNORE_PZ | IGNORE_AFX | IGNORE_AFY | IGNORE_AFZ | IGNORE_YAW_RATE;
+// the drive stop: zero speed and zero turn rate, no position, no heading (Rover Guided TurnRateAndSpeed: its
+// throttle stop controller and a zero-rate steering loop). A zero-speed *heading* target (HeadingAndSpeed) kept
+// steering to the heading, and the skid-steer rover crept on at 0.02-0.05 m/s while it did (SITL ox17: 0.19 m
+// in 14 s, toward the box; the cl37/cl38 creep)
+constexpr uint16_t IGNORE_YAW = 1024;
+constexpr uint16_t MASK_STOP = IGNORE_PX | IGNORE_PY | IGNORE_PZ | IGNORE_AFX | IGNORE_AFY | IGNORE_AFZ | IGNORE_YAW;
+
+// the track planner's stop (its trajectory_flag; quadrotor_msgs TRAJECTORY_STATUS_COMPLETED, ..._ABORT)
+constexpr uint8_t DRIVE_STOP_REACHED = 3, DRIVE_STOP_NO_PATH = 4;
+const char* const PATH_BLOCKED = "path_blocked";
 
 // a step in SUPER's reference between two commands (~10 ms apart) bigger than this is a jump: the turn
 // slowdown's replay restarts at the new reference
@@ -314,6 +336,26 @@ class PlannerBridge {
     floor_min_down_ = l4::param_double(pnh_, "floor_min_down", 0.3);
     floor_pct_ = l4::param_double(pnh_, "floor_pct", 10.0);
     floor_min_points_ = l4::param_int(pnh_, "floor_min_points", 10);
+    // the path ahead (L2 5a, f25r): SUPER's committed trajectory and the segment to the target against the
+    // latest scans; blocked -> HOLD "path_blocked" (flight)
+    path_on_ = l4::param_bool(pnh_, "path_block_enable", true);
+    path_horizon_ = l4::param_double(pnh_, "path_block_horizon_s", 1.5);
+    path_back_ = l4::param_double(pnh_, "path_block_back_s", turn_max_lag_);
+    path_dt_ = l4::param_double(pnh_, "path_block_dt", 0.05);
+    path_skip_ = l4::param_double(pnh_, "path_block_skip", 0.25);   // samples this near the vehicle: not checked
+    path_guard_ = PathGuard(l4::param_double(pnh_, "path_block_r", 0.30), l4::param_int(pnh_, "path_block_min_voxels", 2),
+                            l4::param_double(pnh_, "path_block_release_s", 0.3));
+    obs_ = ObstacleVoxels(l4::param_double(pnh_, "path_block_voxel", 0.1), l4::param_int(pnh_, "path_block_scans", 3),
+                          l4::param_double(pnh_, "path_block_self_r", 0.4));
+    // the same scans unfiltered, for the waypoint hold's clearance: an obstacle within self_r of the vehicle is
+    // what that check is about (SITL ox16b: the pillar 0.1 m from the vehicle, its points self-filtered, read the
+    // raw goal 0.15 m from it as clear and the hold flew into it)
+    // and over more scans (~waypoint_clear_scans, 1 s): the forward dome may have turned away from what is beside the
+    // hold point (SITL ox16: SUPER curled round the pillar onto the goal)
+    obs_all_ = ObstacleVoxels(l4::param_double(pnh_, "path_block_voxel", 0.1), l4::param_int(pnh_, "waypoint_clear_scans", 10), 0.0);
+    obs_max_age_ = l4::param_double(pnh_, "path_block_cloud_max_age", 0.5);
+    // the waypoint hold's point must have no scan point (path_block_min_voxels voxels) within this of it
+    wp_clear_r_ = l4::param_double(pnh_, "waypoint_clear_r", 0.44);
     // the executive's go-ahead; ~require_enable false streams in every GUIDED (bench use only)
     enabled_ = !l4::param_bool(pnh_, "require_enable", true);
     liveness_.start();
@@ -345,6 +387,10 @@ class PlannerBridge {
         boost::function<void(const ros::MessageEvent<const quadrotor_msgs::PositionCommand>&)>(
             [this](const ros::MessageEvent<const quadrotor_msgs::PositionCommand>& e) { on_cmd(e, "drive"); })));
     if (freeze_on_) subs_.push_back(nh_.subscribe("/mavros/imu/data", 20, &PlannerBridge::on_imu, this));
+    // SUPER's committed trajectory (published with each successful plan): the path_blocked check, the waypoint
+    // hold's planner goal
+    subs_.push_back(nh_.subscribe(l4::param_string(pnh_, "path_block_traj_topic", "/planning_cmd/poly_traj"), 5,
+                                  &PlannerBridge::on_traj, this));
     if (health_on_) {
       subs_.push_back(nh_.subscribe("/fastlio_health", 10, &PlannerBridge::on_health, this));
       subs_.push_back(nh_.subscribe(l4::param_string(pnh_, "range_topic", "/mavros/rangefinder/rangefinder"), 10,
@@ -397,6 +443,9 @@ class PlannerBridge {
     // the local ceiling over the vehicle (its newest planner-frame position), from the same points
     std::optional<CeilingFinder> ceil;
     std::optional<FloorFinder> floor;
+    // the path_blocked check's voxels: this scan's points but the robot's own (near the vehicle)
+    obs_.begin_scan(now(), last_planner_ ? std::optional<Vec3>(last_planner_->first) : std::nullopt);
+    obs_all_.begin_scan(now(), std::nullopt);
     if (last_planner_) {
       ceil.emplace(last_planner_->first, ceiling_radius_, ceiling_min_up_);
       floor.emplace(last_planner_->first, ceiling_radius_, floor_min_down_, floor_pct_, floor_min_points_);
@@ -411,8 +460,12 @@ class PlannerBridge {
         std::memcpy(d, planner, 12);
         if (ceil) ceil->add(planner[0], planner[1], planner[2]);
         if (floor) floor->add(planner[0], planner[1], planner[2]);
+        obs_.add(planner[0], planner[1], planner[2]);
+        obs_all_.add(planner[0], planner[1], planner[2]);
       }
     }
+    obs_.end_scan();
+    obs_all_.end_scan();
     if (ceil) {
       t_ceiling_ = now();
       ceiling_ = ceil->above();
@@ -486,6 +539,8 @@ class PlannerBridge {
     yaw_out_.reset();
     wp_point_.reset();
     depart_.reset();
+    drive_stop_.reset();
+    path_guard_.reset();
     hold_.latch("mode changed to " + mode, now());
     publish_mode();
     ROS_INFO("planner bridge: mode %s", mode.c_str());
@@ -494,6 +549,17 @@ class PlannerBridge {
   void on_cmd(const ros::MessageEvent<const quadrotor_msgs::PositionCommand>& e, const std::string& source) {
     if (source != mode_) return;   // the other mode's planner
     const auto& m = *e.getConstMessage();
+    if (source == "drive" && (m.trajectory_flag == DRIVE_STOP_REACHED || m.trajectory_flag == DRIVE_STOP_NO_PATH)) {
+      // the track planner's stop (NO_PATH, REACHED): a live planner's command, but nothing to drive to (its
+      // last carrot is dropped: never resent)
+      drive_stop_ = m.trajectory_flag == DRIVE_STOP_REACHED ? "REACHED" : "NO_PATH";
+      cmd_.reset();
+      t_cmd_ = now();
+      const std::string sender = e.getPublisherName();
+      if (!sender.empty()) liveness_.set_node(source, sender);
+      return;
+    }
+    if (source == "drive") drive_stop_.reset();
     cmd_ = Cmd{vec(m.position), vec(m.velocity), vec(m.acceleration), m.yaw};
     t_cmd_ = now();
     if (source == "flight") {
@@ -509,6 +575,24 @@ class PlannerBridge {
     }
     const std::string sender = e.getPublisherName();
     if (!sender.empty()) liveness_.set_node(source, sender);   // the planner process whose liveness counts
+  }
+
+  // SUPER's committed position trajectory (planner frame), with each successful plan
+  void on_traj(const quadrotor_msgs::PolynomialTrajectory::ConstPtr& m) {
+    if (!(m->type & quadrotor_msgs::PolynomialTrajectory::POSITION_TRAJ) || m->piece_num_pos == 0) return;
+    const size_t n1 = m->order_pos + 1, n = m->piece_num_pos;
+    if (m->time_pos.size() < n || m->coef_pos_x.size() < n * n1 || m->coef_pos_y.size() < n * n1 ||
+        m->coef_pos_z.size() < n * n1)
+      return;
+    PolyTraj t;
+    t.t0 = m->start_WT_pos.toSec();
+    t.order = int(m->order_pos);
+    t.dur.assign(m->time_pos.begin(), m->time_pos.begin() + long(n));
+    t.cx.assign(m->coef_pos_x.begin(), m->coef_pos_x.begin() + long(n * n1));
+    t.cy.assign(m->coef_pos_y.begin(), m->coef_pos_y.begin() + long(n * n1));
+    t.cz.assign(m->coef_pos_z.begin(), m->coef_pos_z.begin() + long(n * n1));
+    traj_ = std::move(t);
+    t_traj_ = now();
   }
 
   // the executive's waypoint yaw (fc frame, rad; NaN clears it): while set, the waypoint hold (flight);
@@ -583,6 +667,37 @@ class PlannerBridge {
     const std::string fc = fc_guard_.check(t_now);
     if (fc == "never") faults.insert(faults.begin(), "no FC pose yet");
     else if (fc == "stale") faults.insert(faults.begin(), "fc_pose_stale");   // the reason to report: first
+    // the track planner's stop: hold (the drive stop) until its next ordinary command
+    if (mode == "drive" && drive_stop_) faults.push_back("track planner stop (" + *drive_stop_ + ")");
+    // the path ahead (flight, SUPER's command streamed or about to be: not the waypoint hold, which holds its
+    // own, clearance-checked point)
+    path_checked_ = false;
+    if (path_on_ && mode == "flight" && fc_mode_ == guided_mode_ && enabled_ && !yaw_cmd_ && cmd && last_planner_) {
+      const auto w0 = std::chrono::steady_clock::now();
+      const bool fresh = obs_.newest() && t_now - *obs_.newest() <= obs_max_age_;
+      // SUPER's trajectory while it lasts (past its end SUPER holds its end point: the segment covers it)
+      std::optional<PolyTraj> tr;
+      if (traj_ && t_now <= traj_->t0 + traj_->duration() + 0.5) tr = traj_;
+      const auto samples = path_samples(tr, t_now - path_back_, t_now + path_horizon_, path_dt_, last_planner_->first,
+                                        cmd->p, path_dt_, path_skip_);
+      const bool was = path_guard_.blocked;
+      if (fresh) path_guard_.update(t_now, obs_, samples, t_traj_);
+      path_checked_ = true;
+      path_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+      path_ms_max_ = std::max(path_ms_max_, path_ms_);
+      if (path_guard_.blocked && !was) {
+        const Vec3 a = anchor ? anchor->pos(*path_guard_.at) : *path_guard_.at;
+        ROS_WARN("planner bridge: path blocked: %d occupied voxels within %.2f m of the path at (%.2f %.2f %.2f), "
+                 "%.2f m from the vehicle: HOLD path_blocked", path_guard_.voxels, path_guard_.r, a[0], a[1], a[2],
+                 (*path_guard_.at - last_planner_->first).norm());
+        n_path_blocks_ += 1;
+      } else if (!path_guard_.blocked && was) {
+        ROS_INFO("planner bridge: path clear again (a new plan): path_blocked released");
+      }
+    } else {
+      path_guard_.reset();
+    }
+    if (path_guard_.blocked) faults.insert(faults.begin(), PATH_BLOCKED);
     const auto node = liveness_.node(mode);
     liveness_.want(node);
     const auto frozen = freeze_on_ ? freeze_.check(t_now, mode == "drive") : std::nullopt;
@@ -606,6 +721,7 @@ class PlannerBridge {
     if (state == "STREAM" && target) {
       hold_point_.reset();
       if (mode == "drive") {
+        stop_yaw_.reset();   // the next hold stops at the heading it has then
         auto rs = reverse_speed(target->p, target->v, target->yaw, p_now);
         if (rs) {
           freeze_.on_command(t_now, *rs);
@@ -620,13 +736,23 @@ class PlannerBridge {
         // the waypoint hold: not SUPER's command, a fixed point (the reached goal, or the vehicle when the
         // hold began), capped like any target, zero velocity, turning to the waypoint yaw
         if (!wp_point_) {
-          std::optional<Vec3> goal_fc;
+          // the executive's goal, else SUPER's reached (shifted) goal, else the vehicle: the first within
+          // ~waypoint_goal_max with no scan point within ~waypoint_clear_r (L2 5a lf16)
+          std::optional<Vec3> goal_fc, super_fc;
           if (goal_planner_) goal_fc = anchor->pos(*goal_planner_);
-          wp_point_ = fence_.clamp(waypoint_hold_point(goal_fc, p_now, wp_goal_max_));
-          wp_from_goal_ = goal_fc && (*goal_fc - p_now).norm() <= wp_goal_max_;
-          ROS_INFO("planner bridge: waypoint hold at %s (%.2f %.2f %.2f), %.2f m from the vehicle, yaw %.1f deg",
-                   wp_from_goal_ ? "the goal" : "the vehicle", (*wp_point_)[0], (*wp_point_)[1], (*wp_point_)[2],
-                   (*wp_point_ - p_now).norm(), *yaw_cmd_ * (180.0 / M_PI));
+          if (traj_) super_fc = anchor->pos(traj_->end());
+          std::function<bool(const Vec3&)> clear;
+          if (obs_all_.newest() && t_now - *obs_all_.newest() <= obs_max_age_)
+            clear = [&](const Vec3& c) {
+              return obs_all_.count_within(anchor->inverse_pos(c), wp_clear_r_) < path_guard_.min_voxels;
+            };
+          const HoldPoint hp = waypoint_hold_point(goal_fc, super_fc, p_now, wp_goal_max_, clear);
+          wp_point_ = fence_.clamp(hp.p);
+          wp_from_ = hp.from;
+          ROS_INFO("planner bridge: waypoint hold at the %s (%.2f %.2f %.2f), %.2f m from the vehicle, yaw %.1f deg%s",
+                   hp.from.c_str(), (*wp_point_)[0], (*wp_point_)[1], (*wp_point_)[2], (*wp_point_ - p_now).norm(),
+                   *yaw_cmd_ * (180.0 / M_PI),
+                   goal_fc && hp.from != "goal" && (*goal_fc - p_now).norm() <= wp_goal_max_ ? " (the goal is not clear)" : "");
         }
         const Vec3 zero = Vec3::Zero();
         auto c = cap_command(*wp_point_, zero, zero, p_now, speed_cap_, max_lead_, fc_pos_p_);
@@ -652,17 +778,12 @@ class PlannerBridge {
       return;
     }
     if (mode == "drive") {
-      if (hold_.dead || hold_.frozen) {
-        // the planner died, or the SLAM pose froze: stop where the rover is, now. A zero-speed velocity +
-        // heading target (the reverse HOLD's), the heading the rover has at the fault, so it neither drives
-        // on to the last (run-out) target nor pivots
-        if (!stop_yaw_) stop_yaw_ = yaw_now;
-        send_reverse(0.0, *stop_yaw_);
-        return;
-      }
-      // a reverse under way: Rover's velocity + heading target would back up on for 3 s
-      if (reversing_) send_reverse(0.0, *reversing_);
-      return;   // HOLD on the ground: Rover Guided stops at the last target
+      // every HOLD (and the WAIT) on the ground: stop where the rover is, now (header comment). Zero speed and
+      // zero turn rate, so it neither drives on to the last (run-out) target, nor circles it, nor pivots or
+      // steers to a heading. Rover's turn rate + speed submode keeps its last target (0) for 3 s without targets
+      if (!stop_yaw_) stop_yaw_ = reversing_ ? *reversing_ : yaw_now;
+      send_stop();
+      return;
     }
     // HOLD (or WAIT) in flight: stay where the vehicle is, zero velocity and acceleration
     // (travel yaw: the heading it was flying, not a new one)
@@ -745,6 +866,23 @@ class PlannerBridge {
 
   // back up at speed (m/s, >= 0) holding yaw (fc frame, ENU): MAVROS turns the ENU velocity (0, -speed)
   // into NED vx = -speed, which Rover Guided reads as reverse (speed_dir -1); at 0 a zero-speed heading hold
+  // the drive stop (MASK_STOP): zero speed, zero turn rate
+  void send_stop() {
+    reversing_.reset();
+    const Vec3 v = Vec3::Zero();
+    mavros_msgs::PositionTarget sp;
+    sp.header.stamp = stamp_;
+    sp.header.frame_id = "map";
+    sp.coordinate_frame = mavros_msgs::PositionTarget::FRAME_LOCAL_NED;
+    sp.type_mask = MASK_STOP;
+    sp.velocity.x = v[0];
+    sp.velocity.y = v[1];
+    sp.velocity.z = v[2];
+    sp.yaw_rate = 0.0f;
+    pub_sp_.publish(sp);
+    n_out_ += 1;
+  }
+
   void send_reverse(double speed, double yaw) {
     reversing_ = yaw;
     const Vec3 v(0.0, -std::abs(speed), 0.0);
@@ -841,7 +979,7 @@ class PlannerBridge {
       const Vec3 hp = wp_point_ ? *wp_point_ : depart_->point;
       l4::ojson h;
       h["point"] = {l4::py_round(hp[0], 3), l4::py_round(hp[1], 3), l4::py_round(hp[2], 3)};
-      h["from"] = wp_from_goal_ ? "goal" : "vehicle";
+      h["from"] = wp_from_;
       h["phase"] = wp_point_ ? "turn" : "depart";
       s["waypoint_hold"] = h;
     } else {
@@ -859,6 +997,24 @@ class PlannerBridge {
       s["turn_slow"] = ts;
     } else {
       s["turn_slow"] = nullptr;
+    }
+    // the path ahead (flight, while checked): blocked, the first blocked point (fc) and its occupied voxels,
+    // the holds so far, the check's wall time (last, max)
+    if (path_checked_) {
+      l4::ojson pb;
+      pb["blocked"] = path_guard_.blocked;
+      if (path_guard_.blocked && path_guard_.at && tracker_.anchor) {
+        const Vec3 a = tracker_.anchor->pos(*path_guard_.at);
+        pb["at"] = {l4::py_round(a[0], 3), l4::py_round(a[1], 3), l4::py_round(a[2], 3)};
+        pb["voxels"] = path_guard_.voxels;
+        pb["for_s"] = path_guard_.since ? l4::ojson(l4::py_round(t_now - *path_guard_.since, 2)) : l4::ojson(nullptr);
+      }
+      pb["holds"] = n_path_blocks_;
+      pb["check_ms"] = l4::py_round(path_ms_, 3);
+      pb["check_ms_max"] = l4::py_round(path_ms_max_, 3);
+      s["path_block"] = pb;
+    } else {
+      s["path_block"] = nullptr;
     }
     // the local ceiling over the vehicle (m above it; null: none seen over it, or no recent scan)
     const bool ceil_fresh = t_ceiling_ && t_now - *t_ceiling_ <= ceiling_max_age_;
@@ -901,7 +1057,18 @@ class PlannerBridge {
   std::optional<double> yaw_out_;                       // the flight yaw last sent (travel mode, a waypoint hold)
   std::optional<Vec3> goal_planner_;                    // the executive's last goal for SUPER (planner frame)
   std::optional<Vec3> wp_point_;                        // the waypoint hold's point (fc), fixed when it begins
-  bool wp_from_goal_ = false, wp_active_ = false;       // the point is the goal; the last tick held it
+  std::string wp_from_ = "vehicle";                     // the point: "goal" | "planner_goal" | "vehicle"
+  bool wp_active_ = false;                              // the last tick held it
+  double wp_clear_r_ = 0.44;
+  // the path ahead (path_blocked)
+  bool path_on_ = true, path_checked_ = false;
+  double path_horizon_ = 1.5, path_back_ = 0.5, path_dt_ = 0.05, path_skip_ = 0.25, obs_max_age_ = 0.5, path_ms_ = 0.0, path_ms_max_ = 0.0;
+  PathGuard path_guard_;
+  ObstacleVoxels obs_, obs_all_;                        // the latest scans: self-filtered (path), all (hold point)
+  std::optional<PolyTraj> traj_;                        // SUPER's committed trajectory (planner frame)
+  std::optional<double> t_traj_;                        // when it came
+  long long n_path_blocks_ = 0;
+  std::optional<std::string> drive_stop_;               // the track planner's stop ("NO_PATH", "REACHED")
   double wp_goal_max_ = 1.0;
   struct Depart {
     Vec3 point;   // the hold point (fc)

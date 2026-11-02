@@ -1,0 +1,157 @@
+diff --git a/super_planner/include/fsm/fsm.h b/super_planner/include/fsm/fsm.h
+index 567b6e9..319a03e 100755
+--- a/super_planner/include/fsm/fsm.h
++++ b/super_planner/include/fsm/fsm.h
+@@ -25,6 +25,9 @@
+ #pragma once
+ 
+ #include <queue>
++#include <algorithm>
++#include <cmath>
++#include <vector>
+ #include <memory>
+ #include <fstream>
+ #include <fmt/color.h>
+@@ -115,7 +118,7 @@ namespace fsm {
+             }
+ 
+             // save on log
+-            replan_logs_.push_back(planner_ptr_->getLatestReplanLog());
++            pushReplanLog();
+             fmt::print(fmt::fg(fmt::color::green), " -- Replan ID: {}, ret code: {}\n",
+                        replan_logs_.size() - 1, replan_logs_.back().getRetCode());
+         }
+@@ -144,6 +147,34 @@ namespace fsm {
+ 
+     protected:
+         vector<LogOneReplan> replan_logs_;
++
++        // Revolute (super_bounded_logs.patch): upstream appended one LogOneReplan (with its CIRI point cloud,
++        // ~90 KB) to replan_logs_ on every replan and every PlanFromRest attempt and never dropped any, for the
++        // binary log written at shutdown. A from-rest plan that kept failing (100 Hz main timer) grew fsm_node
++        // ~10 MB/s (34 GB in 80 min, SITL 2026-11-02). Keep only the latest entries.
++        static constexpr size_t kMaxReplanLogs = 200;
++        template<class T>
++        static void pushBounded(std::vector<T> &v, const T &x, const size_t cap) {
++            if (v.size() >= cap) {
++                v.erase(v.begin(), v.begin() + cap / 2);   // drop the older half: amortised O(1) per push
++            }
++            v.push_back(x);
++        }
++        void pushReplanLog() {
++            pushBounded(replan_logs_, planner_ptr_->getLatestReplanLog(), kMaxReplanLogs);
++        }
++
++        // Revolute: back off between failed PlanFromRest attempts (upstream retried on every 100 Hz main-timer
++        // tick, ~9 log lines each: 2.5 M lines in 80 min). Delay doubles from kFromRestRetryMinS to
++        // kFromRestRetryMaxS; reset on success and on every new goal.
++        static constexpr double kFromRestRetryMinS = 0.05;
++        static constexpr double kFromRestRetryMaxS = 0.5;
++        int from_rest_fail_cnt_{0};
++        double from_rest_retry_t_{0.0};
++        void resetFromRestBackoff() {
++            from_rest_fail_cnt_ = 0;
++            from_rest_retry_t_ = 0.0;
++        }
+         /* Callback functions */
+         bool finish_plan = false;
+         double system_start_time_;
+diff --git a/super_planner/include/ros_interface/ros1/fsm_ros1.hpp b/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
+index 84135bf..92bf892 100644
+--- a/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
++++ b/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
+@@ -49,6 +49,10 @@ namespace fsm {
+         nav_msgs::Path path;
+ 
+         vector<quadrotor_msgs::PositionCommand> cmd_logs_;
++        // Revolute (super_bounded_logs.patch): cmd_logs_ (100 Hz, for the shutdown CSV) and the visualised
++        // path (100 Hz in FOLLOW_TRAJ, re-published whole each tick) grew without bound too.
++        static constexpr size_t kMaxCmdLogs = 30000;     // 5 min at 100 Hz
++        static constexpr size_t kMaxPathPoses = 3000;    // 30 s at 100 Hz
+ 
+         void resetVisualizedPath() override {
+             path.poses.clear();
+@@ -66,7 +70,7 @@ namespace fsm {
+             pose.pose.orientation.y = robot_state_.q.y();
+             pose.pose.orientation.z = robot_state_.q.z();
+             pose.pose.orientation.w = robot_state_.q.w();
+-            path.poses.push_back(pose);
++            pushBounded(path.poses, pose, kMaxPathPoses);
+             path_pub_.publish(path);
+         }
+ 
+@@ -165,7 +169,7 @@ namespace fsm {
+             pos_cmd.angular_velocity.z = omg(2);
+             pos_cmd.thrust.z = aT;
+             latest_cmd = pos_cmd;
+-            cmd_logs_.push_back(latest_cmd);
++            pushBounded(cmd_logs_, latest_cmd, kMaxCmdLogs);
+         }
+ 
+     public:
+@@ -259,7 +263,7 @@ namespace fsm {
+             }
+             fmt::print(" -- [Fsm] Cur vel: {}, delta_v: {}, max_delta_v: {}\n", pid_cmd_.vel_norm, delta_v,
+                        max_delta_v);
+-            cmd_logs_.push_back(latest_cmd);
++            pushBounded(cmd_logs_, latest_cmd, kMaxCmdLogs);
+             return true;
+         }
+ 
+diff --git a/super_planner/src/super_core/fsm.cpp b/super_planner/src/super_core/fsm.cpp
+index 5991dfd..cf511b8 100755
+--- a/super_planner/src/super_core/fsm.cpp
++++ b/super_planner/src/super_core/fsm.cpp
+@@ -81,7 +81,7 @@ namespace fsm {
+         planner_ptr_->getModuleTimeConsuming(log_module_time);
+         log_module_time[log_module_time.size() - 2] = replan_once_time.stop();
+         // save on log
+-        replan_logs_.push_back(planner_ptr_->getLatestReplanLog());
++        pushReplanLog();
+         WriteTimeToLog();
+     }
+ 
+@@ -136,6 +136,9 @@ namespace fsm {
+                     finish_plan = true;
+                     return;
+                 }
++                if (ros_ptr_->getSimTime() < from_rest_retry_t_) {
++                    return;   // Revolute: backing off after a failed PlanFromRest
++                }
+                 int retcode = planner_ptr_->PlanFromRest(gi_.goal_p, gi_.goal_yaw, gi_.new_goal);
+                 if (!planner_ptr_->goalValid()) {
+                     cout << YELLOW << " -- [Fsm] Goal is invalid, skip this goal." << RESET << endl;
+@@ -143,6 +146,7 @@ namespace fsm {
+                     return;
+                 }
+                 if (retcode == SUCCESS || retcode == FINISH) {
++                    resetFromRestBackoff();
+                     gi_.new_goal = false;
+                     plan_from_rest_ = true;
+                     finish_plan = false;
+@@ -154,10 +158,14 @@ namespace fsm {
+ 
+                     ChangeState("MainFsmCallback", FOLLOW_TRAJ);
+                 } else {
+-                    cout << YELLOW << " -- [Fsm] PlanFromRest failed, try replan." << RESET << endl;
+-                    // ros::Duration(0.1).sleep();
++                    from_rest_fail_cnt_++;
++                    const double wait = std::min(kFromRestRetryMaxS, kFromRestRetryMinS *
++                                                 std::pow(2.0, std::min(from_rest_fail_cnt_ - 1, 16)));
++                    from_rest_retry_t_ = ros_ptr_->getSimTime() + wait;
++                    cout << YELLOW << " -- [Fsm] PlanFromRest failed (" << from_rest_fail_cnt_
++                         << " in a row), retry in " << wait << " s." << RESET << endl;
+                 }
+-                replan_logs_.push_back(planner_ptr_->getLatestReplanLog());
++                pushReplanLog();
+                 break;
+             }
+             case FOLLOW_TRAJ: {
+@@ -220,6 +228,7 @@ namespace fsm {
+ 
+         started_ = true;
+         gi_.new_goal = true;
++        resetFromRestBackoff();   // Revolute: a new goal plans at once
+     }
+ 
+     void Fsm::ChangeState(const string &call_func, const MACHINE_STATE &new_state) {

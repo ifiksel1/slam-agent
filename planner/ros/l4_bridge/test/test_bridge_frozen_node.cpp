@@ -296,7 +296,7 @@ TEST_F(Frozen, F5_DrivingStopsAtOnce) {
   EXPECT_EQ(st["reason"], SLAM_FROZEN);
   std::optional<double> first_stop;
   for (const auto& [t, m] : since(t_freeze))
-    if (m.type_mask == 2503) {
+    if (m.type_mask == 1479) {
       first_stop = t;
       break;
     }
@@ -306,10 +306,10 @@ TEST_F(Frozen, F5_DrivingStopsAtOnce) {
   const auto after = since(*first_stop);
   EXPECT_GT(after.size(), 30u);
   for (const auto& [t, m] : after) {
-    EXPECT_EQ(m.type_mask, 2503);   // the zero-speed stop, never the carrot again
+    EXPECT_EQ(m.type_mask, 1479);   // the drive stop, never the carrot again
     EXPECT_EQ(m.velocity.x, 0.0);
     EXPECT_EQ(m.velocity.y, 0.0);
-    EXPECT_NEAR(m.yaw, ANCHOR.psi, 1e-3);
+    EXPECT_EQ(m.yaw_rate, 0.0f);
   }
   new_leg();
 }

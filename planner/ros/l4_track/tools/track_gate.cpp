@@ -610,6 +610,8 @@ class RealMap {
     LiveRes res;
     KD Dk(D);
     tc::LiveWindow lw(cfg, window_s);
+    // A/B: the newest-hit hold (LiveWindow::mem_hit_hold; < 0: the decayed counts alone, before 2026-11-02)
+    if (std::getenv("L4_MEM_HIT_HOLD")) lw.mem_hit_hold = std::atof(std::getenv("L4_MEM_HIT_HOLD"));
     std::vector<double> ing, times;
     std::unique_ptr<KD> tw;
     if (!ref_xy.empty()) tw = std::make_unique<KD>(ref_xy);

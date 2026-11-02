@@ -139,12 +139,17 @@ How QuadRover takes the transitions (firmware `Rover/mode_guided*.cpp`, seen in 
 - A position hold at the vehicle is not a stop on the ground. The hold point is taken while the
   robot moves, so it is soon behind it, and Rover Guided orbits it (cl36: about 0.28 m/s for
   15 s, and the takeoff went in during a slowdown). A zero-speed heading target let SITL's rover
-  lurch into reverse and creep (cl37, cl38). In drive mode the bridge's HOLD for a live but
-  silent planner (NO_PATH, REACHED) therefore streams nothing: Rover Guided drives on to the last
-  target it was sent, counts it reached and brakes.
+  lurch into reverse and creep (cl37, cl38). Until 2026-11-02 the bridge's drive HOLD for a live
+  planner (NO_PATH, REACHED, planner stale) therefore streamed nothing, meaning Rover Guided would drive on
+  to the last target. It did not brake there: it drove into the box that caused the NO_PATH (L2 5b,
+  lf17) and circled the target (L2 faults note 3). Since 2026-11-02 every drive HOLD streams the
+  drive stop: zero speed and zero turn rate (mask 1479, Rover Guided TurnRateAndSpeed). A zero-speed
+  heading target (mask 2503, the former dead-planner stop) kept steering to its heading, and the
+  rover crept on at 0.02-0.05 m/s (ox17). The track planner also publishes its stop itself on
+  NO_PATH / REACHED (`trajectory_flag` 4 / 3), so the stop does not wait out `planner_timeout`.
   A dead planner is different (owner, 2026-10-29: the robot just stops, no continuation): once
-  the planner process is gone the bridge latches `planner_dead` and sends a zero-speed velocity +
-  heading target at the current heading (no run-out target); the executive goes STOPPED "planner
+  the planner process is gone the bridge latches `planner_dead` and sends the drive stop (no
+  run-out target); the executive goes STOPPED "planner
   died" in GUIDED with the bridge off (p2: stopped 0.54 m from the kill at 0.47 m/s, with the
   friction-fixed SITL; the cl37/38 reverse lurch did not recur). Flying, it holds, then QRLoiter
   and STOPPED. Before a takeoff that follows a drive, the executive keeps the bridge on until

@@ -33,6 +33,15 @@ RUN python3 /tmp/patch_seed_line.py /super_ws/src/SUPER/super_planner/src/super_
 # passed its own check (see super_backup_pos_check.patch)
 COPY super_backup_pos_check.patch /tmp/super_backup_pos_check.patch
 RUN cd /super_ws/src/SUPER && git apply /tmp/super_backup_pos_check.patch
+# fsm_node's replan/cmd/path logs grew without bound (34 GB in a stuck from-rest loop, ~0.6 GB/h in normal
+# flight; found 2026-11-02): bounded logs and a 0.05-0.5 s retry backoff (see super_bounded_logs.patch)
+COPY super_bounded_logs.patch /tmp/super_bounded_logs.patch
+RUN cd /super_ws/src/SUPER && git apply /tmp/super_bounded_logs.patch
+# SUPER flew on a committed trajectory that an appearing obstacle had blocked (L2 fault 5a, f25r): check the
+# next 1.5 s on every failed replan and at 20 Hz, EMER_STOP + braking stop if blocked, then plan from rest
+# (see super_traj_block_check.patch; applies on top of super_bounded_logs.patch)
+COPY super_traj_block_check.patch /tmp/super_traj_block_check.patch
+RUN cd /super_ws/src/SUPER && git apply /tmp/super_traj_block_check.patch
 
 RUN source /opt/ros/noetic/setup.bash && cd /super_ws \
     && catkin_make -DBUILD_TYPE=Release -DCMAKE_BUILD_TYPE=Release -j8

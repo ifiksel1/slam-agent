@@ -1,0 +1,249 @@
+diff --git a/super_planner/include/fsm/fsm.h b/super_planner/include/fsm/fsm.h
+index 319a03e..1c187d2 100755
+--- a/super_planner/include/fsm/fsm.h
++++ b/super_planner/include/fsm/fsm.h
+@@ -175,6 +175,33 @@ namespace fsm {
+             from_rest_fail_cnt_ = 0;
+             from_rest_retry_t_ = 0.0;
+         }
++
++        // Revolute (super_traj_block_check.patch): the committed trajectory is re-checked against the map after
++        // every failed replan and every kBlockCheckPeriodS while following it (SuperPlanner::committedTrajBlocked).
++        // Blocked: EMER_STOP, a braking stop (the position at that moment, zero velocity and acceleration,
++        // the last commanded yaw) held until the vehicle is slower than kEmerStopVel (at least kEmerMinHoldS,
++        // at most kEmerMaxHoldS), then a plan from rest to the same goal (with the from-rest retry backoff).
++        // Upstream's EMER_STOP (ReplanOnce returning EMER, never produced) went straight to WAIT_GOAL.
++        static constexpr double kBlockCheckHorizonS = 1.5;
++        static constexpr double kBlockCheckPeriodS = 0.05;
++        static constexpr double kBlockSkipDis = 0.15;
++        static constexpr double kBlockBodyR = -1.0;   // <= 0: the planner's robot_r - resolution / 2 (0.39 m)
++        static constexpr double kEmerMinHoldS = 0.5;
++        static constexpr double kEmerMaxHoldS = 4.0;
++        static constexpr double kEmerStopVel = 0.15;
++        double last_block_check_t_{0.0};
++        double emer_start_t_{0.0};
++        Vec3f emer_stop_p_{0, 0, 0};
++        bool emer_brake_{false};   // EMER_STOP publishes the braking stop (pubCmd), not the trajectory
++        // the vehicle's speed while braking, from its position over >= 0.2 s (ROG-Map's RobotState.v is never set)
++        Vec3f emer_v_p_{0, 0, 0};
++        double emer_v_t_{0.0}, emer_speed_{1e9};
++        int emer_cnt_{0};
++
++        // true (and in EMER_STOP) if the committed trajectory is blocked
++        bool checkCommittedTraj(const std::string &why);
++
++        void enterEmerStop(const std::string &why);
+         /* Callback functions */
+         bool finish_plan = false;
+         double system_start_time_;
+diff --git a/super_planner/include/ros_interface/ros1/fsm_ros1.hpp b/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
+index 92bf892..2ebce48 100644
+--- a/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
++++ b/super_planner/include/ros_interface/ros1/fsm_ros1.hpp
+@@ -334,6 +334,10 @@ namespace fsm {
+             if (machine_state_ != FOLLOW_TRAJ && machine_state_ != EMER_STOP) {
+                 return;
+             }
++            if (machine_state_ == EMER_STOP && emer_brake_) {
++                publishBrakeCommand();   // Revolute (super_traj_block_check.patch)
++                return;
++            }
+ 
+ 
+             quadrotor_msgs::PolynomialTrajectory heartbeat;
+@@ -351,6 +355,23 @@ namespace fsm {
+             }
+         }
+ 
++        // Revolute (super_traj_block_check.patch): the braking stop of EMER_STOP: the position latched when the
++        // committed trajectory was found blocked, zero velocity / acceleration / jerk, the last commanded yaw
++        void publishBrakeCommand() {
++            pid_cmd_.header.stamp = ros::Time::now();
++            pid_cmd_.header.frame_id = "world";
++            pid_cmd_.position.x = emer_stop_p_.x();
++            pid_cmd_.position.y = emer_stop_p_.y();
++            pid_cmd_.position.z = emer_stop_p_.z();
++            pid_cmd_.velocity.x = pid_cmd_.velocity.y = pid_cmd_.velocity.z = 0.0;
++            pid_cmd_.acceleration.x = pid_cmd_.acceleration.y = pid_cmd_.acceleration.z = 0.0;
++            pid_cmd_.jerk.x = pid_cmd_.jerk.y = pid_cmd_.jerk.z = 0.0;
++            pid_cmd_.yaw_dot = 0.0;   // yaw: the last commanded one
++            pid_cmd_.trajectory_flag = 2;
++            cmd_pub.publish(pid_cmd_);
++            pushBounded(cmd_logs_, pid_cmd_, kMaxCmdLogs);
++        }
++
+         void replanTimerCallback(const ros::TimerEvent &event) {
+             callReplanOnce();
+         }
+diff --git a/super_planner/include/super_core/super_planner.h b/super_planner/include/super_core/super_planner.h
+index 74cddd8..a411e05 100755
+--- a/super_planner/include/super_core/super_planner.h
++++ b/super_planner/include/super_core/super_planner.h
+@@ -119,6 +119,18 @@ namespace super_planner {
+             return gi_.goal_valid;
+         }
+ 
++        // Revolute (super_traj_block_check.patch): is the committed trajectory still free? Upstream never
++        // re-checked it: an obstacle that appeared on it after it was committed was flown into whenever the
++        // replans failed (SITL f25r, 2026-10-28). Samples the committed trajectory from now to now + horizon_s,
++        // or to its end (the backup's stop) when the backup starts within that horizon, skipping the first
++        // skip_dis metres (the vehicle's own surroundings). A sample is blocked when it is OCCUPIED on the
++        // inflated map (SUPER's own test for its guide trajectory) and a raw occupied cell lies within
++        // body_r of it (a trajectory may legally pass between robot_r and the inflation radius of a wall);
++        // body_r <= 0: robot_r - resolution / 2.
++        // Returns true with the first blocked point and its time ahead of now.
++        bool committedTrajBlocked(const double &horizon_s, const double &skip_dis, const double &body_r,
++                                  Vec3f &hit_p, double &hit_dt);
++
+         typedef std::shared_ptr<SuperPlanner> Ptr;
+ 
+         void getOneHeartbeatTime(double &start_WT_pos, bool &traj_finish);
+diff --git a/super_planner/src/super_core/fsm.cpp b/super_planner/src/super_core/fsm.cpp
+index cf511b8..64e986a 100755
+--- a/super_planner/src/super_core/fsm.cpp
++++ b/super_planner/src/super_core/fsm.cpp
+@@ -70,7 +70,9 @@ namespace fsm {
+         } else { cout << GREEN << " -- [Fsm] ReplanOnce succeed." << RESET << endl; }
+ 
+         if (ret_code == EMER) {
+-            ChangeState("ReplanTimerCallback", EMER_STOP);
++            enterEmerStop("ReplanOnce returned EMER");
++        } else if (ret_code == FAILED && checkCommittedTraj("replan failed")) {
++            // Revolute: braking stop (EMER_STOP)
+         } else if (ret_code == NEW_TRAJ) {
+             ChangeState("ReplanTimerCallback", GENERATE_TRAJ);
+         } else if (ret_code == SUCCESS || ret_code == FINISH) {
+@@ -170,10 +172,34 @@ namespace fsm {
+             }
+             case FOLLOW_TRAJ: {
+                 publishCurPoseToPath();
++                const double now = ros_ptr_->getSimTime();
++                if (now - last_block_check_t_ >= kBlockCheckPeriodS) {
++                    last_block_check_t_ = now;
++                    checkCommittedTraj("periodic check");
++                }
+                 break;
+             }
+             case EMER_STOP: {
+-                ChangeState("MainFsmCallback", WAIT_GOAL);
++                if (!emer_brake_) {   // upstream behaviour for anything that did not brake
++                    ChangeState("MainFsmCallback", WAIT_GOAL);
++                    break;
++                }
++                // Revolute: hold the braking stop until the vehicle has (nearly) stopped, then plan from rest
++                const double now = ros_ptr_->getSimTime();
++                const double held = now - emer_start_t_;
++                if (now - emer_v_t_ >= 0.2) {
++                    emer_speed_ = (robot_state_.p - emer_v_p_).norm() / (now - emer_v_t_);
++                    emer_v_p_ = robot_state_.p;
++                    emer_v_t_ = now;
++                }
++                const double v = emer_speed_;
++                if ((held >= kEmerMinHoldS && v < kEmerStopVel) || held >= kEmerMaxHoldS) {
++                    fmt::print(fg(fmt::color::orange), " -- [Fsm] EMER_STOP {}: held {:.2f} s, speed {:.2f} m/s, "
++                               "planning from rest.\n", emer_cnt_, held, v);
++                    emer_brake_ = false;
++                    finish_plan = false;
++                    ChangeState("MainFsmCallback", GENERATE_TRAJ);
++                }
+                 break;
+             }
+             default:
+@@ -181,6 +207,33 @@ namespace fsm {
+         }
+     }
+ 
++    bool Fsm::checkCommittedTraj(const std::string &why) {
++        Vec3f hit_p;
++        double hit_dt;
++        if (machine_state_ != FOLLOW_TRAJ ||
++            !planner_ptr_->committedTrajBlocked(kBlockCheckHorizonS, kBlockSkipDis, kBlockBodyR, hit_p, hit_dt)) {
++            return false;
++        }
++        fmt::print(fg(fmt::color::red), " -- [Fsm] Committed trajectory blocked at [{:.2f}, {:.2f}, {:.2f}], {:.2f} s "
++                   "ahead ({}).\n", hit_p.x(), hit_p.y(), hit_p.z(), hit_dt, why);
++        enterEmerStop("committed trajectory blocked");
++        return true;
++    }
++
++    void Fsm::enterEmerStop(const std::string &why) {
++        planner_ptr_->getRobotState(robot_state_);
++        emer_stop_p_ = robot_state_.p;
++        emer_start_t_ = ros_ptr_->getSimTime();
++        emer_brake_ = true;
++        emer_cnt_++;
++        emer_v_p_ = robot_state_.p;
++        emer_v_t_ = emer_start_t_;
++        emer_speed_ = 1e9;   // unknown until 0.2 s of braking
++        fmt::print(fg(fmt::color::red), " -- [Fsm] EMER_STOP {} ({}): braking stop at [{:.2f}, {:.2f}, {:.2f}].\n",
++                   emer_cnt_, why, emer_stop_p_.x(), emer_stop_p_.y(), emer_stop_p_.z());
++        ChangeState("EmerStop", EMER_STOP);
++    }
++
+     bool Fsm::closeToGoal(const double &thresh_dis) {
+         /// The close to goal should consider the the local shift
+         /// All goal should be in the known free on inf map.
+diff --git a/super_planner/src/super_core/super_planner.cpp b/super_planner/src/super_core/super_planner.cpp
+index a7a9826..7ce81f7 100755
+--- a/super_planner/src/super_core/super_planner.cpp
++++ b/super_planner/src/super_core/super_planner.cpp
+@@ -1201,6 +1201,59 @@ namespace super_planner {
+     }
+ 
+ 
++    bool SuperPlanner::committedTrajBlocked(const double &horizon_s, const double &skip_dis, const double &body_r,
++                                            Vec3f &hit_p, double &hit_dt) {
++        cmd_traj_info_.lock();
++        if (cmd_traj_info_.empty()) {
++            cmd_traj_info_.unlock();
++            return false;
++        }
++        const double now_t = std::max(0.0, ros_ptr_->getSimTime() - cmd_traj_info_.getStartWallTime());
++        const double total = cmd_traj_info_.getTotalDuration();
++        double t_end = std::min(total, now_t + horizon_s);
++        if (cmd_traj_info_.backupTrajAvilibale() && cmd_traj_info_.getBackupTrajStartTT() < t_end) {
++            t_end = total;   // committed to the backup's brake: check it to its stop
++        }
++        const Vec3f p_now = cmd_traj_info_.getPos(std::min(now_t, total));
++        const double res = cfg_.resolution;
++        // body_r <= 0: the planner's own robot_r less half a cell (CIRI keeps robot_r from the cell centres)
++        const double br = body_r > 0 ? body_r : cfg_.robot_r - 0.5 * res;
++        const int nr = static_cast<int>(std::ceil(br / res));
++        bool blocked = false;
++        Vec3f last_p = p_now;
++        for (double t = now_t; t <= t_end && !blocked; t += 0.02) {
++            const Vec3f p = cmd_traj_info_.getPos(t);
++            if ((p - last_p).norm() < 0.5 * res && t > now_t) {
++                continue;
++            }
++            last_p = p;
++            if ((p - p_now).norm() < skip_dis) {
++                continue;
++            }
++            if (map_ptr_->getInfGridType(p) != rog_map::GridType::OCCUPIED) {
++                continue;
++            }
++            for (int i = -nr; i <= nr && !blocked; i++) {
++                for (int j = -nr; j <= nr && !blocked; j++) {
++                    for (int k = -nr; k <= nr && !blocked; k++) {
++                        const Vec3f d(i * res, j * res, k * res);
++                        if (d.norm() > br) {
++                            continue;
++                        }
++                        const Vec3f q = p + d;
++                        if (map_ptr_->isOccupied(q)) {
++                            blocked = true;
++                            hit_p = p;
++                            hit_dt = t - now_t;
++                        }
++                    }
++                }
++            }
++        }
++        cmd_traj_info_.unlock();
++        return blocked;
++    }
++
+     void SuperPlanner::getRobotState(rog_map::RobotState &out) {
+         robot_state_ = map_ptr_->getRobotState();
+         out = robot_state_;

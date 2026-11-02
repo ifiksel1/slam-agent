@@ -18,6 +18,7 @@ This replaces the old single-~rotation_matrix design (which applied ONE matrix t
 and could not represent a permutation correctly), and retires the position-only y-flip.
 """
 
+import json
 import os
 import struct
 import sys
@@ -27,7 +28,9 @@ import rospy
 import numpy as np
 import math
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseStamped, Vector3Stamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
+from sensor_msgs.msg import Imu
+from std_msgs.msg import String
 from tf.transformations import (quaternion_multiply, quaternion_conjugate,
                                 quaternion_from_matrix, quaternion_from_euler)
 
@@ -36,13 +39,235 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from frame_anchor import Anchor, Discontinuity, PoseHistory, ekf_usable, yaw_of  # noqa: E402
 
 try:
-    from mavros_msgs.msg import Mavlink, StatusText
+    from mavros_msgs.msg import Mavlink, PositionTarget, RCOut, State, StatusText
     from mavros_msgs.srv import ParamGet
     _HAVE_MAVROS = True
 except ImportError:
     _HAVE_MAVROS = False
 
 _EKF_STATUS_REPORT_MSGID = 193
+
+
+# ---- FROZEN SLAM POSE IN THE AIR: cut vision (owner decision 2026-11-02) -----------------------------
+# FAST-LIO stuck on its last pose, republished with fresh stamps, passes every freshness check, and the FC's
+# EKF fuses it: the FC then flies on a position that does not move (SITL L2 fault 2b: 45 m at 8.4 m/s on
+# 10-28; 9 m and a 1.39 m/s ground strike on 11-02, the executive's QRLAND still fusing the frozen pose).
+# Owner 2026-11-02: when the pose freezes while AIRBORNE, stop sending vision (pose and speed), so the FC's own
+# EKF failsafe (FS_EKF_ACTION: QRLAND) lands it on its IMU instead (SITL 7c: ~5.6 m of drift, a 2-2.5 m/s
+# sideways touchdown: accepted). Driving keeps vision: Rover with no vision dead-reckons (SITL: a 65 m runaway
+# with an ungated cut); there the planner bridge's zero-speed stop handles a frozen pose. This covers manual
+# flights too, so it has its own detection (no dependency on the planner bridge), the same rule as the planner
+# bridge's FrozenPoseCheck (planner/ros/l4_bridge bridge_core.h) with its thresholds:
+#   * a repeat: a raw /Odometry pose within eps_m of the one before and every quaternion component within eps_q
+#     (a real FAST-LIO pose never repeats: 4 recordings, ~9200 pairs, smallest step 0.075 mm / 1.5e-5);
+#   * frozen: at least min_n repeats in a row AND evidence that the vehicle moves or is made to move, active
+#     without a break for hold_s. Evidence (each no older than evidence_age):
+#       command  a setpoint streamed to the FC (/mavros/setpoint_raw/local) asking for >= cmd_speed horizontally,
+#       gyro     the FC's IMU (/mavros/imu/data) turning at >= gyro_min,
+#       twist    the repeated /Odometry itself carrying >= twist_min,
+#       ekf      the FC's EKF velocity (/mavros/local_position/velocity_local) >= ekf_speed_min (the planner
+#                bridge has commands for this; a manual flight has none);
+#   * the FC must be alive: once an IMU sample was seen, nothing counts while the newest is older than
+#     evidence_age (SITL host stalls freeze the FC and the pose together).
+
+
+class FrozenPoseCheck(object):
+    """Repeated raw poses plus evidence of motion (a port of l4_bridge's FrozenPoseCheck, no ROS)."""
+
+    def __init__(self, eps_m=1e-5, eps_q=1e-6, hold_s=0.4, min_n=4, cmd_speed=0.2, gyro_min=0.2,
+                 twist_min=0.2, ekf_speed_min=0.2, evidence_age=0.25):
+        self.eps_m, self.eps_q, self.hold_s, self.min_n = eps_m, eps_q, hold_s, max(1, int(min_n))
+        self.cmd_speed, self.gyro_min, self.twist_min = cmd_speed, gyro_min, twist_min
+        self.ekf_speed_min, self.evidence_age = ekf_speed_min, evidence_age
+        self.repeats = 0              # repeated poses in a row
+        self.run_start = None         # receive time of the pose the run repeats
+        self.evidence_from = None     # the evidence active since (within this run)
+        self.last = None              # the previous raw pose (x, y, z, qx, qy, qz, qw)
+        self.twist = 0.0
+        self.t_cmd_move = self.t_gyro = self.t_ekf_move = self.t_pose = None
+        self.gyro = 0.0
+
+    def same(self, a, b):
+        return (a is not None and b is not None
+                and math.sqrt(sum((x - y) ** 2 for x, y in zip(a[:3], b[:3]))) <= self.eps_m
+                and all(abs(x - y) <= self.eps_q for x, y in zip(a[3:], b[3:])))
+
+    def on_pose(self, t, pose, twist_norm):
+        if self.same(pose, self.last):
+            if self.repeats == 0:
+                self.run_start = self.t_pose
+            self.repeats += 1
+        else:
+            self.repeats = 0
+            self.run_start = self.evidence_from = None
+        self.last = tuple(pose)
+        self.twist = twist_norm
+        self.t_pose = t
+
+    def on_command(self, t, speed):
+        if speed >= self.cmd_speed:
+            self.t_cmd_move = t
+
+    def on_gyro(self, t, rate):
+        self.t_gyro, self.gyro = t, rate
+
+    def on_ekf_velocity(self, t, speed):
+        if speed >= self.ekf_speed_min:
+            self.t_ekf_move = t
+
+    def evidence(self, now):
+        e = []
+        if self.t_cmd_move is not None and now - self.t_cmd_move <= self.evidence_age:
+            e.append("command")
+        if self.t_gyro is not None and now - self.t_gyro <= self.evidence_age and self.gyro >= self.gyro_min:
+            e.append("gyro")
+        if self.repeats > 0 and self.twist >= self.twist_min:
+            e.append("twist")
+        if self.t_ekf_move is not None and now - self.t_ekf_move <= self.evidence_age:
+            e.append("ekf")
+        return "+".join(e)
+
+    def check(self, now):
+        """-> the evidence when frozen, else None. Called on every pose (it runs the evidence clock)."""
+        if self.repeats == 0:
+            self.evidence_from = None
+            return None
+        fc_alive = self.t_gyro is None or now - self.t_gyro <= self.evidence_age
+        e = self.evidence(now) if fc_alive else ""
+        if not e:
+            self.evidence_from = None    # the evidence must last without a break
+            return None
+        if self.evidence_from is None:
+            self.evidence_from = now
+        if self.repeats >= self.min_n and now - self.evidence_from >= self.hold_s:
+            return e
+        return None
+
+
+class AirborneGate(object):
+    """Is the vehicle in the air? From the FC's own outputs, never from SLAM.
+
+    QuadRover reports no landed state (EXTENDED_SYS_STATE's landed_state is UNDEFINED in Rover) and GUIDED is
+    both a drive and a flight mode, so the mode alone cannot tell. The lift motors can: SERVO_OUTPUT_RAW
+    (/mavros/rc/out, the MAV1_RC_CHAN stream, 10 Hz on the robot and in SITL) on the lift-motor channels
+    (SERVO1-4 = Motor1-4 on the robot and in SITL). Airborne = armed AND the lift motors' mean output at least
+    pwm_min (above spin-min: producing thrust; drive mode has them stopped, spin-arm idle is below it), with
+    both /mavros/state and /mavros/rc/out fresh. Anything unknown (no or stale sample, disarmed) is "not
+    airborne": the default is not to cut. Landed (for the resume) = disarmed, or the lift motors below
+    pwm_min without a break for landed_s.
+    """
+
+    def __init__(self, channels=(1, 2, 3, 4), pwm_min=1200.0, max_age=1.0, state_max_age=3.0, landed_s=3.0):
+        self.channels = [int(c) for c in channels]
+        self.pwm_min, self.max_age, self.state_max_age, self.landed_s = pwm_min, max_age, state_max_age, landed_s
+        self.armed = None
+        self.mode = None
+        self.t_state = None
+        self.t_motors = None
+        self.motors = None            # mean lift-motor output (us)
+        self.idle_since = None        # lift motors below pwm_min (or disarmed) since
+
+    def on_state(self, t, armed, mode):
+        self.armed, self.mode, self.t_state = bool(armed), mode, t
+        if not self.armed and self.idle_since is None:
+            self.idle_since = t
+
+    def on_motors(self, t, channels_us):
+        vals = [channels_us[c - 1] for c in self.channels if 0 < c <= len(channels_us)]
+        if not vals:
+            return
+        self.motors, self.t_motors = sum(vals) / float(len(vals)), t
+        if self.motors >= self.pwm_min:
+            self.idle_since = None
+        elif self.idle_since is None:
+            self.idle_since = t
+
+    def airborne(self, now):
+        """-> (True | False, why)"""
+        if self.t_state is None or now - self.t_state > self.state_max_age:
+            return False, "no FC state"
+        if not self.armed:
+            return False, "disarmed"
+        if self.t_motors is None or now - self.t_motors > self.max_age:
+            return False, "no motor outputs (/mavros/rc/out)"
+        if self.motors < self.pwm_min:
+            return False, "lift motors %.0f us < %.0f" % (self.motors, self.pwm_min)
+        return True, "armed, lift motors %.0f us" % self.motors
+
+    def landed(self, now):
+        """True once disarmed, or the lift motors stayed below pwm_min for landed_s (fresh samples)"""
+        if self.t_state is not None and now - self.t_state <= self.state_max_age and not self.armed:
+            return True
+        return (self.idle_since is not None and self.t_motors is not None and now - self.t_motors <= self.max_age
+                and now - self.idle_since >= self.landed_s)
+
+
+class FrozenVisionCut(object):
+    """The latch: cut vision on a frozen pose while airborne; keep it cut until landed AND SLAM moves again.
+
+    on_pose() -> True when this pose must NOT go to the FC. Cut: FrozenPoseCheck frozen while AirborneGate
+    says airborne. Latched for the rest of the flight (SLAM coming back in the air does not resume: its frame
+    has a hole the EKF dead-reckoned through, and the FC is already landing). Resume: landed (disarmed, or
+    the lift motors idle for landed_s) AND resume_n poses in a row that differ from the frozen pose (SLAM
+    moving again; the same pose still repeated keeps it cut, also on the ground). The resumed pose is a gap
+    to the frame tracker, so it re-anchors onto the EKF (enable_reanchor) as after a laserMapping restart.
+    A frozen pose on the ground (not airborne) is reported, never cut.
+    """
+
+    def __init__(self, check, gate, resume_n=5):
+        self.check, self.gate, self.resume_n = check, gate, max(1, int(resume_n))
+        self.cut = False
+        self.frozen_pose = None
+        self.cut_at = None
+        self.cut_evidence = ""
+        self.moving_n = 0             # poses in a row that differ from the frozen pose (while cut)
+        self.ground_frozen = None     # the evidence of a frozen pose on the ground (not cut), else None
+        self.events = []              # (kind, text) for the caller to log; it clears them
+
+    def on_pose(self, t, pose, twist_norm):
+        self.check.on_pose(t, pose, twist_norm)
+        if self.cut:
+            self.moving_n = 0 if self.check.same(pose, self.frozen_pose) else self.moving_n + 1
+            if self.gate.landed(t) and self.moving_n >= self.resume_n:
+                self.cut = False
+                self.events.append(("resume", "landed and SLAM moving again (%d new poses): vision resumed after "
+                                    "%.1f s" % (self.moving_n, t - self.cut_at)))
+                self.frozen_pose = None
+                return False
+            return True
+        e = self.check.check(t)
+        if e is None:
+            self.ground_frozen = None
+            return False
+        air, why = self.gate.airborne(t)
+        if not air:
+            if self.ground_frozen is None:
+                self.events.append(("ground", "SLAM pose frozen (%d repeats, evidence %s) but not airborne (%s): "
+                                    "vision kept" % (self.check.repeats, e, why)))
+            self.ground_frozen = e
+            return False
+        self.cut, self.cut_at, self.cut_evidence = True, t, e
+        self.frozen_pose = tuple(pose)
+        self.moving_n = 0
+        self.ground_frozen = None
+        span = t - self.check.run_start if self.check.run_start is not None else 0.0
+        self.events.append(("cut", "SLAM pose frozen in the air (%d repeats over %.2f s, evidence %s; %s): vision "
+                            "pose and speed STOPPED, the FC's EKF failsafe takes over"
+                            % (self.check.repeats, span, e, why)))
+        return True
+
+    def status(self, now):
+        air, why = self.gate.airborne(now)
+        c = self.check
+        return {"vision": "cut" if self.cut else "on", "latched": self.cut,
+                "cut_for_s": round(now - self.cut_at, 2) if self.cut else None,
+                "cut_evidence": self.cut_evidence if self.cut else None,
+                "repeats": c.repeats,
+                "repeat_for_s": round(now - c.run_start, 2) if c.repeats and c.run_start is not None else 0.0,
+                "evidence": c.evidence(now) if c.repeats else "",
+                "frozen_on_ground": self.ground_frozen,
+                "airborne": air, "airborne_why": why, "landed": self.gate.landed(now),
+                "armed": self.gate.armed, "mode": self.gate.mode, "lift_motors_us": self.gate.motors}
 
 class FastLioMavrosBridge:
     def __init__(self):
@@ -157,18 +382,56 @@ class FastLioMavrosBridge:
             raise ValueError("~twist_frame must be 'world' or 'body', got %r" % self.twist_frame)
         self.odom_topic = rospy.get_param('~odom_topic', '/Odometry')
 
+        # FROZEN POSE IN THE AIR -> vision cut (see FrozenVisionCut above; owner decision 2026-11-02).
+        # The thresholds are the planner bridge's FrozenPoseCheck's. ~frozen_enable false: the old bridge.
+        self.frozen_enable = bool(rospy.get_param('~frozen_enable', True)) and _HAVE_MAVROS
+        self.frozen = FrozenVisionCut(
+            FrozenPoseCheck(eps_m=float(rospy.get_param('~frozen_eps_m', 1e-5)),
+                            eps_q=float(rospy.get_param('~frozen_eps_q', 1e-6)),
+                            hold_s=float(rospy.get_param('~frozen_hold_s', 0.4)),
+                            min_n=int(rospy.get_param('~frozen_min_n', 4)),
+                            cmd_speed=float(rospy.get_param('~frozen_cmd_speed', 0.2)),
+                            gyro_min=float(rospy.get_param('~frozen_gyro_min', 0.2)),
+                            twist_min=float(rospy.get_param('~frozen_twist_min', 0.2)),
+                            ekf_speed_min=float(rospy.get_param('~frozen_ekf_speed_min', 0.2)),
+                            evidence_age=float(rospy.get_param('~frozen_evidence_age', 0.25))),
+            AirborneGate(channels=rospy.get_param('~frozen_motor_channels', [1, 2, 3, 4]),
+                         pwm_min=float(rospy.get_param('~frozen_airborne_pwm', 1200.0)),
+                         max_age=float(rospy.get_param('~frozen_motor_max_age', 1.0)),
+                         landed_s=float(rospy.get_param('~frozen_landed_s', 3.0))),
+            resume_n=int(rospy.get_param('~frozen_resume_n', 5)))
+        self.frozen_lock = threading.Lock()
+        self._ground_text_t = -1e9
+
         # Publishers and Subscribers
         self.vision_pub = rospy.Publisher('/mavros/vision_pose/pose', PoseStamped, queue_size=50)
         self.vel_pub = rospy.Publisher('/mavros/vision_speed/speed_vector', Vector3Stamped, queue_size=50)
         self.odom_sub = rospy.Subscriber(self.odom_topic, Odometry, self.odometry_callback)
         self.st_pub = None
+        if (self.enable_reanchor or self.frozen_enable) and _HAVE_MAVROS:
+            self.st_pub = rospy.Publisher('/mavros/statustext/send', StatusText, queue_size=5)
         if self.enable_reanchor and _HAVE_MAVROS:
             rospy.Subscriber('/mavros/local_position/pose', PoseStamped, self.ekf_pose_callback, queue_size=20)
             rospy.Subscriber(rospy.get_param('~mavlink_from_topic', '/mavlink/from'), Mavlink,
                              self.mavlink_callback, queue_size=50)
-            self.st_pub = rospy.Publisher('/mavros/statustext/send', StatusText, queue_size=5)
         elif self.enable_reanchor:
             rospy.logwarn("mavros_msgs not available: no EKF to anchor to, yaw-datum only")
+        if self.frozen_enable:
+            rospy.Subscriber('/mavros/imu/data', Imu, self.frozen_imu_cb, queue_size=50)
+            rospy.Subscriber('/mavros/state', State, self.frozen_state_cb, queue_size=5)
+            rospy.Subscriber('/mavros/rc/out', RCOut, self.frozen_rcout_cb, queue_size=10)
+            rospy.Subscriber('/mavros/setpoint_raw/local', PositionTarget, self.frozen_setpoint_cb, queue_size=20)
+            rospy.Subscriber('/mavros/local_position/velocity_local', TwistStamped, self.frozen_ekf_vel_cb,
+                             queue_size=20)
+            # ~frozen_status (std_msgs/String, JSON): vision on/cut, the repeat run, the evidence, the gate; 2 Hz
+            # and at every event
+            self.frozen_pub = rospy.Publisher('~frozen_status', String, queue_size=5, latch=True)
+            rospy.Timer(rospy.Duration(0.5), lambda _e: self.publish_frozen_status())
+            rospy.Timer(rospy.Duration(10.0), self.frozen_gate_watch, oneshot=True)
+            rospy.loginfo("Frozen-pose vision cut ON: airborne = armed + lift motors (SERVO%s) >= %.0f us",
+                          self.frozen.gate.channels, self.frozen.gate.pwm_min)
+        else:
+            rospy.logwarn("Frozen-pose vision cut OFF (~frozen_enable false or no mavros_msgs)")
 
         rospy.loginfo("FAST-LIO to MAVROS bridge started (odom_topic=%s, position_matrix det=%.3f, remap_axes=%s, publish_velocity=%s, twist_frame=%s, fc_mount_yaw_deg=%.3f)",
                       self.odom_topic, np.linalg.det(self.Mpos), self.remap_axes, self.publish_velocity,
@@ -177,9 +440,79 @@ class FastLioMavrosBridge:
         if self.publish_velocity:
             rospy.loginfo("Publishing vision speed to /mavros/vision_speed/speed_vector")
 
+    # ---- frozen pose in the air (FrozenVisionCut) ----
+    def frozen_imu_cb(self, msg):
+        w = msg.angular_velocity
+        with self.frozen_lock:
+            self.frozen.check.on_gyro(rospy.get_time(), math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z))
+
+    def frozen_state_cb(self, msg):
+        if not msg.connected:
+            return   # no FC: the state ages out (neither airborne nor landed), never "disarmed"
+        with self.frozen_lock:
+            self.frozen.gate.on_state(rospy.get_time(), msg.armed, msg.mode)
+
+    def frozen_rcout_cb(self, msg):
+        with self.frozen_lock:
+            self.frozen.gate.on_motors(rospy.get_time(), list(msg.channels))
+
+    def frozen_setpoint_cb(self, msg):
+        # a flight target's horizontal velocity feed-forward (PosVelAccel from the planner bridge)
+        if msg.type_mask & (PositionTarget.IGNORE_VX | PositionTarget.IGNORE_VY):
+            return
+        with self.frozen_lock:
+            self.frozen.check.on_command(rospy.get_time(), math.hypot(msg.velocity.x, msg.velocity.y))
+
+    def frozen_ekf_vel_cb(self, msg):
+        v = msg.twist.linear
+        with self.frozen_lock:
+            self.frozen.check.on_ekf_velocity(rospy.get_time(), math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z))
+
+    def frozen_gate_watch(self, _evt):
+        """10 s after start: say so loudly if the airborne gate has no motor outputs (the cut could never fire)"""
+        with self.frozen_lock:
+            seen = self.frozen.gate.t_motors is not None
+        if not seen:
+            rospy.logwarn("Frozen-pose vision cut: no /mavros/rc/out yet (SERVO_OUTPUT_RAW, MAV1_RC_CHAN): "
+                          "the airborne gate reads 'not airborne', so a frozen pose would NOT cut vision")
+
+    def publish_frozen_status(self):
+        with self.frozen_lock:
+            s = self.frozen.status(rospy.get_time())
+        self.frozen_pub.publish(String(data=json.dumps(s)))
+
+    def frozen_filter(self, odom_msg):
+        """True: this pose must not go to the FC (vision cut). Logs and reports the latch's events."""
+        p, q = odom_msg.pose.pose.position, odom_msg.pose.pose.orientation
+        lv = odom_msg.twist.twist.linear
+        with self.frozen_lock:
+            drop = self.frozen.on_pose(rospy.get_time(), (p.x, p.y, p.z, q.x, q.y, q.z, q.w),
+                                       math.sqrt(lv.x * lv.x + lv.y * lv.y + lv.z * lv.z))
+            events, self.frozen.events = self.frozen.events, []
+        for kind, text in events:
+            if kind == "cut":
+                rospy.logerr(text)
+                self.send_statustext("SLAM frozen in air: vision CUT", StatusText.CRITICAL)
+            elif kind == "resume":
+                rospy.logwarn(text)
+                self.send_statustext("SLAM moving, landed: vision resumed", StatusText.WARNING)
+            else:
+                rospy.logwarn(text)
+                now = rospy.get_time()
+                if now - self._ground_text_t > 30.0:
+                    self._ground_text_t = now
+                    self.send_statustext("SLAM frozen on ground: vision kept", StatusText.WARNING)
+        if events:
+            self.publish_frozen_status()
+        if drop:
+            rospy.logerr_throttle(2.0, "SLAM pose frozen in the air: vision CUT (latched until landed and SLAM moves)")
+        return drop
+
     def odometry_callback(self, odom_msg):
         """Publish FAST-LIO odometry as MAVROS vision pose, keeping the original timestamp."""
         try:
+            if self.frozen_enable and self.frozen_filter(odom_msg):
+                return   # nothing to the FC, nor to the frame tracker: the cut is a gap (re-anchor on resume)
             pose_msg = PoseStamped()
             # System-time stamp (mavros-timesynced to FC), not the sensor's internal clock.
             pose_msg.header.stamp = rospy.Time.now() if self.restamp_system_time else odom_msg.header.stamp
@@ -334,10 +667,10 @@ class FastLioMavrosBridge:
             except Exception:  # noqa: BLE001 - FC or MAVROS not ready: keep trying
                 rospy.sleep(5.0)
 
-    def send_statustext(self, text):
+    def send_statustext(self, text, severity=None):
         if self.st_pub is not None:
             m = StatusText()
-            m.severity = StatusText.NOTICE
+            m.severity = StatusText.NOTICE if severity is None else severity
             m.text = text[:50]
             self.st_pub.publish(m)
 

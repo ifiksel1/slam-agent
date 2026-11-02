@@ -415,6 +415,172 @@ Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, 
   return p_now;
 }
 
+HoldPoint waypoint_hold_point(const std::optional<Vec3>& goal_fc, const std::optional<Vec3>& planner_goal_fc,
+                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear) {
+  auto ok = [&](const std::optional<Vec3>& c) { return c && (*c - p_now).norm() <= goal_max && (!clear || clear(*c)); };
+  if (ok(goal_fc)) return {*goal_fc, "goal"};
+  if (ok(planner_goal_fc)) return {*planner_goal_fc, "planner_goal"};
+  return {p_now, "vehicle"};
+}
+
+// ---- obstacles on the path ahead ---------------------------------------------------------------------
+
+ObstacleVoxels::ObstacleVoxels(double voxel_, int scans_n, double self_r_)
+    : voxel(voxel_), self_r(self_r_), scans(std::max(1, scans_n)) {}
+
+int64_t ObstacleVoxels::key(int64_t i, int64_t j, int64_t k) {
+  // 21 bits per axis (+-1e6 voxels: +-100 km at 0.1 m)
+  const int64_t m = (int64_t(1) << 21) - 1, o = int64_t(1) << 20;
+  return (((i + o) & m) << 42) | (((j + o) & m) << 21) | ((k + o) & m);
+}
+
+void ObstacleVoxels::begin_scan(double t, const std::optional<Vec3>& vehicle) {
+  cur_.clear();
+  veh_ = vehicle;
+  t_cur_ = t;
+  open_ = true;
+}
+
+void ObstacleVoxels::add(double x, double y, double z) {
+  if (!open_ || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+  if (veh_) {
+    const double dx = x - (*veh_)[0], dy = y - (*veh_)[1], dz = z - (*veh_)[2];
+    if (dx * dx + dy * dy + dz * dz <= self_r * self_r) return;
+  }
+  cur_.push_back(key(int64_t(std::floor(x / voxel)), int64_t(std::floor(y / voxel)), int64_t(std::floor(z / voxel))));
+}
+
+void ObstacleVoxels::end_scan() {
+  if (!open_) return;
+  open_ = false;
+  std::sort(cur_.begin(), cur_.end());
+  cur_.erase(std::unique(cur_.begin(), cur_.end()), cur_.end());
+  for (int64_t k : cur_) occ_[k] += 1;
+  scans_.emplace_back(t_cur_, std::move(cur_));
+  cur_ = {};
+  while (int(scans_.size()) > scans) {
+    for (int64_t k : scans_.front().second) {
+      auto it = occ_.find(k);
+      if (it != occ_.end() && --it->second <= 0) occ_.erase(it);
+    }
+    scans_.pop_front();
+  }
+}
+
+int ObstacleVoxels::count_within(const Vec3& p, double r) const {
+  if (occ_.empty() || !(r > 0)) return 0;
+  const int64_t i0 = int64_t(std::floor((p[0] - r) / voxel)), i1 = int64_t(std::floor((p[0] + r) / voxel));
+  const int64_t j0 = int64_t(std::floor((p[1] - r) / voxel)), j1 = int64_t(std::floor((p[1] + r) / voxel));
+  const int64_t k0 = int64_t(std::floor((p[2] - r) / voxel)), k1 = int64_t(std::floor((p[2] + r) / voxel));
+  const double r2 = r * r;
+  int n = 0;
+  for (int64_t i = i0; i <= i1; ++i) {
+    const double dx = (i + 0.5) * voxel - p[0];
+    for (int64_t j = j0; j <= j1; ++j) {
+      const double dy = (j + 0.5) * voxel - p[1];
+      if (dx * dx + dy * dy > r2) continue;
+      for (int64_t k = k0; k <= k1; ++k) {
+        const double dz = (k + 0.5) * voxel - p[2];
+        if (dx * dx + dy * dy + dz * dz > r2) continue;
+        if (occ_.count(key(i, j, k))) ++n;
+      }
+    }
+  }
+  return n;
+}
+
+double PolyTraj::duration() const {
+  double d = 0.0;
+  for (double x : dur) d += x;
+  return d;
+}
+
+Vec3 PolyTraj::pos(double t) const {
+  if (dur.empty()) return Vec3::Zero();
+  const int n1 = order + 1;
+  double tt = std::max(0.0, t - t0);
+  size_t i = 0;
+  while (i + 1 < dur.size() && tt > dur[i]) {
+    tt -= dur[i];
+    ++i;
+  }
+  tt = std::min(tt, dur[i]);
+  Vec3 out = Vec3::Zero();
+  const size_t b = i * size_t(n1);
+  if (b + n1 > cx.size() || b + n1 > cy.size() || b + n1 > cz.size()) return out;
+  // Horner, highest power first
+  for (int k = 0; k < n1; ++k) out = out * tt + Vec3(cx[b + k], cy[b + k], cz[b + k]);
+  return out;
+}
+
+std::vector<Vec3> path_samples(const std::optional<PolyTraj>& traj, double t_from, double t_to, double dt,
+                               const Vec3& vehicle, const Vec3& target, double step, double skip) {
+  std::vector<Vec3> out;
+  if (traj && !traj->empty() && dt > 0) {
+    const double a = std::max(t_from, traj->t0), b = std::min(t_to, traj->t0 + traj->duration());
+    if (b >= a) {
+      for (double t = a; t < b; t += dt) out.push_back(traj->pos(t));
+      out.push_back(traj->pos(b));
+    } else {
+      out.push_back(traj->pos(t_from));   // the trajectory is over (its end) or not begun (its start)
+    }
+  }
+  const Vec3 d = target - vehicle;
+  const int n = std::max(1, int(std::ceil(d.norm() / std::max(step, 1e-3))));
+  for (int k = 0; k <= n; ++k) out.push_back(vehicle + d * (double(k) / n));
+  if (skip > 0)
+    out.erase(std::remove_if(out.begin(), out.end(), [&](const Vec3& p) { return (p - vehicle).norm() < skip; }), out.end());
+  return out;
+}
+
+PathGuard::PathGuard(double r_, int min_voxels_, double release_s_)
+    : r(r_), release_s(release_s_), min_voxels(std::max(1, min_voxels_)) {}
+
+void PathGuard::reset() {
+  blocked = false;
+  since.reset();
+  at.reset();
+  voxels = 0;
+  clear_since.reset();
+}
+
+bool PathGuard::update(double now, const ObstacleVoxels& obs, const std::vector<Vec3>& samples,
+                       std::optional<double> traj_rcv) {
+  std::optional<Vec3> hit;
+  int nv = 0;
+  for (const Vec3& p : samples) {
+    nv = obs.count_within(p, r);
+    if (nv >= min_voxels) {
+      hit = p;
+      break;
+    }
+  }
+  if (hit) {
+    at = hit;
+    voxels = nv;
+  }
+  if (!blocked) {
+    if (hit) {
+      blocked = true;
+      since = now;
+      clear_since.reset();
+    }
+    return blocked;
+  }
+  const bool new_plan = !traj_rcv || (since && *traj_rcv > *since);
+  if (hit || !new_plan) {
+    clear_since.reset();
+    return blocked;
+  }
+  if (!clear_since) clear_since = now;
+  if (now - *clear_since >= release_s) {
+    blocked = false;
+    since.reset();
+    clear_since.reset();
+  }
+  return blocked;
+}
+
 bool departed(const Vec3& point, const std::optional<Vec3>& goal_fc, bool goal_new, const Vec3& p_cmd, const Vec3& v_cmd,
               double speed_min, double behind_tol, double min_dist) {
   if (!goal_fc) return true;   // no goal known: nothing to wait for

@@ -400,6 +400,10 @@ class EvidenceMemory {
   // ... and the overhang channels: u seen through beneath (Evidence::under), l hit there (Evidence::low)
   void read(const HeightGrid& hg, double now, std::vector<double>& h, std::vector<double>& m,
             std::vector<double>& w, std::vector<double>& u, std::vector<double>& l);
+  // per cell of hg: the time since a scan last hit it in the band (Evidence::hit; +inf: never), undecayed. The
+  // newest observation wins (L2 5b, 2026-11-02): a box that appears in a cell seen through for seconds is hit
+  // now, whatever the decayed counts say
+  void hit_age(const HeightGrid& hg, double now, std::vector<double>& age);
   double res, tau;
 
  private:
@@ -407,7 +411,7 @@ class EvidenceMemory {
   V2 lo = V2::Zero();
   int ny = 0, nx = 0;
   std::vector<float> h_, m_, w_, u_, l_;
-  std::vector<double> t_;
+  std::vector<double> t_, th_;   // th_: the last band hit's time (-inf: none)
   void ensure(const V2& lo, const V2& hi);
   std::pair<int, int> view(const HeightGrid& hg);
 };
@@ -428,6 +432,10 @@ class LiveWindow {
   double keep_radius;
   std::unique_ptr<EvidenceMemory> mem;
   double mem_hits, mem_clear_ratio;
+  // a cell hit by a scan within this many seconds of the newest is never cleared as moved (the newest
+  // observation wins: L2 5b, 2026-11-02, a box appearing in a cell long seen free); 0: the newest scan only,
+  // < 0: off (the decayed counts alone, as before)
+  double mem_hit_hold = 0.3;
   int max_new;
   struct Scan {
     CloudF p;

@@ -44,6 +44,32 @@ ceiling_radius: 0.6          # m horizontally from the vehicle (SUPER's 0.5 m in
 ceiling_min_up: 0.15         # m above the vehicle a point must be to count (its own body, its level)
 ceiling_max_age: 1.0         # s: an older scan's ceiling is not reported (null)
 
+# the path ahead (L2 5a, SITL f25r, 2026-11-02): SUPER played a committed trajectory through a pillar that appeared after
+# it was planned (its replans failed; SUPER never checks it). The bridge checks SUPER's committed trajectory
+# (/planning_cmd/poly_traj) from path_block_back_s behind to path_block_horizon_s ahead, and the segment from the
+# vehicle to the streamed target, against the occupied voxels of the latest scans: blocked -> HOLD "path_blocked"
+# (flight; the zero-velocity hover at the vehicle), until a new SUPER plan checks clear for path_block_release_s.
+# Clean runs (d12, d13, L1, L3, k1 container, lf16 pre-fault): SUPER's next 1.5 s came no nearer than 0.372 m to the
+# scans (robot_r 0.44 would have tripped d13 and L3); f25r's ran through the pillar (0.005 m)
+path_block_enable: true
+path_block_r: 0.30           # m: an occupied voxel centre this near a path sample counts (the frame reaches 0.25 m)
+path_block_min_voxels: 2     # occupied voxels within path_block_r of one sample to block (one is a stray return)
+path_block_horizon_s: 1.5    # s of SUPER's committed trajectory ahead
+path_block_back_s: 0.5       # s behind SUPER's clock (the turn slowdown's replay lags up to turn_slow_max_lag_s)
+path_block_dt: 0.05          # s between trajectory samples, m between segment samples
+path_block_skip: 0.25        # m: samples this near the vehicle are not checked (where it already is; Gate L2 oxg3)
+path_block_release_s: 0.3    # s a new plan must check clear
+path_block_voxel: 0.1        # m
+path_block_scans: 3          # latest /planner/cloud scans kept
+path_block_self_r: 0.4       # m: points this near the vehicle are its own (FAST-LIO blind 0.4 on the robot)
+path_block_cloud_max_age: 0.5   # s: older voxels are not checked against (the block, if any, stays)
+path_block_traj_topic: /planning_cmd/poly_traj
+# the waypoint hold point (L2 5a lf16: the raw goal 0.19 m from a pillar): the executive's goal, else SUPER's
+# committed trajectory's end (its reached or shifted goal), else the vehicle: the first with fewer than
+# path_block_min_voxels occupied voxels within waypoint_clear_r
+waypoint_clear_r: 0.44       # m, SUPER's robot_r
+waypoint_clear_scans: 10     # latest scans for that check (unfiltered: nothing near the vehicle is left out)
+
 # HOLD triggers
 planner_timeout: 0.3         # s since the mode's planner command (SUPER ~100 Hz, track planner 10 Hz)
                              # older: HOLD "planner stale" (resumable) while the planner process is
