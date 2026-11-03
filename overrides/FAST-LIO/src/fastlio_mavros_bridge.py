@@ -48,14 +48,21 @@ except ImportError:
 _EKF_STATUS_REPORT_MSGID = 193
 
 
-# ---- FROZEN SLAM POSE IN THE AIR: cut vision (owner decision 2026-11-02) -----------------------------
+# ---- FROZEN SLAM POSE: cut vision (owner decisions 2026-11-02 in the air, 2026-11-03 on the ground) ---
 # FAST-LIO stuck on its last pose, republished with fresh stamps, passes every freshness check, and the FC's
 # EKF fuses it: the FC then flies on a position that does not move (SITL L2 fault 2b: 45 m at 8.4 m/s on
 # 10-28; 9 m and a 1.39 m/s ground strike on 11-02, the executive's QRLAND still fusing the frozen pose).
 # Owner 2026-11-02: when the pose freezes while AIRBORNE, stop sending vision (pose and speed), so the FC's own
 # EKF failsafe (FS_EKF_ACTION: QRLAND) lands it on its IMU instead (SITL 7c: ~5.6 m of drift, a 2-2.5 m/s
-# sideways touchdown: accepted). Driving keeps vision: Rover with no vision dead-reckons (SITL: a 65 m runaway
-# with an ungated cut); there the planner bridge's zero-speed stop handles a frozen pose. This covers manual
+# sideways touchdown: accepted). Owner 2026-11-03: cut on the ground too, then (same day, after SITL) kept OFF by default (~frozen_ground_cut,
+# default false): with vision cut the EKF dead-reckons 7-44 m and 2-6 m/s with no failsafe for ~16 s, only Rover's
+# stop latch prevents a runaway, and one 2d run stopped later (4.96 m) than without the cut (RESULTS_20261102.md).
+# When true:
+# driving on a frozen pose, the EKF follows it and Rover's zero-speed stop (planner bridge / executive, MASK_STOP)
+# does not brake (SITL 2d: the rover coasts ~4.5 m). With vision cut the EKF runs on its IMU and the stop brakes on
+# a velocity that moves (SITL results: planner/sim/faults/RESULTS_20261102.md, "Ground cut"). An Oct 30 SITL cut
+# WITHOUT the planner's stop ran away ~65 m (Rover dead-reckoning on a stale target). A ground cut resumes as soon
+# as SLAM moves again (no landing to wait for); false: the old rule (reported, vision kept). This covers manual
 # flights too, so it has its own detection (no dependency on the planner bridge), the same rule as the planner
 # bridge's FrozenPoseCheck (planner/ros/l4_bridge bridge_core.h) with its thresholds:
 #   * a repeat: a raw /Odometry pose within eps_m of the one before and every quaternion component within eps_q
@@ -203,20 +210,26 @@ class AirborneGate(object):
 
 
 class FrozenVisionCut(object):
-    """The latch: cut vision on a frozen pose while airborne; keep it cut until landed AND SLAM moves again.
+    """The latch: cut vision on a frozen pose, in the air and (ground_cut) on the ground; keep it cut until SLAM
+    moves again (and, after a cut in the air, the vehicle has landed).
 
-    on_pose() -> True when this pose must NOT go to the FC. Cut: FrozenPoseCheck frozen while AirborneGate
-    says airborne. Latched for the rest of the flight (SLAM coming back in the air does not resume: its frame
-    has a hole the EKF dead-reckoned through, and the FC is already landing). Resume: landed (disarmed, or
-    the lift motors idle for landed_s) AND resume_n poses in a row that differ from the frozen pose (SLAM
-    moving again; the same pose still repeated keeps it cut, also on the ground). The resumed pose is a gap
-    to the frame tracker, so it re-anchors onto the EKF (enable_reanchor) as after a laserMapping restart.
-    A frozen pose on the ground (not airborne) is reported, never cut.
+    on_pose() -> True when this pose must NOT go to the FC. Cut: FrozenPoseCheck frozen; where: AirborneGate's
+    word at the cut ("air" | "ground").
+      * in the air: latched for the rest of the flight (SLAM coming back in the air does not resume: its frame
+        has a hole the EKF dead-reckoned through, and the FC is already landing). Resume: landed (disarmed, or
+        the lift motors idle for landed_s) AND resume_n poses in a row that differ from the frozen pose;
+      * on the ground (owner decision 2026-11-03; ground_cut, else only reported, vision kept): resume once
+        SLAM moves again (resume_n new poses in a row) while the gate still says not airborne; airborne at
+        that moment (a takeoff with vision cut): held until landed, as an air cut.
+    The same pose still repeated keeps it cut. The resumed pose is a gap to the frame tracker, so it
+    re-anchors onto the EKF (enable_reanchor) as after a laserMapping restart.
     """
 
-    def __init__(self, check, gate, resume_n=5):
+    def __init__(self, check, gate, resume_n=5, ground_cut=False):
         self.check, self.gate, self.resume_n = check, gate, max(1, int(resume_n))
+        self.ground_cut = bool(ground_cut)
         self.cut = False
+        self.cut_where = None         # "air" | "ground" while cut
         self.frozen_pose = None
         self.cut_at = None
         self.cut_evidence = ""
@@ -228,44 +241,57 @@ class FrozenVisionCut(object):
         self.check.on_pose(t, pose, twist_norm)
         if self.cut:
             self.moving_n = 0 if self.check.same(pose, self.frozen_pose) else self.moving_n + 1
-            if self.gate.landed(t) and self.moving_n >= self.resume_n:
-                self.cut = False
-                self.events.append(("resume", "landed and SLAM moving again (%d new poses): vision resumed after "
-                                    "%.1f s" % (self.moving_n, t - self.cut_at)))
-                self.frozen_pose = None
-                return False
+            if self.moving_n >= self.resume_n:
+                if self.cut_where == "ground":
+                    air, why = self.gate.airborne(t)
+                    ok, how = not air, "on the ground (%s)" % why
+                else:
+                    ok, how = self.gate.landed(t), "landed"
+                if ok:
+                    self.cut = False
+                    self.events.append(("resume", "%s and SLAM moving again (%d new poses): vision resumed after "
+                                        "%.1f s (cut %s)" % (how, self.moving_n, t - self.cut_at, self.cut_where)))
+                    self.frozen_pose = self.cut_where = None
+                    return False
             return True
         e = self.check.check(t)
         if e is None:
             self.ground_frozen = None
             return False
         air, why = self.gate.airborne(t)
-        if not air:
+        if not air and not self.ground_cut:
             if self.ground_frozen is None:
                 self.events.append(("ground", "SLAM pose frozen (%d repeats, evidence %s) but not airborne (%s): "
                                     "vision kept" % (self.check.repeats, e, why)))
             self.ground_frozen = e
             return False
         self.cut, self.cut_at, self.cut_evidence = True, t, e
+        self.cut_where = "air" if air else "ground"
         self.frozen_pose = tuple(pose)
         self.moving_n = 0
         self.ground_frozen = None
         span = t - self.check.run_start if self.check.run_start is not None else 0.0
-        self.events.append(("cut", "SLAM pose frozen in the air (%d repeats over %.2f s, evidence %s; %s): vision "
-                            "pose and speed STOPPED, the FC's EKF failsafe takes over"
-                            % (self.check.repeats, span, e, why)))
+        if air:
+            self.events.append(("cut", "SLAM pose frozen in the air (%d repeats over %.2f s, evidence %s; %s): "
+                                "vision pose and speed STOPPED, the FC's EKF failsafe takes over"
+                                % (self.check.repeats, span, e, why)))
+        else:
+            self.events.append(("cut_ground", "SLAM pose frozen on the ground (%d repeats over %.2f s, evidence %s; "
+                                "not airborne: %s): vision pose and speed STOPPED until SLAM moves again"
+                                % (self.check.repeats, span, e, why)))
         return True
 
     def status(self, now):
         air, why = self.gate.airborne(now)
         c = self.check
         return {"vision": "cut" if self.cut else "on", "latched": self.cut,
+                "cut_where": self.cut_where if self.cut else None,
                 "cut_for_s": round(now - self.cut_at, 2) if self.cut else None,
                 "cut_evidence": self.cut_evidence if self.cut else None,
                 "repeats": c.repeats,
                 "repeat_for_s": round(now - c.run_start, 2) if c.repeats and c.run_start is not None else 0.0,
                 "evidence": c.evidence(now) if c.repeats else "",
-                "frozen_on_ground": self.ground_frozen,
+                "frozen_on_ground": self.ground_frozen, "ground_cut": self.ground_cut,
                 "airborne": air, "airborne_why": why, "landed": self.gate.landed(now),
                 "armed": self.gate.armed, "mode": self.gate.mode, "lift_motors_us": self.gate.motors}
 
@@ -399,7 +425,8 @@ class FastLioMavrosBridge:
                          pwm_min=float(rospy.get_param('~frozen_airborne_pwm', 1200.0)),
                          max_age=float(rospy.get_param('~frozen_motor_max_age', 1.0)),
                          landed_s=float(rospy.get_param('~frozen_landed_s', 3.0))),
-            resume_n=int(rospy.get_param('~frozen_resume_n', 5)))
+            resume_n=int(rospy.get_param('~frozen_resume_n', 5)),
+            ground_cut=bool(rospy.get_param('~frozen_ground_cut', False)))
         self.frozen_lock = threading.Lock()
         self._ground_text_t = -1e9
 
@@ -428,7 +455,8 @@ class FastLioMavrosBridge:
             self.frozen_pub = rospy.Publisher('~frozen_status', String, queue_size=5, latch=True)
             rospy.Timer(rospy.Duration(0.5), lambda _e: self.publish_frozen_status())
             rospy.Timer(rospy.Duration(10.0), self.frozen_gate_watch, oneshot=True)
-            rospy.loginfo("Frozen-pose vision cut ON: airborne = armed + lift motors (SERVO%s) >= %.0f us",
+            rospy.loginfo("Frozen-pose vision cut ON (in the air%s): airborne = armed + lift motors (SERVO%s) >= %.0f us",
+                          " and on the ground" if self.frozen.ground_cut else "; on the ground reported only",
                           self.frozen.gate.channels, self.frozen.gate.pwm_min)
         else:
             rospy.logwarn("Frozen-pose vision cut OFF (~frozen_enable false or no mavros_msgs)")
@@ -493,9 +521,12 @@ class FastLioMavrosBridge:
             if kind == "cut":
                 rospy.logerr(text)
                 self.send_statustext("SLAM frozen in air: vision CUT", StatusText.CRITICAL)
+            elif kind == "cut_ground":
+                rospy.logerr(text)
+                self.send_statustext("SLAM frozen on ground: vision CUT", StatusText.CRITICAL)
             elif kind == "resume":
                 rospy.logwarn(text)
-                self.send_statustext("SLAM moving, landed: vision resumed", StatusText.WARNING)
+                self.send_statustext("SLAM moving again: vision resumed", StatusText.WARNING)
             else:
                 rospy.logwarn(text)
                 now = rospy.get_time()
@@ -505,7 +536,8 @@ class FastLioMavrosBridge:
         if events:
             self.publish_frozen_status()
         if drop:
-            rospy.logerr_throttle(2.0, "SLAM pose frozen in the air: vision CUT (latched until landed and SLAM moves)")
+            rospy.logerr_throttle(2.0, "SLAM pose frozen: vision CUT (%s; latched until %s)" % (
+                self.frozen.cut_where, "landed and SLAM moves" if self.frozen.cut_where == "air" else "SLAM moves"))
         return drop
 
     def odometry_callback(self, odom_msg):

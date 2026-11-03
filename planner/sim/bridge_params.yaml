@@ -7,5 +7,6 @@ orientation_matrix: [0, 0, 1, 1, 0, 0, 0, 1, 0]
 fc_mount_yaw_deg: -0.45
 restamp_system_time: false
 enable_reanchor: true
-# the frozen-pose vision cut (FrozenVisionCut, owner 2026-11-02) runs with the robot's defaults: frozen_enable true,
-# the planner bridge's thresholds, airborne = armed + SERVO1-4 (the lift motors, also in SITL) >= 1200 us
+# the frozen-pose vision cut (FrozenVisionCut, owner 2026-11-02 in the air, 2026-11-03 on the ground) runs with the
+# robot's defaults: frozen_enable true, frozen_ground_cut false (owner 2026-11-03: off), the planner bridge's thresholds, airborne = armed +
+# SERVO1-4 (the lift motors, also in SITL) >= 1200 us. A/B without the ground cut: SLAM_DIR with the default false.

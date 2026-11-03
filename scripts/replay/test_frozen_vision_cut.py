@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Test of the SLAM-to-FC bridge's frozen-pose vision cut (fastlio_mavros_bridge.py: FrozenPoseCheck,
-AirborneGate, FrozenVisionCut; owner decision 2026-11-02).
+AirborneGate, FrozenVisionCut; owner decisions 2026-11-02 in the air, 2026-11-03 on the ground).
 
 Synthetic streams at the robot's rates (pose 20 Hz, FC IMU / EKF velocity / setpoints 50 Hz, SERVO_OUTPUT_RAW
 10 Hz, HEARTBEAT 1 Hz). Checks:
   1. frozen in flight with a streamed command (an L4 leg, SITL 2b) -> cut within ~0.5 s; vision stays cut;
   2. frozen in a manual flight: no command, the EKF velocity or the gyro is the evidence -> cut;
-  3. frozen while driving (lift motors stopped) -> never cut, reported once ("ground");
+  3. frozen while driving (lift motors stopped): ground_cut false -> never cut, reported once ("ground");
+     ground_cut true (default) -> cut within ~0.5 s ("cut_ground"); resumes once SLAM moves again (resume_n new
+     poses) on the ground; the frozen pose repeated keeps it; a takeoff while cut holds it until landed;
   4. parked or hovering with the pose repeating and no motion evidence -> no cut (SITL repeats exactly);
   5. the FC stalled (its IMU stale) while the setpoints still stream -> no cut;
-  6. the gate unknown (no /mavros/rc/out, stale outputs, stale state, disarmed, spin-arm idle) -> no cut;
+  6. the gate unknown (no /mavros/rc/out, stale outputs, stale state, disarmed, spin-arm idle) -> no air cut
+     (ground_cut false: no cut at all; true: a ground cut);
   7. the latch: SLAM moving again in the air keeps the cut; landed (lift motors idle 3 s, or disarmed) with
      SLAM still frozen keeps it; landed AND resume_n new poses resumes; one new pose then the frozen one again
      does not;
@@ -64,8 +67,8 @@ def check(cond, what):
         failures.append(what)
 
 
-def make():
-    return FrozenVisionCut(FrozenPoseCheck(), AirborneGate(), resume_n=5)
+def make(ground_cut=True):
+    return FrozenVisionCut(FrozenPoseCheck(), AirborneGate(), resume_n=5, ground_cut=ground_cut)
 
 
 def run(cut, t0, t1, pose_at, armed=True, motors=1450.0, gyro=0.05, cmd=None, ekf=0.0, twist=0.0,
@@ -131,13 +134,49 @@ t = first_drop(out)
 check(t is not None and 7.0 <= t <= 7.6, "no evidence until 7 s (hover), then gyro: cut at %.2f" % (t or 99))
 check(c.cut_evidence == "gyro", "evidence gyro")
 
-print("3. frozen while driving (lift motors stopped): vision kept")
-c = make()
+print("3. frozen while driving (lift motors stopped), ground_cut false: vision kept")
+c = make(ground_cut=False)
 run(c, 0.0, 5.0, moving, motors=1000.0, cmd=1.0, ekf=1.0)
 out = run(c, 5.0, 15.0, frozen_at(5.0), motors=1000.0, cmd=1.0, ekf=1.0, twist=1.0)
 check(first_drop(out) is None, "no pose dropped")
 check(kinds(c) == ["ground"], "reported once as frozen on the ground: %s" % kinds(c))
 check(c.status(15.0)["frozen_on_ground"] is not None and c.status(15.0)["vision"] == "on", "status says so")
+
+print("3b. frozen while driving, ground_cut true (owner 2026-11-03): cut, resume when SLAM moves")
+c = make()
+run(c, 0.0, 5.0, moving, motors=1000.0, cmd=1.0, ekf=1.0)
+out = run(c, 5.0, 13.0, frozen_at(5.0), motors=1000.0, cmd=lambda t: 1.0 if t < 5.6 else 0.0,
+          ekf=lambda t: max(0.0, 1.0 - 2.0 * (t - 5.0)), twist=1.0)
+t = first_drop(out)
+check(t is not None and t - 5.0 <= 0.6, "ground cut %.2f s after the freeze (<= 0.6)" % ((t or 99) - 5.0))
+check(all(d for tt, d in out if tt >= t), "every pose after the cut dropped (stopped, pose still frozen)")
+check(kinds(c) == ["cut_ground"] and c.cut_where == "ground", "one cut_ground event: %s" % kinds(c))
+check(c.status(13.0)["vision"] == "cut" and c.status(13.0)["cut_where"] == "ground", "status: cut on the ground")
+p_frozen = c.frozen_pose
+out = run(c, 13.0, 13.3, lambda t: moving(t) if t < 13.11 else p_frozen, motors=1000.0)
+check(all(d for _, d in out), "two new poses then the frozen one again: still cut")
+out = run(c, 13.3, 15.0, moving, motors=1000.0)
+t = first_drop([(tt, not d) for tt, d in out])
+check(t is not None and t <= 13.3 + 5 * 0.05 + 1e-6 and not c.cut,
+      "SLAM moving again on the ground (no landing to wait for): resumed at %.2f" % (t or 99))
+check(kinds(c) == ["cut_ground", "resume"], "events %s" % kinds(c))
+c = make()
+run(c, 0.0, 5.0, moving, motors=1000.0, cmd=1.0, ekf=1.0)
+run(c, 5.0, 8.0, frozen_at(5.0), motors=1000.0, cmd=1.0, ekf=1.0)
+check(c.cut and c.cut_where == "ground", "cut on the ground")
+out = run(c, 8.0, 10.0, moving, motors=1450.0)                   # took off with vision cut, SLAM back in the air
+check(all(d for _, d in out), "SLAM moving again but airborne: still cut")
+out = run(c, 10.0, 12.5, moving, motors=1000.0)                  # motors stopped: on the ground again
+t = first_drop([(tt, not d) for tt, d in out])
+check(t is not None and not c.cut, "back on the ground, SLAM moving: resumed at %.2f" % (t or 99))
+c = make()
+still = (1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+out = run(c, 0.0, 60.0, lambda t: still, motors=1000.0, gyro=0.01, ekf=0.02)
+check(first_drop(out) is None and not c.events, "ground cut on: parked 60 s with the pose repeating, no cut")
+c = make()
+run(c, 0.0, 5.0, moving, motors=1000.0, cmd=1.0)
+out = run(c, 5.0, 8.0, frozen_at(5.0), motors=1000.0, cmd=1.0, imu_until=5.0)
+check(first_drop(out) is None, "ground cut on: the FC's IMU stale -> no cut")
 
 print("4. pose repeating without motion evidence: no cut")
 c = make()
@@ -154,14 +193,18 @@ run(c, 0.0, 5.0, moving, cmd=1.0)
 out = run(c, 5.0, 8.0, frozen_at(5.0), cmd=1.0, imu_until=5.0)
 check(first_drop(out) is None, "no cut while the FC's IMU is stale")
 
-print("6. the airborne gate unknown or false: no cut")
+print("6. the airborne gate unknown or false: no air cut")
 for what, kw in (("no /mavros/rc/out", dict(rcout=False)), ("no /mavros/state", dict(state=False)),
                  ("disarmed", dict(armed=False)), ("spin-arm idle 1100 us", dict(motors=1100.0))):
+    c = make(ground_cut=False)
+    run(c, 0.0, 5.0, moving, cmd=1.0, **kw)
+    out = run(c, 5.0, 8.0, frozen_at(5.0), cmd=1.0, **kw)
+    check(first_drop(out) is None, "ground_cut false: " + what)
     c = make()
     run(c, 0.0, 5.0, moving, cmd=1.0, **kw)
     out = run(c, 5.0, 8.0, frozen_at(5.0), cmd=1.0, **kw)
-    check(first_drop(out) is None, what)
-c = make()
+    check(first_drop(out) is not None and c.cut_where == "ground", "ground_cut true: %s -> a ground cut" % what)
+c = make(ground_cut=False)
 run(c, 0.0, 3.5, moving, cmd=1.0)
 run(c, 3.5, 5.0, moving, cmd=1.0, rcout=False)                  # outputs stop 1.5 s before the freeze
 out = run(c, 5.0, 8.0, frozen_at(5.0), cmd=1.0, rcout=False)
