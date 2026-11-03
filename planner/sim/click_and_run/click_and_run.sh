@@ -64,7 +64,7 @@ for _ in $(seq 1 120); do
   docker exec $ROS bash -c "source /opt/ros/noetic/setup.bash; rosparam get /run_id" >/dev/null 2>&1 && break
   sleep 1
 done
-docker run -d --name $FG --network container:$ROS --cpus 1 -v $RUN:/run -v $HERE:/planner_sim:ro \
+docker run -d --name $FG --network container:$ROS --cpus 1 ${DOCKER_LIMITS:-} -v $RUN:/run -v $HERE:/planner_sim:ro \
   --entrypoint bash l4-sim-l2:foxglove /planner_sim/click_and_run/foxglove.sh >/dev/null
 for _ in $(seq 1 30); do [ -S $RUN/foxglove.sock ] && break; sleep 1; done
 socat TCP-LISTEN:$PORT,bind=${FG_BIND:-0.0.0.0},reuseaddr,fork UNIX-CONNECT:$RUN/foxglove.sock &

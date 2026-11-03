@@ -215,6 +215,10 @@ Shannon's desktop), layout `foxglove/layouts/click_and_run_layout.json`. The 3D 
 
 The topics are click and run's own: MAVROS publishes on RViz's `/move_base_simple/goal` (frame map), which
 must never become a goal. Pick this layout (or set the 3D panel's publish topics to these) in Foxglove.
+A 3D panel left on Foxglove's defaults (`/clicked_point`, `/move_base_simple/goal`, `/initialpose`: every other
+layout here) works too: `foxglove.sh` whitelists those three and remaps them on the bridge to the click topics, so
+nothing the bridge publishes reaches MAVROS's `/move_base_simple/goal`. Before 2026-11-02 the bridge refused them
+("Can't advertise channel ... not whitelisted" in `foxglove_bridge.log`) and clicks did nothing.
 
 How it fits together:
 - `click_goal` (C++, `planner/ros/l4_click`, robot-side): the click (planner frame "world") -> fc with the
