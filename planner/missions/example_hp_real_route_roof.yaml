@@ -1,0 +1,91 @@
+# Hensel Phelps 2026-10-15 flight 21:06:50: the real route the pilot flew (example_hp_real_route, unchanged), then a
+# touch-and-go on the container roof and the flight home (owner 2026-11-03). SITL only (see "SITL" below).
+# Waypoints in the map frame (closed_loop.sh's fly_mission.py converts them to fc, as for example_hp_real_route).
+# map hp_1015_carved.pcd; start 0.00, 0.00, yaw -90.7 (x, y, deg): the real takeoff spot, facing south.
+#
+# Route:
+#   legs 1-13  example_hp_real_route as it is: take off to 1.0 m, the pilot's 12 fly legs, the last 3 at 3.3 m; the
+#              last ends at (-2.29, -1.83, 3.26), over the container's roof.
+#   R          the land leg flies on at 3.26 m to R (-2.80, -3.90) on the roof's south half, faces it and settles, then
+#              NAV_LAND onto the roof with the landing check skipped ("landing_check: false", owner 2026-11-03, SITL
+#              demo: on this map the check never clears the roof, see "Landing check" below); 5 s landed (hold_s,
+#              GUIDED, the bridge off).
+#   takeoff    NAV_TAKEOFF 1.0 m above the liftoff point (the roof): ~3.5 m map, ~1.3 m under the ~5.0 m ceiling there.
+#   home       fly to (0.16, -1.92, 1.30): east over the container's east wall and down into the east corridor (the
+#              route's 3rd waypoint), then land at the start (0.00, 0.00) with the stock landing check. The start reads
+#              "not flat" (residual 0.035 m, the floor smear), so the landing-spot search lands 0.3-1.7 m from it. The
+#              mission ends landed at home, so fly_mission.py's QRLAND after DONE has nothing to dip through.
+#
+# The roof (hp_1015_carved.pcd): the container's top spans map x -4.2..-1.2, y 0.3..-5.9; its surface reads 2.44 /
+# 2.50 / 2.54 m (p10 / p50 / p90). R keeps clear of a duct (x -2.88..-2.13, y -2.74..-2.10, from 3.91 m up; 1.16 m
+# from R) and an object on the roof (x -2.42..-1.61, y -5.81..-5.07, up to 3.49 m; ~1.2 m); overhead ~5.0 m.
+#
+# SITL: SITL's physics has flat ground at home altitude (only the rendered lidar sees the map), so a plain run would
+# NAV_LAND through the roof. The runs use a SITL built with planner/sim/sitl_roof.patch: SIM_ROOF="n0,n1,e0,e1,h"
+# in the SITL container's environment raises the ground over one box (north/east of SITL's home, m), and the
+# simulated downward rangefinder and flow sensor measure from it. For this map and start the roof is
+# SIM_ROOF="-0.15,5.70,1.41,3.93,2.52": map x -4.0..-1.4, y -5.7..0.2 (inset ~0.15 m from the edges), top at map z
+# 2.52. Without SIM_ROOF the roof landing goes through the roof (do not run it so).
+#
+# SITL results (2026-11-03, Shannon ~/sim/hproof/runs: nuc-01 tree 3e1ed30 + the uncommitted l2fix bridge/executive +
+# landing_check; l4-sim-l2:latest; ardupilot_roof). Touchdown: from NAV_LAND at the FC centre 0.6 m over the roof.
+# On the roof: from touchdown to liftoff (the landing detector ~3 s, hold_s 5, the takeoff spool-up). Climb top: the
+# FC centre over the roof. Clearance: FC centre to the nearest map point (map z >= 0.30), min, m: the route (legs
+# 1-13), the flight home (leg 15), the home landing (its climb, search moves, descent). Final: from the start.
+#   run    result     touchdown (sink, at map)            on roof  climb top  route  home  landing  final  events
+#   hpr7   DONE 146 s 0.50 m/s, (-2.78, -3.92)            9.4 s    1.18 m     0.48   0.46   0.68    0.95   search 1
+#   hpr8   DONE 148 s 0.60 m/s, (-2.80, -3.91)            9.6 s    1.22 m     0.52   0.50   0.64    0.96   leg 10 (*), search 1
+#   hpr9   DONE 158 s 0.60 m/s, (-2.80, -3.91)            10.1 s   1.17 m     0.49   0.48   0.46    1.65   search 2
+#   hpr10  DONE 150 s 0.60 m/s, (-2.80, -3.94)            9.5 s    1.18 m     0.52   0.51   0.81    0.34   search 2
+# On the roof the body box's bottom sits at +0.01 m on the roof (the FC centre 0.11 m over it), the touchdown 1.4 s after
+# NAV_LAND; the takeoff from the roof completes ("Guided takeoff complete") and the EKF height follows the roof (its
+# liftoff reference is the roof: 1.0 m above it). The flight home: SUPER plans off the roof's east edge and down the
+# east corridor every run. No UNREACHABLE on the roof legs; no BACK_OFF; no STOPPED. (*) hpr8 leg 10 (the 2.3 m climb
+# at (-6.67, -4.40)): "goal in an obstacle" 1.5 s into the leg (SUPER's goal 1.79 m below ours: its local map does not
+# reach up there yet), given up (on_unreachable next); leg 11 climbed to 3.3 m and the route went on. The L2 4a rule
+# (l2fix), not the roof.
+#   The minimum "airborne" clearance of 0.22-0.24 m (hpr_ana.py AIR) is the roof itself, 0.15-0.3 m under the FC centre
+#   in the last moments of the descent and the first of the climb at R.
+#
+# Landing check (why the roof leg skips it; hpr1-hpr4, stock check unless noted): over R the check reads "not
+# observed" (41-68 %: the forward lidar, near range 1.2 m), "occupied: up to 2.50 m above the floor" (the container's
+# inside floor seen through the map's roof became the plane, the roof an obstacle) or "not flat" (residual 0.030-0.044
+# against 0.03: the corrugated roof / map smear); with residual_max 0.05 (SITL) still none clear. The search then
+# landed beside the container (hpr1) or found nothing (STOPPED, hpr2/hpr4). Owner decision 2026-11-03: skip it on the
+# roof leg for the demo; the robot's default (checked) is unchanged.
+# hpr5: SITL patch v1 tested the box against SITL's origin, which moves to the vehicle at 1 Hz: through the roof.
+# hpr6: touched down on the roof, but SITL's rangefinder still read 2.5 m and the land detector never fired ("landing
+# did not complete"). Both fixed in sitl_roof.patch.
+#
+# Run (Shannon): cd ~/sim/hproof && CPUSET=4-11 ./run.sh <name>   (or CPUSET=20-27; SITL_AP=ardupilot_roof, SIM_ROOF
+#   as above, LANDING_ARGS ""; map ~/sim/marsim/maps/hp_1015_carved.pcd, start 0 0 -90.7, image l4-sim-l2:latest)
+# Foxglove: ~/sim/foxglove/closed_loop/closed_loop_hp_real_route_roof/ (hpr7).
+name: example_hp_real_route_roof
+frame: fc
+takeoff_height: 1.00      # m above the liftoff point (NAV_TAKEOFF)
+defaults:
+  speed: 1.0            # m/s, a cap the bridge applies (D10: 0.5 on the robot until Gate L4)
+  accept_radius: 0.5    # m, the goal counts as reached inside this
+  leg_timeout_s: 90
+  no_progress_s: 20     # unreachable if not 0.2 m closer within this
+legs:
+  # example_hp_real_route, unchanged
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.07, 0.00, 1.08]}
+  - {type: fly, goal: [-0.05, 0.05, 1.05]}
+  - {type: fly, goal: [0.16, -1.92, 1.08]}
+  - {type: fly, goal: [0.11, -4.46, 1.07]}
+  - {type: fly, goal: [-0.28, -7.61, 1.10]}
+  - {type: fly, goal: [-2.29, -9.57, 1.04]}
+  - {type: fly, goal: [-4.63, -9.75, 1.07]}
+  - {type: fly, goal: [-6.10, -7.40, 0.98]}
+  - {type: fly, goal: [-7.36, -5.10, 0.96]}
+  - {type: fly, goal: [-6.67, -4.40, 3.29]}
+  - {type: fly, goal: [-4.24, -3.72, 3.26]}
+  - {type: fly, goal: [-2.29, -1.83, 3.26]}
+  # the roof touch-and-go
+  - {type: land, at: [-2.80, -3.90], landing_check: false, hold_s: 5}   # R: NAV_LAND on the roof (SITL demo: no check), 5 s
+  - {type: takeoff, height: 1.00}                    # from the roof
+  # home
+  - {type: fly, goal: [0.16, -1.92, 1.30]}           # over the east wall, down into the east corridor
+  - {type: land, at: [0.00, 0.00]}                   # the start (the takeoff spot): landing check, NAV_LAND

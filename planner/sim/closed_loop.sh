@@ -42,6 +42,7 @@
 #   held most of the floor beyond 1.5 m as walls (cl31). 0.30 is what the track planner (l4_track) uses on whole maps
 #   for the same smear. Sim only.
 #   TRACK_ARGS: more track planner params (e.g. "_mem_hit_hold:=-1" for an A/B).
+#   LANDING_ARGS: more landing check params (SITL only, e.g. "_residual_max:=0.05" for a demo on a corrugated roof).
 # Failure tests (faults/cases.sh): FAULT_HOOK, a command started in the ROS container just before
 #   fly_mission.py (its output in logs/fault.log); END_HOLD_S, seconds fly_mission.py waits after the
 #   mission ends before it lands SITL (default 0); RECORD_EXTRA, more topics for the bag.
@@ -84,7 +85,7 @@ sleep 20
 $H exec $name "rosparam load /planner/config/planner_bridge.yaml /planner_bridge; \
   rosparam set /planner_bridge/speed_cap 1.0; rosparam set /planner_bridge/fc_mount_yaw_deg -0.45; \
   nohup $BRIDGE_CMD __name:=planner_bridge > /run/logs/planner_bridge.log 2>&1 &
-  nohup $LANDING_CMD __name:=landing_check > /run/logs/landing_check.log 2>&1 &
+  nohup $LANDING_CMD __name:=landing_check ${LANDING_ARGS:-} > /run/logs/landing_check.log 2>&1 &
   nohup $TRACK_CMD __name:=track_planner _z_lo:=$TRACK_Z_LO _drive_speed:=${TRACK_SPEED:-1.0} ${TRACK_ARGS:-} > /run/logs/track_planner.log 2>&1 &
   nohup bash -c 'stdbuf -oL rosrun super_planner fsm_node _config_name:=super_closed_loop.yaml 2>&1 | python3 -u /planner_sim/stamp_lines.py' > /run/logs/super.log 2>&1 &
   nohup rosbag record -O /run/closed_loop.bag --lz4 \

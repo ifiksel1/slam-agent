@@ -28,8 +28,13 @@ SITL uses its own rangefinder and flow sensor, with GPS off and `Q_GUID_TIMEOUT`
 
 - **raw**: FAST-LIO's world frame. +x left, +y up, +z forward, with the origin at the lidar's start
   position. The lidar sits 0.178 m ahead of the FC.
-- **planner**: raw with `P = [0,0,1; 1,0,0; 0,1,0]` applied (the bridge's `position_matrix`).
-- **fc**: MAVROS local ENU. The bridge anchors raw to the EKF.
+- **planner**: raw with `P = [0,0,1; 1,0,0; 0,1,0]` applied (the bridge's `position_matrix`). After a
+  FAST-LIO frame reset (laserMapping restart, pose jump) the planner bridge keeps the planner frame it had
+  (D7, FrameCarry, 2026-11-02 evening): planner = carry(P raw), so SUPER's map and trajectory stay valid. A pose
+  after a gap or step is held until its vision pose says whether the raw frame changed; in flight the re-anchor
+  HOLD then lasts until SUPER publishes a trajectory started after it; flight-target z steps and lead are clamped.
+- **fc**: MAVROS local ENU. The SLAM-to-FC bridge anchors raw to the EKF (and re-anchors onto it after a gap
+  or step). Mission goals are in fc; `/planner_bridge/anchor` is fc <- planner.
 - **map -> planner**: the rosparam `/sim/map_to_planner` holds `{yaw_deg, start}`, and
   `map = Rz(yaw) * planner + start`.
 
@@ -187,6 +192,10 @@ the FC's status texts.
 cd ~/sim/l2 && planner_sim/closed_loop.sh cl30 ~/sim/marsim/maps/hp_1015_carved.pcd 0 0 -90.7 \
   ~/sim/l2/planner/missions/example_hp_drive_fly.yaml ~/sim/l2/planner_sim/super_closed_loop_hp.yaml 900
 ```
+
+`missions/hp_fly_drive_container.yaml` (2026-11-02): 4 flights and 4 drives on `course/hp_gate_l2.pcd`, one flight
+through the container, ending at the start on the tracks; DONE in 195-199 s three runs in a row (hpm5-7; route,
+clearances and run command in its header).
 
 The sources live in this folder and are copied to Shannon's `~/sim/l2/planner_sim/`. The bridge and
 the MAVROS config are copied to `~/sim/l2/slam/{overrides,config}`.

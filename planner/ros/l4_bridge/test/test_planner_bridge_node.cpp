@@ -26,6 +26,8 @@
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/Bool.h>
+#include <std_msgs/Float64.h>
+#include <limits>
 #include <std_msgs/Int8.h>
 #include <std_msgs/String.h>
 
@@ -134,10 +136,11 @@ class Node : public ::testing::Test {
   static inline std::mutex mtx;
   static inline std::vector<std::pair<double, PositionTarget>> sp;
   static inline std::string status;
+  static inline std::optional<Vec3> planner_odom;   // the newest /planner/odom position
   static inline std::optional<int> mode_code;
   static inline std::optional<std::string> mode_out;
   static inline ros::Publisher pub_cloud, pub_odom, pub_vis, pub_fc, pub_state, pub_cmd, pub_drive, pub_enable, pub_mode,
-      pub_traj;
+      pub_traj, pub_yaw, pub_goal;
   static inline std::vector<ros::Subscriber> subs;
 
   static void SetUpTestSuite() {
@@ -149,6 +152,10 @@ class Node : public ::testing::Test {
     subs.push_back(sub<std_msgs::String>(*nh, "/planner_bridge/status", 10, [](const std_msgs::String::ConstPtr& m) {
       std::lock_guard<std::mutex> g(mtx);
       status = m->data;
+    }));
+    subs.push_back(sub<nav_msgs::Odometry>(*nh, "/planner/odom", 50, [](const nav_msgs::Odometry::ConstPtr& m) {
+      std::lock_guard<std::mutex> g(mtx);
+      planner_odom = Vec3(m->pose.pose.position.x, m->pose.pose.position.y, m->pose.pose.position.z);
     }));
     subs.push_back(sub<std_msgs::Int8>(*nh, "/planner_bridge/mode_code", 10, [](const std_msgs::Int8::ConstPtr& m) {
       std::lock_guard<std::mutex> g(mtx);
@@ -168,6 +175,8 @@ class Node : public ::testing::Test {
     pub_enable = nh->advertise<std_msgs::Bool>("/planner_bridge/enable", 1, true);
     pub_mode = nh->advertise<std_msgs::String>("/planner_bridge/set_mode", 1, true);
     pub_traj = nh->advertise<quadrotor_msgs::PolynomialTrajectory>("/planning_cmd/poly_traj", 5);
+    pub_yaw = nh->advertise<std_msgs::Float64>("/planner_bridge/yaw_cmd", 1, true);
+    pub_goal = nh->advertise<geometry_msgs::PoseStamped>("/planning/click_goal", 1, true);
     spinner = new ros::AsyncSpinner(2);
     spinner->start();
     wsleep(3.0);
@@ -283,6 +292,9 @@ static void near_xyz(const geometry_msgs::Point& p, const Vec3& want, double tol
   EXPECT_NEAR(p.y, want[1], tol);
   EXPECT_NEAR(p.z, want[2], tol);
 }
+static void near3(const Vec3& a, const Vec3& b, double tol) {
+  for (int i = 0; i < 3; ++i) EXPECT_NEAR(a[i], b[i], tol) << "component " << i;
+}
 static bool zero_vel(const PositionTarget& m) { return m.velocity.x == 0.0 && m.velocity.y == 0.0 && m.velocity.z == 0.0; }
 
 TEST_F(Node, T0_NothingBeforeTheFirstFcPose) {
@@ -368,9 +380,100 @@ TEST_F(Node, T5_AnchorJumpHoldsUntilAFreshPlan) {
   EXPECT_TRUE(has("re-anchored"));
   Feed g;
   g.anchor = moved;
-  feed(0.8, g);   // fresh commands after the jump
+  feed(0.8, g);   // fresh commands after the jump, but no plan after it (L2 3a, 3b): still held
+  EXPECT_TRUE(has("re-anchored"));
+  EXPECT_TRUE(status_json()["reanchor"].is_object());
+  EXPECT_TRUE(status_json()["slam_hold"].get<bool>());
+  // a plan that does not start at the vehicle (a splice onto the old committed trajectory): still held
+  pub_traj.publish(line_traj(g.p_planner + Vec3(2.0, 0.0, 0.0), Vec3(0.4, 0.0, 0.0), 3.0));
+  feed(0.5, g);
+  EXPECT_TRUE(has("re-anchored"));
+  // a plan from the vehicle, made after the re-anchor: released
+  pub_traj.publish(line_traj(g.p_planner, Vec3(0.4, 0.0, 0.0), 3.0));
+  feed(0.8, g);
   EXPECT_TRUE(has("\"state\": \"STREAM\""));
+  EXPECT_TRUE(status_json()["reanchor"].is_null());
   ANCHOR = moved;
+}
+
+TEST_F(Node, T5b_SlamFrameResetIsCarriedOver) {
+  // L2 3b: FAST-LIO restarts at its own origin, 8 deg off (an instant jump); the SLAM-to-FC bridge re-anchors so the
+  // vision pose carries on. The bridge carries the planner frame over it: /planner/odom, the anchor published and
+  // SUPER's targets stay as they were; HOLD (re-anchored) until a plan after it
+  const Vec3 p_old(1.0, 0.5, 1.2);
+  Feed f;
+  f.p_planner = p_old;
+  feed(0.6, f);
+  wsleep(0.25);
+  ASSERT_TRUE(planner_odom.has_value());
+  near3(*planner_odom, p_old, 1e-4);
+  const int resets0 = status_json()["frame_resets"].get<int>();
+  const auto an0 = status_json()["anchor"];
+  // the new raw frame: the vehicle at its origin, the frame's yaw 8 deg on; the vision pose (fc) unchanged
+  const Vec3 p_new(0.0, 0.0, 0.0);
+  const double psi_new = ANCHOR.psi + 8.0 * M_PI / 180.0;
+  const Anchor a_new(psi_new, ANCHOR.pos(p_old) - Anchor(psi_new, Vec3::Zero()).pos(p_new));
+  Feed g;
+  g.p_planner = p_new;
+  g.anchor = a_new;
+  g.cmd_pos = p_old + Vec3(0.3, 0.0, 0.0);   // SUPER, in the carried frame, commands as before
+  const double t0 = wall();
+  feed(0.6, g);
+  wsleep(0.25);
+  auto st = status_json();
+  EXPECT_EQ(st["frame_resets"].get<int>(), resets0 + 1);
+  EXPECT_EQ(st["state"], "HOLD");
+  EXPECT_TRUE(st["slam_hold"].get<bool>());
+  EXPECT_TRUE(st["reanchor"].is_object());
+  EXPECT_NEAR(st["anchor"]["psi_deg"].get<double>(), an0["psi_deg"].get<double>(), 0.05);
+  for (int i = 0; i < 3; ++i) EXPECT_NEAR(st["anchor"]["t"][i].get<double>(), an0["t"][i].get<double>(), 0.01);
+  near3(*planner_odom, p_old, 1e-3);   // SUPER's odometry did not jump
+  for (const auto& m : last(t0)) {      // nothing but the hold at the vehicle meanwhile
+    EXPECT_TRUE(zero_vel(m));
+    near_xyz(m.position, ANCHOR.pos(p_old), 0.02);
+  }
+  // SUPER plans again from the vehicle (carried frame): streaming, its targets where they were before the reset
+  pub_traj.publish(line_traj(p_old, Vec3(0.4, 0.0, 0.0), 3.0));
+  const double t1 = wall();
+  feed(0.8, g);
+  st = status_json();
+  EXPECT_EQ(st["state"], "STREAM");
+  auto out = last(t1 + 0.4);
+  ASSERT_FALSE(out.empty());
+  const Vec3 want = ANCHOR.pos(p_old + Vec3(0.3, 0.0, 0.0));
+  EXPECT_NEAR(out.back().position.x, want[0], 0.02);
+  EXPECT_NEAR(out.back().position.y, want[1], 0.02);
+  EXPECT_NEAR(out.back().position.z, want[2], 0.02);
+  // FAST-LIO back in the first raw frame (another reset): the carry undone, the published frame still the same
+  Feed h;
+  h.p_planner = p_old;
+  feed(0.6, h);
+  wsleep(0.25);
+  st = status_json();
+  EXPECT_EQ(st["frame_resets"].get<int>(), resets0 + 2);
+  EXPECT_NEAR(st["anchor"]["psi_deg"].get<double>(), an0["psi_deg"].get<double>(), 0.05);
+  near3(*planner_odom, p_old, 1e-3);
+  pub_traj.publish(line_traj(p_old, Vec3(0.4, 0.0, 0.0), 3.0));
+  feed(0.8, h);
+  EXPECT_EQ(status_json()["state"], "STREAM");
+}
+
+TEST_F(Node, T5c_TargetHeightClamped) {
+  // defence in depth (L2 3b): SUPER's target 2 m above the vehicle: the target's z within flight_z_lead (0.5 m) of
+  // the vehicle's, the vertical feed-forward within the speed cap
+  Feed f;
+  f.cmd_pos = Vec3(1.2, 0.5, 3.2);
+  f.cmd_vel = Vec3(0.0, 0.0, 2.0);
+  const double t0 = wall();
+  feed(1.0, f);
+  auto out = last(t0 + 0.5);
+  ASSERT_FALSE(out.empty());
+  const double z_now = ANCHOR.pos(Vec3(1.0, 0.5, 1.2))[2];
+  for (const auto& m : out) {
+    EXPECT_LE(m.position.z, z_now + 0.5 + 1e-6);
+    EXPECT_LE(std::abs(m.velocity.z), 1.0 + 1e-6);
+  }
+  EXPECT_GT(status_json()["z_clamped"].get<long long>(), 0);
 }
 
 TEST_F(Node, T6_Geofence) {
@@ -908,3 +1011,51 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "test_planner_bridge", ros::init_options::AnonymousName);
   return RUN_ALL_TESTS();
 }
+
+TEST_F(Node, T12_WaypointHoldWhileThePlannerIsQuiet) {
+  // L2 4a (SITL fx14e): the executive climbs away from a box through the waypoint hold (a goal straight over the
+  // vehicle, a waypoint yaw) while SUPER is silent (alive, its plans failing): the planner-stale HOLD must not keep the
+  // vehicle where it is; the waypoint hold takes the goal (within waypoint_goal_max) and eases the vehicle up to it
+  const Vec3 a(1.0, 0.5, 1.2);
+  Feed f;
+  f.p_planner = a;
+  feed(0.5, f);
+  Feed quiet = f;
+  quiet.cmd = false;
+  feed(0.6, quiet);
+  EXPECT_TRUE(has("planner stale"));
+  geometry_msgs::PoseStamped g;
+  g.header.stamp = ros::Time::now();
+  g.pose.position.x = a[0];
+  g.pose.position.y = a[1];
+  g.pose.position.z = a[2] + 0.6;
+  g.pose.orientation.w = 1.0;
+  pub_goal.publish(g);
+  wsleep(0.2);
+  std_msgs::Float64 y;
+  y.data = 0.3;
+  pub_yaw.publish(y);
+  const double t0 = wall();
+  feed(1.5, quiet);
+  auto out = last(t0 + 0.3);
+  ASSERT_FALSE(out.empty());
+  const Vec3 v = ANCHOR.pos(a);
+  EXPECT_EQ(out.back().type_mask, 2048);
+  EXPECT_GT(out.back().position.z, v[2] + 0.45);   // toward the goal 0.6 m up (the target within flight_z_lead)
+  EXPECT_LE(out.back().position.z, v[2] + 0.5 + 1e-6);
+  auto st = status_json();
+  EXPECT_EQ(st["state"], "HOLD");
+  EXPECT_TRUE(st["waypoint_hold"].is_object());
+  // a fault still wins: SLAM stale -> the hold at the vehicle, not the goal
+  Feed stale = quiet;
+  stale.slam = false;
+  const double t1 = wall();
+  feed(0.6, stale);
+  auto held = last(t1 + 0.4);
+  ASSERT_FALSE(held.empty());
+  EXPECT_LT(held.back().position.z, v[2] + 0.1);
+  y.data = std::numeric_limits<double>::quiet_NaN();
+  pub_yaw.publish(y);
+  feed(0.5, f);
+}
+

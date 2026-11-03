@@ -27,7 +27,7 @@
 //   2. fits each scan's own floor offset from that model (the median, over the 10 cm cells within
 //      align_radius whose lowest point lies within align_band of the model, of lowest point - model)
 //      and shifts the scan by it, so every scan's floor lands on the model: the merged floor layer is
-//      one scan's thickness again (~0.01-0.05 m) and objects from ~0.06-0.10 m up are seen (a scan that
+//      one scan's thickness again (~0.01-0.05 m) and objects from ~0.07-0.11 m up are seen (obstacle_min_h 0.06 since 2026-11-03) (a scan that
 //      sees too little floor near the spot keeps only its returns more than unaligned_min_h up);
 //   3. seeds the plane fit with the cells near the model (a box covering most of the disc is not taken
 //      for the floor);
@@ -76,8 +76,8 @@
 //
 // LIMITS: the disc is centred on the frame for the heading at the time of the check: a yaw during the
 // descent (QuadRover does not yaw) or a footprint_offset that is not the real IMU offset moves the frame
-// off it (the 0.2 m margin absorbs ~0.2 m); objects lower than about the floor layer + 5 cm (~0.06-0.13
-// m scan by scan, the map's smear + 5 cm on one merged cloud) are not seen; glass, water and dark
+// off it (the 0.2 m margin absorbs ~0.2 m); objects lower than about the floor layer + 6 cm (~0.07-0.14
+// m scan by scan, the map's smear + 6 cm on one merged cloud) are not seen; glass, water and dark
 // surfaces that return nothing read as unobserved (not clear), not as floor.
 #include "l4_landing/landing_core.h"
 

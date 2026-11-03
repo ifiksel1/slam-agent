@@ -77,6 +77,17 @@ TEST(Mission, ScanLegAndLegYaw) {
   EXPECT_THROW(load_mission_text("legs:\n  - {type: fly, goal: [1, 0, 1], yaw: east}\n", "x"), std::invalid_argument);
 }
 
+// a land leg's "landing_check" (owner 2026-11-03, SITL roof demo): absent = checked; a boolean on land legs only
+TEST(Mission, LandingCheckOption) {
+  Mission m = load_mission_text("legs:\n  - {type: land, at: [1, 0], landing_check: false}\n  - {type: land, at: [0, 0]}\n", "x");
+  EXPECT_EQ(m.legs[0]["landing_check"], false);
+  EXPECT_FALSE(m.legs[1].contains("landing_check"));
+  EXPECT_NO_THROW(load_mission_text("legs:\n  - {type: land, at: [1, 0], landing_check: true}\n", "x"));
+  EXPECT_THROW(load_mission_text("legs:\n  - {type: land, at: [1, 0], landing_check: skip}\n", "x"), std::invalid_argument);
+  EXPECT_THROW(load_mission_text("legs:\n  - {type: land, at: [1, 0], landing_check: 0}\n", "x"), std::invalid_argument);
+  EXPECT_THROW(load_mission_text("legs:\n  - {type: fly, goal: [1, 0, 1], landing_check: false}\n", "x"), std::invalid_argument);
+}
+
 TEST(Settle, NeedsAFullWindowStillAndOnTarget) {
   using V = Eigen::Vector3d;
   SettleWindow w(1.0);
@@ -162,4 +173,52 @@ TEST(Seed, CappedBelowTheCeiling) {
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// L2 4a (SITL lf14): the leg's goal inside a box (planned altitude 0.2 m), the vehicle hovering 0.15 m over the box
+// top at 1.03 m: the seeds went down toward 0.2 m, into the box. The floor guard keeps them seed_floor_clear above
+// the surface under the vehicle; the ceiling cap still wins
+TEST(Mission, SeedAltitudeFloorGuard) {
+  using V = Eigen::Vector3d;
+  const V start(7.42, -0.25, 1.05), goal(7.32, -2.57, 0.2), here(7.34, -2.64, 1.03);
+  SeedAltitude s = seed_altitude(start, goal, here, 0.1, std::nullopt, 0.6);
+  EXPECT_NEAR(s.z, 0.93, 1e-9);   // down toward the plan (the old rule)
+  EXPECT_FALSE(s.floored);
+  s = seed_altitude(start, goal, here, 0.1, std::nullopt, 0.6, 0.15, 0.6);
+  EXPECT_NEAR(s.z, 1.03 - 0.15 + 0.6, 1e-9);
+  EXPECT_TRUE(s.floored);
+  s = seed_altitude(start, goal, here, 0.1, 0.9, 0.6, 0.15, 0.6);   // a ceiling 0.9 m over it: capped
+  EXPECT_NEAR(s.z, 1.03 + 0.9 - 0.6, 1e-9);
+  EXPECT_TRUE(s.capped);
+  // far over the floor: unchanged
+  EXPECT_NEAR(seed_altitude(start, goal, here, 0.1, std::nullopt, 0.6, 1.0, 0.6).z, 0.93, 1e-9);
+}
+
+// L2 3a: a goal re-sent after a SLAM hold
+TEST(Mission, ResentGoalCheck) {
+  using V = Eigen::Vector3d;
+  const V goal(-0.28, -7.61, 1.05), veh(0.0, -5.0, 1.0);
+  // the executive's anchor is the bridge's (the vehicle converts onto its planner_pos): sent as it is
+  GoalCheck c = check_resent_goal(goal, veh, V(5.0, 0.1, 1.0), V(5.05, 0.1, 0.98), 0.95, 0.3, 0.3);
+  EXPECT_TRUE(c.ok);
+  EXPECT_NEAR(c.anchor_err_m, 0.05, 1e-9);
+  ASSERT_TRUE(c.above_floor.has_value());
+  EXPECT_NEAR(*c.above_floor, 1.0, 1e-9);
+  EXPECT_NEAR(c.raised_m, 0.0, 1e-12);
+  // a stale anchor (the bridge re-anchored, the executive has not got it yet): not sent
+  c = check_resent_goal(goal, veh, V(5.0, 0.1, 1.0), V(-1.5, 6.4, 0.0), 0.95, 0.3, 0.3);
+  EXPECT_FALSE(c.ok);
+  EXPECT_GT(c.anchor_err_m, 1.0);
+  // z alone off (a planner frame whose origin moved up to the vehicle, an old anchor): not sent
+  EXPECT_FALSE(check_resent_goal(goal, veh, V(5.0, 0.1, 1.0), V(5.0, 0.1, 0.0), 0.95, 0.3, 0.3).ok);
+  // the goal under the floor's clearance (an fc frame whose z drifted): raised to it
+  c = check_resent_goal(V(0.0, -7.0, 0.2), veh, V(5.0, 0.1, 1.0), V(5.0, 0.1, 1.0), 0.9, 0.3, 0.3);
+  EXPECT_TRUE(c.ok);
+  EXPECT_NEAR(*c.above_floor, 0.1, 1e-9);
+  EXPECT_NEAR(c.raised_m, 0.2, 1e-9);
+  EXPECT_NEAR(c.goal_fc[2], 0.4, 1e-9);
+  // no planner_pos, no floor (an older bridge): sent as it is
+  c = check_resent_goal(goal, veh, V(5.0, 0.1, 1.0), std::nullopt, std::nullopt, 0.3, 0.3);
+  EXPECT_TRUE(c.ok);
+  EXPECT_FALSE(c.above_floor.has_value());
 }

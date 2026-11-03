@@ -1,0 +1,99 @@
+# Hensel Phelps: 4 flights and 4 drives, one flight through the container, back to the start (owner 2026-11-02).
+# L2 closed loop, SITL only. Map: planner/sim/course/hp_gate_l2.pcd (the Gate L2 course map: hp_1015_carved.pcd +
+# hp_gate_l2.json; the same map as hp_container_fly's s9/k1 fly-through and click and run's default). Start 0.00,
+# 0.00, yaw -90.7 (map x, y, deg): the real takeoff spot, facing south. Waypoints in the map frame = fc in SITL.
+#
+# Route (map x, y; flights at 1.30 m fc = 1.05 m planner, the container runs' height):
+#   F1 fly    start -> W1 (-0.89, 1.02) -> A (-2.63, 0.94), 0.75 m outside the container's north mouth (its
+#             planner-frame west mouth) -> C (-2.42, -5.56) inside the south end, along the container's
+#             centreline -> D (-2.61, -8.86, 1.70) out of the south end and over the 0.9 m box -> land L1
+#             (-3.70, -9.60). hp_container_fly's legs (s9/k1), unchanged.
+#   D1 drive  L1 -> (-7.20, -8.40): west through the 0.90 m door (y -9.45..-8.55 in the x -5.50 wall), past the
+#             crate. The goal sits on the line L1 -> door centre (-5.50, -9.00): the robot starts along its
+#             landed heading, and Gate L2's goal (-8.50, -9.00), whose line runs 0.08 m inside the south jamb,
+#             wedged it nose-on at the jamb (hpm2: NO_PATH, UNREACHABLE).
+#   F2 fly    take off -> (-6.50, -5.00) past pole_b -> land L2 (-6.00, -3.50). Gate L2's second flight.
+#   D2 drive  L2 -> (-4.35, -7.90): round the door wall's north end (-5.44, -4.60) and south through the 1.44 m gap
+#             between it and the container's west wall, to 1.1 m from the wall and from the box's west face. Not
+#             hp_container_drive's G (-4.39, -7.14): see "roll-back" below (hpm3).
+#   F3 fly    take off -> D (-2.61, -8.86, 1.70) over the box's south-west corner -> land L1 (-3.70, -9.60), checked
+#             facing 200 deg (yaw). Facing D3's heading (~20 deg) the check refused L1 ("occupied: 7 cells up to
+#             0.12 m", hpm4) and the landing-spot search moved 0.45 m; L1 reads clear facing 165-219 deg (F1 here,
+#             Gate L2, k1).
+#   D3 drive  L1 -> (-1.17, -8.65): east between the box's south side and pole_a (hp_drive_tour leg 3's goal).
+#   F4 fly    take off -> (0.11, -4.46) north up the east corridor past the tower -> (0.16, -1.92) -> land L3
+#             (-0.20, -3.20), arriving from the north. example_hp_drive_fly's return flight.
+#   D4 drive  L3 -> the start (0.00, 0.00), north up the corridor. The mission ends there, landed (on the tracks).
+#
+# SITL results (2026-11-02, ~/sim/hpmission on Shannon: the nuc-01 working tree ac23efb + the uncommitted l2fix
+# bridge / executive, mission_executive d81947c1, planner_bridge aed6f3d8; l4-sim-l2:latest; robot drive params,
+# closed_loop.sh's default DRIVE_PARMS, WP_SPEED 0.5). Clearance: FC centre (the frame box's centre) to the nearest
+# map point at map z >= 0.30 (the floor smear left out), min per segment, in m; the frame reaches 0.25 m.
+#   run   result      F1    D1    F2    D2    F3    D3    F4    D4   in container  searches  final m (end / after)
+#   hpm5  DONE 198 s  0.58  0.38  0.50  0.45  0.64  0.47  0.47  0.64     0.93          0          0.32 / 0.59
+#   hpm6  DONE 195 s  0.59  0.40  0.62  0.61  0.66  0.54  0.49  0.62     0.87          0          0.35 / 0.60
+#   hpm7  DONE 199 s  0.61  0.40  0.43  0.60  0.53  0.48  0.47  0.62     0.89          0          0.44 / 0.12
+# All 4 landing checks clear first time in each run (0.05-1.2 s); no UNREACHABLE, no re-seed beyond each leg's
+# start seed, no landing-spot search. "in container": the FC centre inside the container (y -0.4..-5.6 map),
+# 1.15-1.46 m high. Tightest places: D1 the door's south jamb (0.38-0.40; body box 0.14-0.15) and the crate;
+# F2's takeoff by the crate (0.43-0.62); F4's takeoff 0.47 m from pole_a (body 0.13-0.24); F1 at A, 0.58-0.61 m
+# from the 0.9 m clutter north-west of the north mouth. Final: FC centre from its start position at the executive's
+# DONE (D4's accept radius 0.4) and at the end of the bag (after fly_mission.py's QRLAND and disarm).
+# Roll-back (SITL): after every drive's REACHED the bridge streams the drive stop (mask 1479) and the SITL rover
+# lurches backwards 0.7-1.8 m at up to 0.96 m/s before it stops (hpm7 D2: from (-4.31, -7.63) to (-4.52, -5.85), 0.6 m
+# from the container's west wall; also l2fix's fxg3). The drive goals keep room behind them for it. hpm3 with D2's
+# goal at G (-4.39, -7.14): it rolled back beside the container's south-west corner, took off under the eave
+# (ceiling_above 0.15) and SUPER found no corridor (UNREACHABLE).
+# hpm1 STOPPED "FC link lost (MAVROS silent 2.0 s)" on leg 2 (a 2.4 s /mavros/state gap; host load), not the route.
+# Speeds: flight 1.0 m/s (the bridge's speed_cap); the drives' speed 0.5 is the executive's record of WP_SPEED.
+#
+# Run (Shannon):
+#   cd ~/sim/hpmission && L2_BASE=$PWD L4_WS=$PWD/build_ws/install L4_BRIDGE_WS=$PWD/build_ws/install CPUS=6 \
+#     DOCKER_LIMITS="--cpuset-cpus 4-11 --memory 16g" taskset -c 4-11 planner_sim/closed_loop.sh hpm8 \
+#     $PWD/planner_sim/course/hp_gate_l2.pcd 0 0 -90.7 $PWD/planner/missions/hp_fly_drive_container.yaml \
+#     $PWD/planner_sim/super_closed_loop_hp.yaml 900          (~/sim/hpmission/run.sh <name> does the same)
+name: hp_fly_drive_container
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  # F1: the container flight (hp_container_fly, s9)
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.89, 1.02, 1.30]}       # W1
+  - {type: fly, goal: [-2.63, 0.94, 1.30]}       # A, the north mouth
+  - {type: fly, goal: [-2.42, -5.56, 1.30]}      # C, through the container on its centreline
+  - {type: fly, goal: [-2.61, -8.86, 1.70]}      # D, out of the south end, over the low box
+  - {type: land, at: [-3.70, -9.60]}             # L1
+  # D1: west through the door, past the crate (Gate L2)
+  - {type: drive, goal: [-8.50, -8.00], speed: 0.5, accept_radius: 0.4}   # on the line L1 -> door centre (-5.50, -9.00)
+  # F2: north up the west room past pole_b (Gate L2)
+  - {type: takeoff, height: 1.30}
+  - {type: fly, goal: [-6.50, -5.00, 1.30]}
+  - {type: land, at: [-6.00, -3.50]}             # L2
+  # D2: north up the west corridor (container west wall 1.3 m east, the ~1 m clutter 1.6 m west)
+  - {type: drive, goal: [-5.20, 0.60], speed: 0.5, accept_radius: 0.4}
+  # F3: west to east over the container, with the roof stop
+  - {type: takeoff, height: 1.30}
+  - {type: fly, goal: [-5.10, -3.40, 2.60]}                                        # W: climb west of the container
+  - {type: fly, goal: [-4.90, -4.00, 3.85]}                                        # W2: up to the check height 0.9 m west of the roof edge
+  - {type: fly, goal: [-3.05, -4.00, 3.85], yaw: 0, hold_s: 4}                     # R high: over the roof spot; landing check (hook)
+  - {type: fly, goal: [-3.05, -4.00, 3.15], yaw: 0, hold_s: 5}                     # R low: the roof stop (touchdown faked by a hover)
+  - {type: fly, goal: [-3.05, -4.00, 3.85], yaw: 0}                                # R high: "take off" from the roof
+  - {type: fly, goal: [-0.30, -4.00, 2.60]}                                        # E: down over the east wall into the corridor
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: land, at: [-0.20, -3.20], yaw: 90}    # L3, checked facing north
+  # D3: south down the east corridor
+  - {type: drive, goal: [-0.10, -5.40], speed: 0.5, accept_radius: 0.4}
+  # F4: north up the corridor past the start, round the container's north-east corner, land outside its north mouth
+  - {type: takeoff, height: 1.30}
+  - {type: fly, goal: [0.11, -4.46, 1.30]}
+  - {type: fly, goal: [0.16, -1.92, 1.30]}
+  - {type: fly, goal: [-0.89, 1.02, 1.30]}       # W1
+  - {type: land, at: [-2.34, 1.04]}              # LN: hp_container_drive's spot on the filled floor
+  # D4: east to the start
+  - {type: drive, goal: [0.00, 0.00], speed: 0.5, accept_radius: 0.4}

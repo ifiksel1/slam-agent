@@ -99,10 +99,26 @@ freeze_drive_dist: 0.5       # evidence: a drive target this far (m) from the ve
 freeze_gyro_min: 0.2         # evidence: the FC IMU's angular rate (rad/s, /mavros/imu/data)
 freeze_twist_min: 0.2        # evidence: the repeated /Odometry's own twist (m/s)
 freeze_evidence_age: 0.25    # s: evidence older than this is over
-anchor_jump_m: 0.1           # re-anchor / SLAM reset detection (D7)
+anchor_jump_m: 0.1           # re-anchor detection (D7; a raw-frame reset is carried over, frame_carry_enable below)
 anchor_jump_deg: 2.0
 anchor_persist: 3            # vision-pose pairs a change must last (one odd pair is a pairing glitch)
 fc_mount_yaw_deg: 0.0        # the SLAM bridge's ~fc_mount_yaw_deg, so the anchor's yaw is not biased by it
+# a SLAM frame reset (L2 3a / 3b, 2026-11-02 evening): FAST-LIO restarted or its pose jumped. The bridge carries the
+# planner frame over it (SUPER's map and trajectory, the track planner's and landing check's scans stay valid) and
+# holds (flight) until SUPER has planned after it, from the vehicle
+frame_carry_enable: true
+raw_gap_s: 0.5               # a raw pose after a gap this long, or a step over raw_jump_m / raw_jump_deg from the one
+raw_jump_m: 0.5              # before, is held for its frame check against its vision pose (at most
+raw_jump_deg: 15.0           # raw_pair_timeout_s, then the EKF pose)
+raw_pair_timeout_s: 0.5
+frame_reset_min_m: 1.0       # a new raw frame when the old anchor misses the vision pose by more than
+frame_reset_rate: 0.25       # max(frame_reset_min_m, frame_reset_rate x the gap), or its yaw by frame_reset_min_deg;
+frame_reset_min_deg: 5.0     # less: FAST-LIO resumed in its own frame (the EKF's drift over the gap, L2 2a)
+reanchor_plan_start_tol: 0.5 # m: after a re-anchor, a plan made after it that starts this near the vehicle ends the hold
+slam_settle_s: 0.5           # s SLAM fresh after a stale spell before a hold ends (a jump is classified first)
+flight_vz_max: -1.0          # m/s: a flight target's z moves at most this fast, its vertical feed-forward at most this
+                             # (<= 0: speed_cap); defence in depth (L2 3b)
+flight_z_lead: 0.5           # m: a flight target's z at most this far from the vehicle's
 
 # geofence in the fc frame (MAVROS local ENU), metres; set per site
 geofence_min: [-50.0, -50.0, -1.0]

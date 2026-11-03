@@ -1,0 +1,95 @@
+# QuadRover SITL raised-surface patch (2026-11-03, SIM ONLY; applied only to the copy ~/sim/hproof/ardupilot_roof on
+# Shannon, NOT pushed to the fork). SITL's physics has flat ground at home altitude; only the rendered lidar sees the
+# map, so a landing on a roof (the Hensel Phelps container) descends through it. With this patch the SITL process
+# reads SIM_ROOF="n0,n1,e0,e1,h" from its environment once: over the box n0..n1 north, e0..e1 east of SITL's home
+# (m) the ground is h m higher (Aircraft::ground_height_difference, which on_ground(), hagl(), the touchdown clamp
+# and sitl_liftoff_fix.patch's liftoff all use), and the simulated downward rangefinder and flow sensor measure from
+# it (SITL_State::set_height_agl; without that the rangefinder read 2.5 m on the roof and QuadRover's land detector,
+# which needs it under 2 m, never fired: hpr6). Unset: no change. Pass it to the SITL container with
+# DOCKER_LIMITS="... -e SIM_ROOF=..." and run that build with SITL_AP (sitl_harness.sh). Mission
+# planner/missions/example_hp_real_route_roof.yaml has the values for the HP roof.
+diff --git a/libraries/AP_HAL_SITL/SITL_State.cpp b/libraries/AP_HAL_SITL/SITL_State.cpp
+index 08e78f3..7466bc6 100644
+--- a/libraries/AP_HAL_SITL/SITL_State.cpp
++++ b/libraries/AP_HAL_SITL/SITL_State.cpp
+@@ -413,8 +413,9 @@ void SITL_State::set_height_agl(void)
+     }
+ #endif
+ 
+-    // fall back to flat earth model
+-    _sitl->state.height_agl = _sitl->state.altitude - home_alt;
++    // fall back to flat earth model (sitl_roof.patch: less a raised surface under the vehicle, so the downward
++    // rangefinder and the flow sensor see the roof the vehicle stands on)
++    _sitl->state.height_agl = _sitl->state.altitude - home_alt - (sitl_model ? sitl_model->ground_offset() : 0.0f);
+ }
+ 
+ /*
+diff --git a/libraries/SITL/SIM_Aircraft.cpp b/libraries/SITL/SIM_Aircraft.cpp
+index 00cf876..f215d30 100644
+--- a/libraries/SITL/SIM_Aircraft.cpp
++++ b/libraries/SITL/SIM_Aircraft.cpp
+@@ -19,6 +19,8 @@
+ #include "SIM_Aircraft.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+ 
+@@ -107,8 +109,41 @@ void Aircraft::set_start_location(const Location &start_loc, const float start_y
+ /*
+    return difference in altitude between home position and current loc
+ */
++/*
++  SIM ONLY (slam-agent planner/sim/sitl_roof.patch, 2026-11-03): one raised flat surface the vehicle can
++  land on, e.g. the Hensel Phelps container roof. SIM_ROOF="n0,n1,e0,e1,h" in the SITL process's
++  environment: a box n0..n1 north, e0..e1 east of home (m) whose top is h m above the home ground.
++  Over it the ground is h higher (on_ground, hagl, the touchdown and liftoff clamps all follow);
++  elsewhere, or with SIM_ROOF unset, nothing changes. Read once.
++ */
++static bool sim_roof(float r[5])
++{
++    static int state = -1;   // -1 not read, 0 off, 1 on
++    static float box[5];
++    if (state < 0) {
++        const char *e = getenv("SIM_ROOF");
++        state = (e != nullptr && sscanf(e, "%f,%f,%f,%f,%f", &box[0], &box[1], &box[2], &box[3], &box[4]) == 5) ? 1 : 0;
++        if (state == 1) {
++            ::printf("SIM_ROOF: n %.2f..%.2f e %.2f..%.2f m, top %.2f m\n", box[0], box[1], box[2], box[3], box[4]);
++        }
++    }
++    if (state != 1) {
++        return false;
++    }
++    memcpy(r, box, sizeof(box));
++    return true;
++}
++
+ float Aircraft::ground_height_difference() const
+ {
++    float roof[5];
++    if (sim_roof(roof)) {
++        // from home, not from origin: SITL moves its origin to the vehicle at 1 Hz (position is then ~0)
++        const Vector3d p = get_position_relhome();
++        if (p.x >= roof[0] && p.x <= roof[1] && p.y >= roof[2] && p.y <= roof[3]) {
++            return local_ground_level + roof[4];
++        }
++    }
+ #if AP_TERRAIN_AVAILABLE
+     AP_Terrain *terrain = AP::terrain();
+     float h1, h2;
+diff --git a/libraries/SITL/SIM_Aircraft.h b/libraries/SITL/SIM_Aircraft.h
+index 43ebd2a..d4d5dd8 100644
+--- a/libraries/SITL/SIM_Aircraft.h
++++ b/libraries/SITL/SIM_Aircraft.h
+@@ -144,6 +144,9 @@ public:
+     // get position relative to home
+     Vector3d get_position_relhome() const;
+ 
++    // SIM ONLY (sitl_roof.patch): the ground under the vehicle above the home ground (SIM_ROOF), m
++    float ground_offset() const { return ground_height_difference(); }
++
+     // get air density in kg/m^3
+     float get_air_density(float alt_amsl) const;
+ 

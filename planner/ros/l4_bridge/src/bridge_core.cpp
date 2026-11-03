@@ -676,4 +676,65 @@ std::vector<std::string> HealthCheck::faults(double now) const {
   return out;
 }
 
+// ---- a SLAM frame reset (L2 3a / 3b) ----------------------------------------------------------------------
+
+Anchor anchor_compose(const Anchor& a, const Anchor& b) { return Anchor(wrap_pi(a.psi + b.psi), a.vec(b.t) + a.t); }
+
+Anchor anchor_inverse(const Anchor& a) {
+  const Anchor r(-a.psi, Vec3::Zero());
+  return Anchor(wrap_pi(-a.psi), -r.vec(a.t));
+}
+
+FrameChange classify_frame_change(const Anchor& old_anchor, const Vec3& p_raw_planner, const Quat& q_raw_planner,
+                                  const Vec3& p_vision, const Quat& q_vision, double gap_s, double min_m, double rate,
+                                  double min_deg, double mount_yaw) {
+  const Anchor a_new = Anchor::from_pair(p_raw_planner, q_raw_planner, p_vision, q_vision, mount_yaw);
+  FrameChange out;
+  out.residual_m = (old_anchor.pos(p_raw_planner) - p_vision).norm();
+  out.residual_deg = std::abs(wrap_pi(a_new.psi - old_anchor.psi)) * (180.0 / M_PI);
+  out.reset = out.residual_m > std::max(min_m, rate * std::max(0.0, gap_s)) || out.residual_deg > min_deg;
+  return out;
+}
+
+void FrameCarry::reset_to(const Anchor& a_old_raw, const Anchor& a_new_raw) {
+  const Anchor a_pub = published(a_old_raw);
+  c_ = anchor_compose(anchor_inverse(a_pub), a_new_raw);
+  resets += 1;
+}
+
+Quat FrameCarry::quat(const Quat& q) const { return quat_mul(quat_yaw(c_.psi), q); }
+
+bool plan_after(const std::optional<PolyTraj>& traj, double t_reanchor, const Vec3& vehicle, double start_tol,
+                double slack) {
+  if (!traj || traj->empty()) return false;
+  if (traj->t0 < t_reanchor - slack) return false;
+  return (traj->pos(traj->t0) - vehicle).norm() <= start_tol;
+}
+
+bool clamp_vertical(Vec3& p, Vec3& v, Vec3& a, const Vec3& p_now, const std::optional<double>& z_last, double dt,
+                    double vz_max, double z_lead) {
+  bool clipped = false;
+  if (z_last && dt > 0 && vz_max > 0) {
+    const double step = vz_max * dt;
+    const double z = std::clamp(p[2], *z_last - step, *z_last + step);
+    if (z != p[2]) {
+      p[2] = z;
+      clipped = true;
+    }
+  }
+  if (z_lead > 0) {
+    const double z = std::clamp(p[2], p_now[2] - z_lead, p_now[2] + z_lead);
+    if (z != p[2]) {
+      p[2] = z;
+      clipped = true;
+    }
+  }
+  if (vz_max > 0 && std::abs(v[2]) > vz_max) {
+    v[2] = std::copysign(vz_max, v[2]);
+    a[2] = 0.0;
+    clipped = true;
+  }
+  return clipped;
+}
+
 }  // namespace l4_bridge

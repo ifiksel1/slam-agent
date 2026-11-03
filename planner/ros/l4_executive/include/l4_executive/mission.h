@@ -30,6 +30,10 @@ bool allowed_mode(const std::string& name);
 extern const char* const NOT_STATIONARY;   // "not stationary before takeoff"
 extern const char* const PLANNER_DIED;     // "planner died"
 extern const char* const SLAM_FROZE;       // "SLAM pose frozen"
+extern const char* const BRIDGE_DIED;      // "planner bridge died": its status went silent while it streamed
+extern const char* const FC_LINK_LOST;     // "FC link lost": /mavros/state (and the FC pose) went silent
+extern const char* const SLAM_HOLD_TIMEOUT;   // "SLAM hold timed out"
+extern const char* const GOAL_NOT_CLEAR;   // "goal in an obstacle": SUPER's shifted goal has scan points round it
 constexpr int MAV_CMD_DO_SET_MODE = 176;
 constexpr int MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1;
 
@@ -90,12 +94,35 @@ double wrap_pi(double a);
 // repeats do not stack: they alternate within plan +- dz. ceiling_above (the bridge's "ceiling_above": from
 // the vehicle up to the lowest point over it, m): the seed at most `ceiling_clear` (SUPER's inflation and a
 // cell) below that point; capped then (it may be below the vehicle: a move away from the ceiling).
+// floor_below (the bridge's "floor_below": from the vehicle down to the nearest surface under it, m): the seed
+// at least `floor_clear` above that surface (L2 4a, SITL lf14: a leg's goal inside a box, its planned altitude
+// 0.2 m; the seeds went down toward it, into the box SUPER had already stopped over); raised then ("floored").
+// The ceiling cap wins over the floor (a seed never goes into the ceiling's clearance).
 struct SeedAltitude {
   double z;        // the seed's altitude
   double plan_z;   // the leg's planned altitude at the vehicle
   bool capped;     // held down by the ceiling
+  bool floored = false;   // raised clear of the surface under the vehicle
 };
 SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& goal, const Eigen::Vector3d& here,
-                           double dz, std::optional<double> ceiling_above, double ceiling_clear);
+                           double dz, std::optional<double> ceiling_above, double ceiling_clear,
+                           std::optional<double> floor_below = std::nullopt, double floor_clear = 0.6);
+
+// A goal re-sent after a SLAM hold (L2 3a): the executive converts it fc -> planner with the anchor it has; the
+// bridge reports the vehicle in its planner frame ("planner_pos"). The anchor is the bridge's own when the vehicle
+// converted the same way lands within `tol` of planner_pos (xy and z each); then the goal's planner z differs from
+// the vehicle's by its fc z difference. Its height above the surface under the vehicle (floor_below + goal z -
+// vehicle z, fc) at least `floor_min`; else raised to it ("raised_m"). ok false: the anchor is not the bridge's
+// (stale): not sent, asked again.
+struct GoalCheck {
+  bool ok = true;
+  double anchor_err_m = 0.0;            // |converted vehicle - planner_pos|, the larger of xy and z
+  std::optional<double> above_floor;    // the goal's height above the surface under the vehicle (fc), when known
+  double raised_m = 0.0;                // how far the goal was raised
+  Eigen::Vector3d goal_fc;              // the goal to send (fc)
+};
+GoalCheck check_resent_goal(const Eigen::Vector3d& goal_fc, const Eigen::Vector3d& vehicle_fc,
+                            const Eigen::Vector3d& vehicle_planner_converted, const std::optional<Eigen::Vector3d>& planner_pos,
+                            std::optional<double> floor_below, double tol, double floor_min);
 
 }  // namespace l4_executive

@@ -117,11 +117,11 @@ class LandingCheckNode {
   LandingCheckNode() : pnh_("~") {
     Params p;
     p.margin = getd(pnh_, "margin", 0.2);
-    p.observed_min = getd(pnh_, "observed_min", 0.7);
+    p.observed_min = getd(pnh_, "observed_min", 0.65);
     p.slope_max_deg = getd(pnh_, "slope_max_deg", 5.0);
-    p.residual_max = getd(pnh_, "residual_max", 0.03);
-    p.obstacle_min_h = getd(pnh_, "obstacle_min_h", 0.05);
-    p.floor_layer_max = getd(pnh_, "floor_layer_max", 0.20);
+    p.residual_max = getd(pnh_, "residual_max", 0.04);
+    p.obstacle_min_h = getd(pnh_, "obstacle_min_h", 0.06);
+    p.floor_layer_max = getd(pnh_, "floor_layer_max", 0.12);
     p.near_range = getd(pnh_, "near_range", 1.2);
     p.footprint_offset = getd(pnh_, "footprint_offset", tc::ODOM_AHEAD);
     p.below_min = getd(pnh_, "below_min", 0.3);   // a floor lies at least this far under the vehicle

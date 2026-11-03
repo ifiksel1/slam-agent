@@ -189,6 +189,31 @@
 //     the pose is still frozen. ~freeze_enable false turns the check off.
 // Status: "slam_frozen" {"repeats", "for_s", "evidence"} while a repeat run lasts (null otherwise); "slam_hold"
 // stays false (the executive does not wait it out as a SLAM reset: it lands or stops).
+//
+// A SLAM frame reset (L2 3a / 3b, 2026-11-02 evening: FAST-LIO restarted at a new origin, or its pose jumped; the
+// SLAM-to-FC bridge re-anchored onto the EKF, but the planner frame jumped with the raw frame and SUPER's ROG-map and
+// committed trajectory stayed in the old one: SITL lf12 climbed 0.96 -> 3.14 m at 1.45 m/s over the old map's floor
+// slab, lf11 the same after a 2 s gap). SUPER offers no map reset (its only input is the click goal; ROG-map clears
+// only when the pose leaves its 30 m local map), so the bridge carries the planner frame over the reset (bridge_core
+// FrameCarry): a raw pose after a gap over ~raw_gap_s or a step over ~raw_jump_m / ~raw_jump_deg is held (nothing
+// published, SLAM stays stale; scans dropped meanwhile, a scan newer than the newest pose waits for it) until its
+// vision pose (at most ~raw_pair_timeout_s, then the EKF pose) classifies it (classify_frame_change):
+//   * a new raw frame (the old anchor misses the vision pose by over max(~frame_reset_min_m, ~frame_reset_rate x
+//     gap), or its yaw by ~frame_reset_min_deg): from then on /planner/odom and /planner/cloud are carried onto the
+//     planner frame as it was, /planner_bridge/anchor stays as it was, and the re-anchor HOLD is latched;
+//   * the same raw frame (FAST-LIO stalled and resumed; the anchor change is the EKF's drift over the gap, L2 2a):
+//     published as it is, and the tracker latches the re-anchor HOLD as before.
+// After any re-anchor in flight the HOLD lasts until SUPER has planned after it, from the vehicle (bridge_core
+// plan_after: a committed trajectory that started after the re-anchor within ~reanchor_plan_start_tol of the vehicle;
+// a fresh command alone no longer ends it: SUPER's commands after the jump were still from the old plan). After a
+// SLAM-stale spell the hold waits ~slam_settle_s with SLAM fresh, so a jump is classified before it can end. Status:
+// "frame_resets", "reanchor" {"age", "waiting": "plan", "why"} (null otherwise), "slam_pending", "planner_pos" (the
+// vehicle, planner frame published: the executive checks a re-sent goal against it). Defence in depth: every flight
+// target's z moves at most ~flight_vz_max per second from the last one, lies within ~flight_z_lead of the vehicle's,
+// and its vertical feed-forward is at most ~flight_vz_max (bridge_core clamp_vertical; status "z_clamped").
+// SUPER's goal (L2 4a): "planner_goal" (fc), the end of its newest plan made after the executive's last goal, and
+// "planner_goal_clear" (no scan voxels within ~waypoint_clear_r of it); the executive gives a moved goal that is not
+// clear up as "goal in an obstacle".
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -356,6 +381,27 @@ class PlannerBridge {
     obs_max_age_ = l4::param_double(pnh_, "path_block_cloud_max_age", 0.5);
     // the waypoint hold's point must have no scan point (path_block_min_voxels voxels) within this of it
     wp_clear_r_ = l4::param_double(pnh_, "waypoint_clear_r", 0.44);
+    // a SLAM frame reset (L2 3a / 3b): the planner frame carried over it (bridge_core FrameCarry). A raw pose after
+    // a gap over ~raw_gap_s, or a step over ~raw_jump_m / ~raw_jump_deg from the one before, waits for its vision
+    // pair (at most ~raw_pair_timeout_s, then the EKF pose) and is classified (classify_frame_change)
+    carry_on_ = l4::param_bool(pnh_, "frame_carry_enable", true);
+    raw_gap_s_ = l4::param_double(pnh_, "raw_gap_s", 0.5);
+    raw_jump_m_ = l4::param_double(pnh_, "raw_jump_m", 0.5);
+    raw_jump_deg_ = l4::param_double(pnh_, "raw_jump_deg", 15.0);
+    raw_pair_timeout_ = l4::param_double(pnh_, "raw_pair_timeout_s", 0.5);
+    reset_min_m_ = l4::param_double(pnh_, "frame_reset_min_m", 1.0);
+    reset_rate_ = l4::param_double(pnh_, "frame_reset_rate", 0.25);
+    reset_min_deg_ = l4::param_double(pnh_, "frame_reset_min_deg", 5.0);
+    mount_yaw_ = l4::param_double(pnh_, "fc_mount_yaw_deg", 0.0) * (M_PI / 180.0);
+    // after a re-anchor in flight: HOLD until SUPER's committed trajectory started after it, from the vehicle
+    plan_start_tol_ = l4::param_double(pnh_, "reanchor_plan_start_tol", 0.5);
+    // after a SLAM-stale hold: SLAM fresh this long before the hold can end (a jump is classified first)
+    slam_settle_s_ = l4::param_double(pnh_, "slam_settle_s", 0.5);
+    // the flight target's height (defence in depth, L2 3b): z step at most ~flight_vz_max per second, z within
+    // ~flight_z_lead of the vehicle, the vertical feed-forward at most ~flight_vz_max (<= 0: ~speed_cap)
+    vz_max_ = l4::param_double(pnh_, "flight_vz_max", -1.0);
+    if (vz_max_ <= 0) vz_max_ = speed_cap_;
+    z_lead_ = l4::param_double(pnh_, "flight_z_lead", 0.5);
     // the executive's go-ahead; ~require_enable false streams in every GUIDED (bench use only)
     enabled_ = !l4::param_bool(pnh_, "require_enable", true);
     liveness_.start();
@@ -416,8 +462,72 @@ class PlannerBridge {
     const Vec3 p = raw_to_planner_pos(vec(m->pose.pose.position));
     const Quat q = raw_to_planner_quat(quat(m->pose.pose.orientation));
     const Vec3 v = raw_to_planner_pos(vec(m->twist.twist.linear));   // FAST-LIO twist is world-frame
+    const double t = now();
+    // a gap or a step in the raw pose: a SLAM frame reset, or FAST-LIO resuming in its own frame? Held (nothing
+    // published, SLAM stays stale) until its vision pair classifies it (on_vision), so neither SUPER's map nor
+    // its odometry ever gets the new raw frame uncarried
+    bool suspect = false;
+    double gap = 0.0;
+    if (carry_on_ && last_raw_ && tracker_.anchor) {
+      gap = t - last_raw_->t;
+      const double step = (p - last_raw_->p).norm();
+      const double dyaw = std::abs(wrap_pi(yaw_of(q) - yaw_of(last_raw_->q))) * (180.0 / M_PI);
+      suspect = gap > raw_gap_s_ || step > raw_jump_m_ || dyaw > raw_jump_deg_;
+    }
+    last_raw_ = RawPose{t, p, q};
+    last_raw_planner_ = std::make_pair(p, q);
+    if (pending_ || suspect) {
+      if (!pending_)
+        ROS_WARN("planner bridge: SLAM pose after a %.2f s gap / %.2f m step: held for its frame check", gap,
+                 suspect ? (p - pending_raw_before(p)).norm() : 0.0);
+      const double t_first = pending_ ? pending_->t_first : t;
+      const double g = pending_ ? pending_->gap : gap;
+      pending_ = Pending{m, p, v, q, g, t_first};
+      return;
+    }
+    publish_odom(m, p, q, v);
+  }
+
+  // the pose before a held one (for the log line only)
+  Vec3 pending_raw_before(const Vec3& p) const { return prev_raw_p_ ? *prev_raw_p_ : p; }
+
+  // the frame check of a held pose against a vision pose (or the EKF's): a reset carries the planner frame over
+  // it and latches the re-anchor HOLD; the same frame publishes it as it is (the tracker then sees the anchor change)
+  void resolve_pending(const Vec3& p_fc, const Quat& q_fc, const char* against) {
+    if (!pending_) return;
+    const Pending pd = *pending_;
+    pending_.reset();
+    if (tracker_.anchor) {
+      const FrameChange fcg = classify_frame_change(*tracker_.anchor, pd.p, pd.q, p_fc, q_fc, pd.gap, reset_min_m_,
+                                                    reset_rate_, reset_min_deg_, mount_yaw_);
+      if (fcg.reset) {
+        const Anchor a_new = Anchor::from_pair(pd.p, pd.q, p_fc, q_fc, mount_yaw_);
+        carry_.reset_to(*tracker_.anchor, a_new);
+        tracker_.force(a_new);
+        reanchor_why_ = fmt("SLAM frame reset (%.2f m / %.1f deg after %.2f s, vs %s): planner frame carried over",
+                            fcg.residual_m, fcg.residual_deg, pd.gap, against);
+        ROS_WARN("planner bridge: %s; HOLD until a plan after it", reanchor_why_.c_str());
+        reanchor_t_ = now();
+        hold_.latch("frame re-anchored (" + reanchor_why_ + ")", *reanchor_t_);
+      } else {
+        ROS_INFO("planner bridge: SLAM pose after %.2f s in the same raw frame (%.2f m / %.1f deg vs %s)", pd.gap,
+                 fcg.residual_m, fcg.residual_deg, against);
+      }
+    }
+    publish_odom(pd.m, pd.p, pd.q, pd.v);
+  }
+
+  // one odometry to the planners, in the (carried) planner frame
+  void publish_odom(const nav_msgs::Odometry::ConstPtr& m, const Vec3& p_raw, const Quat& q_raw, const Vec3& v_raw) {
+    const Vec3 p = carry_.pos(p_raw);
+    const Quat q = carry_.quat(q_raw);
+    const Vec3 v = carry_.vec(v_raw);
+    prev_raw_p_ = p_raw;
     last_planner_ = std::make_pair(p, q);
-    t_slam_ = now();
+    const double t = now();
+    if (t_slam_ && t - *t_slam_ > hold_.slam_timeout) slam_back_t_ = t;   // SLAM back after a stale spell
+    t_slam_ = t;
+    last_odom_stamp_ = m->header.stamp.toSec();
     freeze_.on_pose(*t_slam_, p, q, v);
     nav_msgs::Odometry o;
     o.header.stamp = m->header.stamp;
@@ -434,11 +544,32 @@ class PlannerBridge {
     o.twist.twist.linear.y = v[1];
     o.twist.twist.linear.z = v[2];
     pub_odom_.publish(o);
+    // a scan that came before its odometry
+    if (cloud_wait_) {
+      const auto c = *cloud_wait_;
+      if (c->header.stamp.toSec() <= *last_odom_stamp_ + 1e-3) {
+        cloud_wait_.reset();
+        process_cloud(c);
+      } else if (t - c->header.stamp.toSec() > 0.5) {
+        cloud_wait_.reset();
+      }
+    }
   }
 
   void on_cloud(const sensor_msgs::PointCloud2::ConstPtr& m) {
+    // a scan of a held pose (its frame not known yet) is dropped; one newer than the newest odometry waits for it
+    if (pending_) return;
+    if (carry_on_ && last_odom_stamp_ && m->header.stamp.toSec() > *last_odom_stamp_ + 1e-3) {
+      cloud_wait_ = m;
+      return;
+    }
+    process_cloud(m);
+  }
+
+  void process_cloud(const sensor_msgs::PointCloud2::ConstPtr& m) {
     // rotate x, y, z in place (fields are float32 at offsets 0, 4, 8 in FAST-LIO's clouds)
     sensor_msgs::PointCloud2 out(*m);
+    const bool carry = carry_.active();
     const size_t step = m->point_step;
     // the local ceiling over the vehicle (its newest planner-frame position), from the same points
     std::optional<CeilingFinder> ceil;
@@ -456,7 +587,13 @@ class PlannerBridge {
         uint8_t* d = out.data.data() + i * step;
         float xyz[3];
         std::memcpy(xyz, d, 12);
-        const float planner[3] = {xyz[2], xyz[0], xyz[1]};   // POSITION_MATRIX: (z, x, y)
+        float planner[3] = {xyz[2], xyz[0], xyz[1]};   // POSITION_MATRIX: (z, x, y)
+        if (carry) {
+          const Vec3 c = carry_.pos(Vec3(planner[0], planner[1], planner[2]));
+          planner[0] = float(c[0]);
+          planner[1] = float(c[1]);
+          planner[2] = float(c[2]);
+        }
         std::memcpy(d, planner, 12);
         if (ceil) ceil->add(planner[0], planner[1], planner[2]);
         if (floor) floor->add(planner[0], planner[1], planner[2]);
@@ -476,14 +613,19 @@ class PlannerBridge {
   }
 
   void on_vision(const geometry_msgs::PoseStamped::ConstPtr& m) {
-    // the bridge publishes one vision pose per /Odometry, right after it: pair with the newest
-    if (!last_planner_) return;
-    const auto [p, q] = *last_planner_;
-    auto [anchor, jump] = tracker_.update(p, q, vec(m->pose.position), quat(m->pose.orientation));
+    // the bridge publishes one vision pose per /Odometry, right after it: pair with the newest (raw-derived:
+    // the tracker follows the raw frame; the planner frame published is carried, FrameCarry)
+    if (pending_) resolve_pending(vec(m->pose.position), quat(m->pose.orientation), "vision");
+    if (!last_raw_planner_) return;
+    const auto [p, q] = *last_raw_planner_;
+    auto [anchor_raw, jump] = tracker_.update(p, q, vec(m->pose.position), quat(m->pose.orientation));
     if (jump) {
       ROS_WARN("planner bridge: %s: HOLD until a fresh plan", jump->c_str());
-      hold_.latch("frame re-anchored (" + *jump + ")", now());
+      reanchor_why_ = *jump;
+      reanchor_t_ = now();
+      hold_.latch("frame re-anchored (" + *jump + ")", *reanchor_t_);
     }
+    const Anchor anchor = carry_.published(anchor_raw);
     geometry_msgs::TransformStamped t;
     t.header.stamp = m->header.stamp;
     t.header.frame_id = "map";
@@ -644,6 +786,7 @@ class PlannerBridge {
     tick_dt_ = t_tick_ ? t_now - *t_tick_ : 1.0 / rate_;   // the yaw step's time (yaw_max_step clamps it)
     t_tick_ = t_now;
     wp_active_ = false;
+    wp_quiet_ = false;
     // the replay runs only while SUPER's command streams as such (not in a hold, a waypoint hold, a departure,
     // drive mode or with the stream off); it restarts without lag
     if (!replay_tick_) {
@@ -651,9 +794,28 @@ class PlannerBridge {
       turn_.reset();
     }
     replay_tick_ = false;
+    // a held pose whose vision pair never came: classified against the EKF pose
+    if (pending_ && t_now - pending_->t_first > raw_pair_timeout_ && fc_pose_ && fc_guard_.check(t_now) == "ok")
+      resolve_pending(fc_pose_->p, quat_yaw(fc_pose_->yaw), "the EKF");
     std::vector<std::string> faults;
     if (health_on_) faults = health_.faults(t_now);
-    const auto anchor = tracker_.anchor;
+    const auto anchor = pub_anchor();
+    // after a re-anchor (flight): HOLD until SUPER has planned after it, from the vehicle (bridge_core plan_after);
+    // a SLAM reset carried over leaves SUPER's frame as it was, and a plan from the old trajectory still is not one
+    if (reanchor_t_) {
+      if (mode_ != "flight") {
+        reanchor_t_.reset();
+      } else if (last_planner_ && t_traj_ && *t_traj_ > *reanchor_t_ &&
+                 plan_after(traj_, *reanchor_t_, last_planner_->first, plan_start_tol_)) {
+        ROS_INFO("planner bridge: a plan after the re-anchor (%.2f s): the re-anchor hold can end", *t_traj_ - *reanchor_t_);
+        reanchor_t_.reset();
+      } else {
+        faults.insert(faults.begin(), "frame re-anchored: waiting for a plan after it");
+      }
+    }
+    // SLAM back after a stale spell: a moment for a frame jump to be classified before the hold ends
+    if (slam_back_t_ && t_now - *slam_back_t_ < slam_settle_s_)
+      faults.push_back(fmt("SLAM settling (back %.2f s)", t_now - *slam_back_t_));
     const std::string mode = mode_;
     const auto cmd = cmd_;
     struct Target { Vec3 p, v, a; double yaw; };
@@ -706,6 +868,7 @@ class PlannerBridge {
                 t_now - *freeze_.run_start, frozen->c_str());
     const std::string state = hold_.step(t_now, t_cmd_, t_slam_, faults, liveness_.alive(node), frozen.has_value());
     if (fc_mode_ != guided_mode_ || !enabled_ || fc == "never") {
+      z_last_.reset();
       hold_point_.reset();
       yaw_out_.reset();
       wp_point_.reset();
@@ -718,9 +881,23 @@ class PlannerBridge {
     const FcPose now_pose = fc == "stale" ? *fc_guard_.good : *fc_pose_;
     const Vec3& p_now = now_pose.p;
     const double yaw_now = now_pose.yaw;
+    // the waypoint hold does not follow SUPER, so SUPER being quiet (alive, nothing to send: planner stale, no command
+    // yet) does not end it (L2 4a, SITL fx14e, 2026-11-03: the executive's back-off climb from over a box, through the
+    // waypoint hold, never moved: SUPER was silent, its PlanFromRest failing inside its inflated box, and the HOLD held
+    // the vehicle 0.4 m over the box for 16 s). Any other HOLD (a fault, a latch, a dead planner) wins as before
+    const bool planner_quiet = state == "HOLD" && !hold_.latched && !hold_.dead && !hold_.frozen &&
+                               (starts_with(hold_.reason, "planner stale") || starts_with(hold_.reason, "no planner command") ||
+                                hold_.reason == "waiting for a fresh planner command");
+    if (planner_quiet && mode == "flight" && yaw_cmd_ && anchor) {
+      hold_point_.reset();
+      waypoint_hold(*anchor, p_now, yaw_now, t_now, yaw_out_ ? *yaw_out_ : yaw_now);
+      wp_quiet_ = true;
+      return;
+    }
     if (state == "STREAM" && target) {
       hold_point_.reset();
       if (mode == "drive") {
+        z_last_.reset();
         stop_yaw_.reset();   // the next hold stops at the heading it has then
         auto rs = reverse_speed(target->p, target->v, target->yaw, p_now);
         if (rs) {
@@ -735,49 +912,31 @@ class PlannerBridge {
       } else if (yaw_cmd_) {
         // the waypoint hold: not SUPER's command, a fixed point (the reached goal, or the vehicle when the
         // hold began), capped like any target, zero velocity, turning to the waypoint yaw
-        if (!wp_point_) {
-          // the executive's goal, else SUPER's reached (shifted) goal, else the vehicle: the first within
-          // ~waypoint_goal_max with no scan point within ~waypoint_clear_r (L2 5a lf16)
-          std::optional<Vec3> goal_fc, super_fc;
-          if (goal_planner_) goal_fc = anchor->pos(*goal_planner_);
-          if (traj_) super_fc = anchor->pos(traj_->end());
-          std::function<bool(const Vec3&)> clear;
-          if (obs_all_.newest() && t_now - *obs_all_.newest() <= obs_max_age_)
-            clear = [&](const Vec3& c) {
-              return obs_all_.count_within(anchor->inverse_pos(c), wp_clear_r_) < path_guard_.min_voxels;
-            };
-          const HoldPoint hp = waypoint_hold_point(goal_fc, super_fc, p_now, wp_goal_max_, clear);
-          wp_point_ = fence_.clamp(hp.p);
-          wp_from_ = hp.from;
-          ROS_INFO("planner bridge: waypoint hold at the %s (%.2f %.2f %.2f), %.2f m from the vehicle, yaw %.1f deg%s",
-                   hp.from.c_str(), (*wp_point_)[0], (*wp_point_)[1], (*wp_point_)[2], (*wp_point_ - p_now).norm(),
-                   *yaw_cmd_ * (180.0 / M_PI),
-                   goal_fc && hp.from != "goal" && (*goal_fc - p_now).norm() <= wp_goal_max_ ? " (the goal is not clear)" : "");
-        }
-        const Vec3 zero = Vec3::Zero();
-        auto c = cap_command(*wp_point_, zero, zero, p_now, speed_cap_, max_lead_, fc_pos_p_);
-        send(c.p, &zero, &zero, flight_yaw(target->yaw, std::nullopt, yaw_now, true), MASK_FLIGHT);
-        wp_active_ = true;
+        waypoint_hold(*anchor, p_now, yaw_now, t_now, target->yaw);
       } else if (depart_ && !departing_done(*anchor, *target, t_now)) {
         // the departure: hold on, point and yaw, until SUPER sets off toward the next goal
         const Vec3 zero = Vec3::Zero();
         auto c = cap_command(depart_->point, zero, zero, p_now, speed_cap_, max_lead_, fc_pos_p_);
-        send(c.p, &zero, &zero, flight_yaw(target->yaw, std::nullopt, yaw_now, true), MASK_FLIGHT);
+        clamp_z(c, p_now);
+        send(c.p, &c.v, &c.a, flight_yaw(target->yaw, std::nullopt, yaw_now, true), MASK_FLIGHT);
         wp_active_ = true;
       } else if (turn_slow_ && !ref_.empty()) {
         // the turn slowdown: SUPER's reference replayed at the speed the heading error allows, capped at it
         const Replay r = replay(*anchor, yaw_now);
         auto c = cap_command(r.p, r.v, r.a, p_now, r.cap, max_lead_, fc_pos_p_);
+        clamp_z(c, p_now);
         freeze_.on_command(t_now, fc_demand(c.p, c.v, p_now));
         send(c.p, &c.v, &c.a, flight_yaw(r.yaw, travel_yaw(r.v_ref, yaw_speed_min_), yaw_now), MASK_FLIGHT);
       } else {
         auto c = cap_command(target->p, target->v, target->a, p_now, speed_cap_, max_lead_, fc_pos_p_);
+        clamp_z(c, p_now);
         freeze_.on_command(t_now, fc_demand(c.p, c.v, p_now));
         send(c.p, &c.v, &c.a, flight_yaw(target->yaw, travel_yaw(target->v, yaw_speed_min_), yaw_now), MASK_FLIGHT);
       }
       return;
     }
     if (mode == "drive") {
+      z_last_.reset();
       // every HOLD (and the WAIT) on the ground: stop where the rover is, now (header comment). Zero speed and
       // zero turn rate, so it neither drives on to the last (run-out) target, nor circles it, nor pivots or
       // steers to a heading. Rover's turn rate + speed submode keeps its last target (0) for 3 s without targets
@@ -791,6 +950,45 @@ class PlannerBridge {
     const Vec3 zero = Vec3::Zero();
     const double hy = flight_yaw_ == "travel" ? flight_yaw(hold_point_->yaw, std::nullopt, hold_point_->yaw) : hold_point_->yaw;
     send(hold_point_->p, &zero, &zero, hy, MASK_FLIGHT);
+    z_last_ = hold_point_->p[2];
+  }
+
+  // the flight target's height (bridge_core clamp_vertical; defence in depth, L2 3b); from the vehicle's z when
+  // the stream starts
+  void clamp_z(CapResult& c, const Vec3& p_now) {
+    const std::optional<double> zl = z_last_ ? z_last_ : std::optional<double>(p_now[2]);
+    if (clamp_vertical(c.p, c.v, c.a, p_now, zl, std::max(0.0, std::min(tick_dt_, 2.0 / rate_)), vz_max_, z_lead_))
+      n_z_clamped_ += 1;
+    z_last_ = c.p[2];
+  }
+
+  // one tick of the waypoint hold (a fixed point, clearance-checked when it begins; capped, zero velocity, the yaw
+  // turning to the waypoint yaw)
+  void waypoint_hold(const Anchor& anchor, const Vec3& p_now, double yaw_now, double t_now, double planner_yaw) {
+    if (!wp_point_) {
+      // the executive's goal, else SUPER's reached (shifted) goal, else the vehicle: the first within
+      // ~waypoint_goal_max with no scan point within ~waypoint_clear_r (L2 5a lf16)
+      std::optional<Vec3> goal_fc, super_fc;
+      if (goal_planner_) goal_fc = anchor.pos(*goal_planner_);
+      if (traj_) super_fc = anchor.pos(traj_->end());
+      std::function<bool(const Vec3&)> clear;
+      if (obs_all_.newest() && t_now - *obs_all_.newest() <= obs_max_age_)
+        clear = [&](const Vec3& c) {
+          return obs_all_.count_within(anchor.inverse_pos(c), wp_clear_r_) < path_guard_.min_voxels;
+        };
+      const HoldPoint hp = waypoint_hold_point(goal_fc, super_fc, p_now, wp_goal_max_, clear);
+      wp_point_ = fence_.clamp(hp.p);
+      wp_from_ = hp.from;
+      ROS_INFO("planner bridge: waypoint hold at the %s (%.2f %.2f %.2f), %.2f m from the vehicle, yaw %.1f deg%s",
+               hp.from.c_str(), (*wp_point_)[0], (*wp_point_)[1], (*wp_point_)[2], (*wp_point_ - p_now).norm(),
+               *yaw_cmd_ * (180.0 / M_PI),
+               goal_fc && hp.from != "goal" && (*goal_fc - p_now).norm() <= wp_goal_max_ ? " (the goal is not clear)" : "");
+    }
+    const Vec3 zero = Vec3::Zero();
+    auto c = cap_command(*wp_point_, zero, zero, p_now, speed_cap_, max_lead_, fc_pos_p_);
+    clamp_z(c, p_now);
+    send(c.p, &c.v, &c.a, flight_yaw(planner_yaw, std::nullopt, yaw_now, true), MASK_FLIGHT);
+    wp_active_ = true;
   }
 
   // the departure is over (and cleared): SUPER sets off toward the goal, or ~depart_timeout_s passed
@@ -962,7 +1160,7 @@ class PlannerBridge {
     }
     s["fc_pose_age"] = age(fc_guard_.t);
     s["speed_cap"] = speed_cap_;
-    const auto& a = tracker_.anchor;
+    const auto a = pub_anchor();
     if (a) {
       l4::ojson an;
       an["psi_deg"] = l4::py_round(a->psi * (180.0 / M_PI), 2);
@@ -972,10 +1170,43 @@ class PlannerBridge {
       s["anchor"] = nullptr;
     }
     s["anchor_jumps"] = tracker_.jumps;
+    // SLAM frame resets carried over (FrameCarry), the re-anchor hold (waiting for a plan after it), a pose held
+    // for its frame check, the vehicle in the planner frame published (the executive checks a resent goal with it)
+    s["frame_resets"] = carry_.resets;
+    if (reanchor_t_) {
+      l4::ojson ra;
+      ra["age"] = l4::py_round(t_now - *reanchor_t_, 3);
+      ra["waiting"] = "plan";
+      ra["why"] = reanchor_why_;
+      s["reanchor"] = ra;
+    } else {
+      s["reanchor"] = nullptr;
+    }
+    s["slam_pending"] = pending_.has_value();
+    if (last_planner_) {
+      const Vec3& pp = last_planner_->first;
+      s["planner_pos"] = {l4::py_round(pp[0], 3), l4::py_round(pp[1], 3), l4::py_round(pp[2], 3)};
+    } else {
+      s["planner_pos"] = nullptr;
+    }
+    s["z_clamped"] = n_z_clamped_;
+    // SUPER's goal (its newest plan's end, a plan made after the executive's last goal; flight), and whether the
+    // latest scans (self-filtered) have no points within ~waypoint_clear_r of it (null: no recent scan). SUPER moves a
+    // goal inside its inflated map to the nearest cell outside it, from a map that may not have the obstacle's top
+    // (L2 4a: 0.15 m over a box); the executive gives such a goal up ("goal in an obstacle")
+    if (mode_ == "flight" && a && traj_ && t_traj_ && t_goal_ && *t_traj_ > *t_goal_) {
+      const Vec3 e = traj_->end(), ef = a->pos(e);
+      s["planner_goal"] = {l4::py_round(ef[0], 3), l4::py_round(ef[1], 3), l4::py_round(ef[2], 3)};
+      const bool fresh = obs_.newest() && t_now - *obs_.newest() <= obs_max_age_;
+      s["planner_goal_clear"] = fresh ? l4::ojson(obs_.count_within(e, wp_clear_r_) < path_guard_.min_voxels) : l4::ojson(nullptr);
+    } else {
+      s["planner_goal"] = nullptr;
+      s["planner_goal_clear"] = nullptr;
+    }
     s["targets_sent"] = n_out_;
     s["flight_yaw"] = flight_yaw_;
     s["yaw_cmd_deg"] = yaw_cmd_ ? l4::ojson(l4::py_round(*yaw_cmd_ * (180.0 / M_PI), 2)) : l4::ojson(nullptr);
-    if (wp && (wp_point_ || depart_)) {
+    if ((wp || (wp_quiet_ && streaming && mode_ == "flight")) && (wp_point_ || depart_)) {
       const Vec3 hp = wp_point_ ? *wp_point_ : depart_->point;
       l4::ojson h;
       h["point"] = {l4::py_round(hp[0], 3), l4::py_round(hp[1], 3), l4::py_round(hp[2], 3)};
@@ -1003,9 +1234,9 @@ class PlannerBridge {
     if (path_checked_) {
       l4::ojson pb;
       pb["blocked"] = path_guard_.blocked;
-      if (path_guard_.blocked && path_guard_.at && tracker_.anchor) {
-        const Vec3 a = tracker_.anchor->pos(*path_guard_.at);
-        pb["at"] = {l4::py_round(a[0], 3), l4::py_round(a[1], 3), l4::py_round(a[2], 3)};
+      if (path_guard_.blocked && path_guard_.at && a) {
+        const Vec3 a2 = a->pos(*path_guard_.at);
+        pb["at"] = {l4::py_round(a2[0], 3), l4::py_round(a2[1], 3), l4::py_round(a2[2], 3)};
         pb["voxels"] = path_guard_.voxels;
         pb["for_s"] = path_guard_.since ? l4::ojson(l4::py_round(t_now - *path_guard_.since, 2)) : l4::ojson(nullptr);
       }
@@ -1030,6 +1261,14 @@ class PlannerBridge {
     Vec3 p, v, a;
     double yaw;
   };
+
+  // fc <- the planner frame published (carried over SLAM frame resets)
+  std::optional<Anchor> pub_anchor() const {
+    if (!tracker_.anchor) return std::nullopt;
+    return carry_.published(*tracker_.anchor);
+  }
+  std::optional<std::pair<Vec3, Quat>> last_raw_planner_;   // the newest /Odometry, raw-derived planner frame
+  std::optional<Vec3> prev_raw_p_;
 
   ros::NodeHandle nh_, pnh_;
   std::string mode_, guided_mode_;
@@ -1059,6 +1298,7 @@ class PlannerBridge {
   std::optional<Vec3> wp_point_;                        // the waypoint hold's point (fc), fixed when it begins
   std::string wp_from_ = "vehicle";                     // the point: "goal" | "planner_goal" | "vehicle"
   bool wp_active_ = false;                              // the last tick held it
+  bool wp_quiet_ = false;                               // ... with SUPER quiet (HoldLogic HOLD, planner stale)
   double wp_clear_r_ = 0.44;
   // the path ahead (path_blocked)
   bool path_on_ = true, path_checked_ = false;
@@ -1100,6 +1340,32 @@ class PlannerBridge {
   double tick_dt_ = 0.02;                               // the time since the tick before
   long long n_out_ = 0;
   PlannerLiveness liveness_;
+  // a SLAM frame reset (L2 3a / 3b)
+  FrameCarry carry_;
+  bool carry_on_ = true;
+  double raw_gap_s_ = 0.5, raw_jump_m_ = 0.5, raw_jump_deg_ = 15.0, raw_pair_timeout_ = 0.5, reset_min_m_ = 1.0,
+         reset_rate_ = 0.25, reset_min_deg_ = 5.0, mount_yaw_ = 0.0, plan_start_tol_ = 0.5, slam_settle_s_ = 0.5;
+  struct RawPose {
+    double t;
+    Vec3 p;
+    Quat q;
+  };
+  std::optional<RawPose> last_raw_;                     // the newest raw-derived planner pose (before the carry)
+  struct Pending {
+    nav_msgs::Odometry::ConstPtr m;
+    Vec3 p, v;
+    Quat q;
+    double gap, t_first;
+  };
+  std::optional<Pending> pending_;                      // an odometry held for its classification
+  std::optional<sensor_msgs::PointCloud2::ConstPtr> cloud_wait_;   // a scan newer than the newest odometry
+  std::optional<double> last_odom_stamp_;
+  std::optional<double> reanchor_t_;                    // a re-anchor: HOLD (flight) until a plan after it
+  std::string reanchor_why_;
+  std::optional<double> slam_back_t_;                   // SLAM fresh again after a stale spell
+  double vz_max_ = 1.0, z_lead_ = 0.5;
+  std::optional<double> z_last_;                        // the last flight target's z (fc)
+  long long n_z_clamped_ = 0;
 
   ros::Publisher pub_odom_, pub_cloud_, pub_sp_, pub_anchor_, pub_status_, pub_mode_, pub_mode_code_;
   std::vector<ros::Subscriber> subs_;

@@ -1,0 +1,99 @@
+# Hensel Phelps: the owner's 3 flights and 3 drives (owner 2026-11-03), L2 closed loop, SITL only.
+# Map: planner/sim/course/hp_gate_l2.pcd (the Gate L2 course map: hp_1015_carved.pcd + hp_gate_l2.json; the same
+# file as click and run's default and ~/sim/hpmission's copy, md5 6a2c9da8). Start 0.00, 0.00, yaw -90.7 (map x, y,
+# deg): the real takeoff spot, facing south. Waypoints below in the map frame = fc in SITL, as the other HP missions.
+#
+# The owner's legs, as given (2026-11-03):
+#   1 fly to (8, -9.5, 1)   2 drive to (9, -2.88)   3 fly to (-3.6, -0.134)   4 drive to (5.61, 0.068)
+#   5 fly to (-1.436, -5.458, 1)   6 drive to (2, 0.35)
+# Frame: these are the planner frame, the frame Foxglove shows (click and run's sim_viz "world": the map moved by
+# /sim/map_to_planner; origin the odometry point at the start, +x the start heading = map south). Converted with
+# hp_gate_l2.json's transform, map = Rz(-90.7) planner + (-0.0024, -0.1930), map z = planner z + 0.25; not moved.
+# Read as map-frame numbers they would not work: (8, -9.5) and (9, -2.88) have no floor under them (off the
+# mapped floor) and (5.61, 0.068), (-1.436, -5.458), (-3.6, -0.134) sit 0.01-0.14 m from map points.
+# Fly height: the owner's "1" is read as 1.0 m above the floor, the mission's normal height (takeoff_height 1.00,
+# click and run's FLY_HEIGHT 1.0): map / fc z 1.00 (planner 0.75). Leg 3 has no height: the same 1.00. (If "1"
+# was meant as the Foxglove planner z, it is map z 1.25.) The other HP missions fly at 1.30 (planner 1.05).
+#
+#   leg  owner (planner)        map (this file)          what
+#   F1   fly (8, -9.5, 1)       (-9.60, -8.08, 1.00)     take off at the start, fly to the west room (west of the
+#                                                        door wall, north-west of the crate), land under it
+#   D1   drive (9, -2.88)       (-2.99, -9.16)           east through the 0.90 m door, past the crate, to between
+#                                                        the low box's south side and pole_a
+#   F2   fly (-3.6, -0.134)     (-0.09, 3.41, 1.00)      take off, fly to 3.4 m north of the start, land under it
+#   D2   drive (5.61, 0.068)    ( 0.00, -5.80)           south past the start and down the east corridor
+#   F3   fly (-1.436, -5.458, 1) (-5.44, 1.31, 1.00)     take off, fly to the open floor north-west of the
+#                                                        container, land under it
+#   D3   drive (2, 0.35)        (0.32, -2.20)            back east into the east corridor. The mission ends here,
+#                                                        landed on the tracks, 2.2 m south of the start (not on it)
+# Each fly goal is also its land spot (land leg at the same x, y: LAND_CLIMB to the check height, landing check,
+# NAV_LAND facing the drive that follows); a fly leg first, not a land leg straight from the ground (k4).
+#
+# Static check (2026-11-03, no sim; the map's points, nearest-point distances in m). Clearance: fly legs the FC
+# centre at map z 1.00 to the nearest map point at z >= 0.30 (the floor smear left out, as hp_fly_drive_container);
+# drive legs horizontal, to map points at z 0.30-2.0 (the track planner's column band). Frame reaches 0.25, SUPER's
+# robot_r 0.44. Floor: per 0.1 m cell tops in r 0.6 (land) / r 0.3 (drive); all spots fully seen.
+#   leg  goal clr   floor top (p5/p50/p95)   straight segment from the previous point (min clr)
+#   F1   2.13       -0.05/-0.03/0.03         from the start 12.5 m: crosses the container and the west-room walls
+#                                            (0.01 m); SUPER plans round (west corridor, round the door wall's
+#                                            north end (-5.44, -4.60))
+#   D1   1.30       0.01/0.04/0.08 (r 0.3)   6.7 m: through the door gap 0.2 m south of its north jamb (0.19,
+#                                            the jamb), 0.45 m north of the crate; the track planner lines up
+#   F2   1.25       -0.04/-0.03/-0.02        12.9 m: crosses the low box and the container (0.01); SUPER round
+#                                            them (east corridor past the tower, pole_a and the racks' end)
+#   D2   1.02       0.05/0.09/0.15 (r 0.3)   9.2 m: 0.16 m from the object north of the start (map x 0.15..0.8,
+#                                            y 1.3..2.4, 0.3-2 m high) at x -0.08, y 1.6-2.1; passes the start
+#   F3   1.37       -0.22/-0.17/-0.14        8.9 m: crosses the container (0.01); SUPER round its north end or the
+#                                            east corridor and the north side
+#   D3   0.68       0.03/0.07/0.08 (r 0.3)   6.8 m: crosses the container's north end (0.01); the track planner
+#                                            goes round its north side or through it (hp_drive_tour leg 13)
+# Every goal inside the map with mapped floor under it, no waypoint inside or against an obstacle (tightest D3,
+# 0.68 m from the racks to the east). Overhead at the takeoff spots (r 0.6): start 3.72 m, D1 5.30, D2 5.09.
+# Land spot F3 lies on the lower floor level (-0.17) with a 0.08 m p5-p95 spread, F1 0.08 too: near the landing
+# check's ~0.07 m bump limit (k2/k3 refusals), so a landing-spot search may move it. The drive goals keep room
+# behind them for SITL's roll-back after REACHED (0.7-1.8 m; hp_fly_drive_container): D1 2.5 m to the door wall
+# (arrives heading east), D2 the open corridor north of it.
+# Speeds: flight 1.0 m/s (the bridge's speed_cap); the drives' speed 0.5 is the executive's record of WP_SPEED
+# (the robot's own drive params, closed_loop.sh's default DRIVE_PARMS).
+#
+# SITL hpo1 (2026-11-03, Shannon ~/sim/hpowner: a copy of ~/sim/hpmission, l4-sim-l2:latest, cores 20-27, robot drive
+# params): DONE 224 s, all legs reached, no UNREACHABLE. Min clearance FC centre / frame box (hpm_ana.py, map z >= 0.30):
+#   F1 0.52/0.26 (pole_b; SUPER climbed to 3.4 m)  D1 0.33/0.10 (door north jamb)  F2 0.54/0.33  D2 0.43/0.17 (the object
+#   north of the start)  F3 0.53/0.22  D3 0.54/0.29. Landing checks F1, F2 clear first time; F3 refused twice (floor bumps
+#   0.11-0.13 m), the landing-spot search moved 0.45 + 0.60 m and it landed at map (-5.24, 0.34), 1.0 m south of the spot.
+#   At DONE 0.26 m from the D3 goal; SITL's drive-stop roll-back then carried it 2.8 m south (bag end map (-0.65, -5.08)).
+#   Foxglove bag: Shannon ~/sim/foxglove/drive_fly/hp_owner_route_20261103/.
+#
+# Run (Shannon, ~/sim/hpowner; ~/sim/hpowner/run.sh <name> does the same):
+#   cd ~/sim/hpowner && L2_BASE=$PWD L4_WS=$PWD/build_ws/install L4_BRIDGE_WS=$PWD/build_ws/install CPUS=6 \
+#     DOCKER_LIMITS="--cpuset-cpus 20-27 --memory 16g" taskset -c 20-27 planner_sim/closed_loop.sh hpo2 \
+#     $PWD/planner_sim/course/hp_gate_l2.pcd 0 0 -90.7 $PWD/planner/missions/hp_owner_route_20261103.yaml \
+#     $PWD/planner_sim/super_closed_loop_hp.yaml 900
+name: hp_owner_route_20261103
+frame: fc
+takeoff_height: 1.00
+defaults:
+  speed: 1.0
+  accept_radius: 0.5
+  leg_timeout_s: 90
+  no_progress_s: 20
+  on_unreachable: stop
+legs:
+  # F1: owner leg 1, fly to planner (8, -9.5, 1)
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-9.60, -8.08, 1.00]}
+  - {type: land, at: [-9.60, -8.08]}
+  # D1: owner leg 2, drive to planner (9, -2.88): east through the door
+  - {type: drive, goal: [-2.99, -9.16], speed: 0.5, accept_radius: 0.4}
+  # F2: owner leg 3, fly to planner (-3.6, -0.134), no height given: 1.00
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-0.09, 3.41, 1.00]}
+  - {type: land, at: [-0.09, 3.41]}
+  # D2: owner leg 4, drive to planner (5.61, 0.068): south down the east corridor
+  - {type: drive, goal: [0.00, -5.80], speed: 0.5, accept_radius: 0.4}
+  # F3: owner leg 5, fly to planner (-1.436, -5.458, 1)
+  - {type: takeoff, height: 1.00}
+  - {type: fly, goal: [-5.44, 1.31, 1.00]}
+  - {type: land, at: [-5.44, 1.31]}
+  # D3: owner leg 6, drive to planner (2, 0.35): the mission ends here, landed
+  - {type: drive, goal: [0.32, -2.20], speed: 0.5, accept_radius: 0.4}

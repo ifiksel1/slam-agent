@@ -1066,3 +1066,107 @@ int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---- a SLAM frame reset (L2 3a / 3b, 2026-11-02 evening) ----------------------------------------------------
+
+TEST(FrameReset, AnchorAlgebra) {
+  const Anchor a(0.4, Vec3(1.0, -2.0, 0.3)), b(-1.1, Vec3(0.5, 0.2, -0.1));
+  const Vec3 p(0.7, -0.3, 1.2);
+  near3(anchor_compose(a, b).pos(p), a.pos(b.pos(p)));
+  near3(anchor_inverse(a).pos(a.pos(p)), p);
+  near3(anchor_compose(a, anchor_inverse(a)).pos(p), p);
+}
+
+TEST(FrameReset, ClassifiesAResetAndTheSameFrame) {
+  const Anchor a_old(0.5, Vec3(2.0, -1.0, 0.1));
+  const Quat q = raw_to_planner_quat(Quat{0, 0, 0, 1});
+  const Vec3 p_true(4.0, 1.0, 1.0);   // where the vehicle is, old planner frame
+  // the same raw frame after an 8 s gap, the EKF drifted 0.75 m (2a): not a reset
+  const Vec3 fc_drift = a_old.pos(p_true) + Vec3(0.6, 0.45, 0.0);
+  const Quat q_fc = quat_mul(quat_yaw(a_old.psi), q);
+  FrameChange c = classify_frame_change(a_old, p_true, q, fc_drift, q_fc, 8.0, 1.0, 0.25, 5.0);
+  EXPECT_FALSE(c.reset);
+  EXPECT_NEAR(c.residual_m, 0.75, 1e-9);
+  EXPECT_NEAR(c.residual_deg, 0.0, 1e-9);
+  // a 0.3 m drift after a 2 s gap: within the 1 m floor, the same frame
+  EXPECT_FALSE(classify_frame_change(a_old, p_true, q, a_old.pos(p_true) + Vec3(0.3, 0.0, 0.0), q_fc, 2.0, 1.0, 0.25, 5.0).reset);
+  // FAST-LIO restarted at its own origin (3a): the new raw pose at 0, the vision pose where the vehicle is
+  c = classify_frame_change(a_old, Vec3::Zero(), q, a_old.pos(p_true), q_fc, 2.0, 1.0, 0.25, 5.0);
+  EXPECT_TRUE(c.reset);
+  EXPECT_NEAR(c.residual_m, p_true.norm(), 1e-9);
+  // a heading-only change (near the old origin, a turned frame): the yaw decides
+  const Quat q_turn = quat_mul(quat_yaw(-0.14), q);   // the raw frame turned 8 deg
+  c = classify_frame_change(a_old, Vec3::Zero(), q_turn, a_old.pos(Vec3::Zero()), q_fc, 0.1, 1.0, 0.25, 5.0);
+  EXPECT_TRUE(c.reset);
+  EXPECT_NEAR(c.residual_deg, 0.14 * 180.0 / M_PI, 1e-6);
+}
+
+TEST(FrameReset, CarryKeepsThePublishedFrame) {
+  // before: raw-derived planner = published planner, anchor a_old. FAST-LIO restarts: the vehicle (fc p_fc) is now
+  // at p_new in the raw-derived frame, a_new = the anchor that pairs them. The carry maps the new raw-derived frame
+  // onto the old one: the vehicle's published position is where it was, and the published anchor unchanged
+  const Anchor a_old(0.5, Vec3(2.0, -1.0, 0.1));
+  const Vec3 p_old(4.0, 1.0, 1.0), p_fc = a_old.pos(p_old), p_new(0.0, 0.0, 0.0);
+  const double psi_new = 0.5 + 0.14;
+  const Anchor a_new(psi_new, p_fc - Anchor(psi_new, Vec3::Zero()).pos(p_new));
+  FrameCarry c;
+  EXPECT_FALSE(c.active());
+  near3(c.pos(p_old), p_old);
+  c.reset_to(a_old, a_new);
+  EXPECT_TRUE(c.active());
+  near3(c.pos(p_new), p_old);
+  const Anchor pub = c.published(a_new);
+  EXPECT_NEAR(pub.psi, a_old.psi, 1e-12);
+  near3(pub.t, a_old.t);
+  // a point seen in the new raw frame lands where the old frame had it
+  const Vec3 wall_fc(6.0, 3.0, 1.5);
+  near3(c.pos(anchor_inverse(a_new).pos(wall_fc)), anchor_inverse(a_old).pos(wall_fc));
+  // the yaw of a pose carried with it
+  const Quat q = quat_yaw(0.3);
+  EXPECT_NEAR(yaw_of(c.quat(q)), wrap_pi(0.3 + c.carry().psi), 1e-12);
+  // a second reset (back to a frame like the first): the published anchor still a_old
+  c.reset_to(a_new, a_old);
+  const Anchor pub2 = c.published(a_old);
+  EXPECT_NEAR(pub2.psi, a_old.psi, 1e-12);
+  near3(pub2.t, a_old.t);
+  near3(c.pos(p_old), p_old);   // the carry undone
+}
+
+TEST(FrameReset, PlanAfterTheReanchor) {
+  PolyTraj t;
+  t.t0 = 100.0;
+  t.order = 7;
+  t.dur = {2.0};
+  t.cx = {0, 0, 0, 0, 0, 0, 0.5, 1.0};
+  t.cy = {0, 0, 0, 0, 0, 0, 0.0, 2.0};
+  t.cz = {0, 0, 0, 0, 0, 0, 0.0, 1.0};
+  const Vec3 veh(1.1, 2.0, 1.0);
+  EXPECT_TRUE(plan_after(t, 99.9, veh, 0.5));
+  EXPECT_TRUE(plan_after(t, 100.04, veh, 0.5));      // within the slack: planned from the newest odometry
+  EXPECT_FALSE(plan_after(t, 100.2, veh, 0.5));      // started before the re-anchor
+  EXPECT_FALSE(plan_after(t, 99.0, Vec3(3.0, 2.0, 1.0), 0.5));   // starts away from the vehicle (an old splice)
+  EXPECT_FALSE(plan_after(std::nullopt, 99.0, veh, 0.5));
+}
+
+TEST(FrameReset, VerticalClamp) {
+  Vec3 p(0.0, 0.0, 3.2), v(0.3, 0.0, 2.0), a(0.0, 0.0, 1.0);
+  const Vec3 now(0.0, 0.0, 1.0);
+  EXPECT_TRUE(clamp_vertical(p, v, a, now, std::optional<double>(1.0), 0.02, 1.0, 0.5));
+  EXPECT_NEAR(p[2], 1.02, 1e-12);   // the step limit (1 m/s * 0.02 s) from the last target's z
+  EXPECT_NEAR(v[2], 1.0, 1e-12);
+  EXPECT_NEAR(a[2], 0.0, 1e-12);
+  EXPECT_NEAR(v[0], 0.3, 1e-12);    // horizontal untouched
+  // no last target: the lead limit
+  p = Vec3(0.0, 0.0, 3.2);
+  v = Vec3(0.0, 0.0, -0.2);
+  a = Vec3::Zero();
+  EXPECT_TRUE(clamp_vertical(p, v, a, now, std::nullopt, 0.02, 1.0, 0.5));
+  EXPECT_NEAR(p[2], 1.5, 1e-12);
+  // an ordinary target: unchanged
+  p = Vec3(0.5, 0.0, 1.1);
+  v = Vec3(1.0, 0.0, 0.1);
+  a = Vec3(0.0, 0.0, 0.2);
+  EXPECT_FALSE(clamp_vertical(p, v, a, now, std::optional<double>(1.099), 0.02, 1.0, 0.5));
+  near3(p, Vec3(0.5, 0.0, 1.1));
+  EXPECT_NEAR(a[2], 0.2, 1e-12);
+}

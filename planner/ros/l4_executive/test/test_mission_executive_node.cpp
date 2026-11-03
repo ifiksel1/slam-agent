@@ -41,6 +41,7 @@
 #include <mavros_msgs/CommandTOL.h>
 #include <mavros_msgs/ParamGet.h>
 #include <mavros_msgs/ParamSet.h>
+#include <mavros_msgs/PositionTarget.h>
 #include <mavros_msgs/SetMode.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/StatusText.h>
@@ -132,6 +133,9 @@ struct World {
   bool hold_moves = false;                     // the waypoint hold eases onto SUPER's goal within 1 m (the real bridge)
   std::optional<double> floor_z;               // set: the bridge reports "floor_below" (the vehicle's height over it)
   std::optional<double> ceiling_z;             // set: the bridge reports "ceiling_above" (from the vehicle up to it)
+  bool silent_mavros = false;                  // MAVROS gone: no /mavros/state, no FC pose (L2 7c)
+  bool silent_bridge = false;                  // the bridge gone: no /planner_bridge/status (L2 1c, 1d)
+  std::vector<std::pair<double, int>> setpoints;   // the executive's own setpoints (time, type_mask)
 
   ros::NodeHandle nh;
   std::vector<ros::ServiceServer> srvs;
@@ -186,6 +190,8 @@ struct World {
     hold_moves = false;
     floor_z.reset();
     ceiling_z.reset();
+    silent_mavros = silent_bridge = false;
+    setpoints.clear();
     forbidden.clear();
     mode_cmds.clear();
     goals.clear();
@@ -245,6 +251,11 @@ struct World {
       out.data = l4::dumps(r);
       search_pub.publish(out);
     }));
+    subs.push_back(sub<mavros_msgs::PositionTarget>(nh, "/mavros/setpoint_raw/local", 100,
+                                                    [this](const mavros_msgs::PositionTarget::ConstPtr& sp) {
+                                                      std::lock_guard<std::mutex> g(m);
+                                                      setpoints.emplace_back(wall(), int(sp->type_mask));
+                                                    }));
     subs.push_back(nh.subscribe("/planning/click_goal", 10, &World::on_goal, this));
     subs.push_back(nh.subscribe("/planning/drive_goal", 10, &World::on_drive_goal, this));
     subs.push_back(sub<std_msgs::String>(nh, "/mission_executive/status", 100, [this](const std_msgs::String::ConstPtr& s) {
@@ -445,7 +456,7 @@ struct World {
     st.armed = armed;
     st.guided = true;
     st.mode = mode == 0 ? "MANUAL" : mode == 4 ? "HOLD" : mode == 15 ? "GUIDED" : "CMODE(" + std::to_string(mode) + ")";
-    state_pub.publish(st);
+    if (!silent_mavros) state_pub.publish(st);
     geometry_msgs::PoseStamped ps;
     ps.header.stamp = ros::Time::now();
     ps.header.frame_id = "map";
@@ -456,14 +467,14 @@ struct World {
     const double y_pub = yaw + (yaw_wobble && pos[2] >= 0.05 ? 0.35 * std::sin(2 * M_PI * 0.5 * wall()) : 0.0);
     ps.pose.orientation.z = std::sin(y_pub / 2);
     ps.pose.orientation.w = std::cos(y_pub / 2);
-    pose_pub.publish(ps);
+    if (!silent_mavros) pose_pub.publish(ps);
     ojson bs = bridge_state;
     if (bridge_mode) bs["mode"] = *bridge_mode;
     if (floor_z && pos[2] - *floor_z > 0.3) bs["floor_below"] = pos[2] - *floor_z;
     if (ceiling_z && *ceiling_z - pos[2] > 0.15) bs["ceiling_above"] = *ceiling_z - pos[2];
     std_msgs::String s;
     s.data = l4::dumps(bs);
-    status_pub.publish(s);
+    if (!silent_bridge) status_pub.publish(s);
     geometry_msgs::TransformStamped tf;
     tf.header.stamp = ros::Time::now();
     tf.header.frame_id = "fc";
@@ -906,6 +917,34 @@ TEST_F(Executive, S14_CreepNoTakeoff) {
         "modes " + join(modes) + " goals " + std::to_string(W->goals.size()));
   const ojson spots = W->ground.is_object() ? l4::get(W->ground, "spots", ojson::array()) : ojson::array();
   check("not stationary: no ground spot recorded", spots.empty(), l4::dumps(W->ground));
+}
+
+// 14b. (owner 2026-11-03) the SITL creep under Rover's zero-speed stop, 0.03 m/s (3 cm per 1 s), counts as standing
+// still (under ~takeoff_still_m 5 cm over 1 s): the takeoff goes out; 0.07 m/s (7 cm per 1 s) is still refused
+TEST_F(Executive, S14b_SlowCreepTakesOff) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->creep = 0.03;
+  }
+  auto ph = run_executive({takeoff(1.0), fly(1.0, 0.0, 1.0)});
+  auto last = W->last_status();
+  std::lock_guard<std::mutex> g(W->m);
+  check("creep 0.03 m/s -> standing still, takeoff sent",
+        !W->takeoff_calls.empty() && l4::get(last, "reason") != "not stationary before takeoff",
+        l4::dumps(last) + " takeoffs " + std::to_string(W->takeoff_calls.size()));
+}
+
+TEST_F(Executive, S14c_CreepAboveThresholdRefused) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->creep = 0.07;
+  }
+  auto ph = run_executive({takeoff(1.0), fly(1.0, 0.0, 1.0)});
+  auto last = W->last_status();
+  std::lock_guard<std::mutex> g(W->m);
+  check("creep 0.07 m/s -> STOPPED not stationary, no takeoff",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "not stationary before takeoff" && W->takeoff_calls.empty(),
+        l4::dumps(last) + " takeoffs " + std::to_string(W->takeoff_calls.size()));
 }
 
 // 15. a drive, then the tracks creep on once the bridge is off: no takeoff, STOPPED on the ground
@@ -1755,6 +1794,42 @@ TEST_F(Executive, S33_MissionLandLegSearches) {
   check("land leg search: GUIDED only, never arms", modes == std::vector<int>{15} && W->forbidden.empty(), join(modes));
 }
 
+// S40. "landing_check: false" on a land leg (owner 2026-11-03, SITL roof demo): with the check refusing everything but the
+// home spot, the unchecked leg lands at its spot from its hover height (no climb over the 0.7 m table, no check, no
+// search); the next land leg (default) is checked as before: LAND_CHECK, clear at home, NAV_LAND; DONE
+TEST_F(Executive, S40_LandLegWithoutTheCheck) {
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    W->floor_z = 0.7;
+    W->hold_moves = true;
+    W->clear_at = Eigen::Vector2d(0.0, 0.0);   // the check is clear only at home
+  }
+  ojson unchecked = land(2.0, 0.0);
+  unchecked["landing_check"] = false;
+  auto ph = run_executive({takeoff(1.5), fly(2.0, 0.0, 1.5), unchecked, takeoff(1.0), fly(0.0, 0.0, 1.5), land(0.0, 0.0)},
+                          nullptr, nullptr, 60, true, ojson::object(), {"_interactive:=false"});
+  check("unchecked land: DONE", last_is(ph, "DONE"), join(ph));
+  const int land1 = index_of(ph, "LAND");
+  check("unchecked land: the first LAND has no climb, check or search before it",
+        land1 > 0 && index_of(ph, "LAND_CLIMB") > land1 && index_of(ph, "LAND_SEARCH") < 0, join(ph));
+  bool skipped = false, skipped_land = false;
+  int checks = 0;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& st : W->status) {
+      if (l4::get(st, "phase") == "LAND_CHECK" && l4::truthy(l4::get(st, "skipped", false))) skipped = true;
+      if (l4::get(st, "phase") == "LAND_CHECK" && st.contains("spot_planner")) checks++;
+      if (l4::get(st, "phase") == "LAND" && l4::get(st, "check") == "skipped (landing_check false)") skipped_land = true;
+    }
+  }
+  check("unchecked land: LAND_CHECK skipped, LAND says so", skipped && skipped_land, join(ph));
+  check("unchecked land: the home landing asks the check (once or more)", checks >= 1, std::to_string(checks));
+  std::lock_guard<std::mutex> g(W->m);
+  check("unchecked land: landed at home", W->pos_at_land && W->pos_at_land->head<2>().norm() <= 0.5,
+        W->pos_at_land ? vstr(*W->pos_at_land) : "no landing");
+  check("unchecked land: never arms", W->forbidden.empty(), join(ph));
+}
+
 // I12. SUPER cannot plan the landing move (owner 2026-11-02: PlanFromRest failing): no progress within
 // ~land_move_no_progress_s (4 s): that spot is given up, the next candidate searched (excluded), flown to, landed on
 TEST_F(Executive, I12_LandMoveWithoutProgressTriesTheNextSpot) {
@@ -1800,3 +1875,193 @@ int main(int argc, char** argv) {
   std::printf("\n%d of %d checks passed\n", CHECKS - FAILED, CHECKS);
   return r;
 }
+
+// ---- the L2 fixes of 2026-11-02 evening ---------------------------------------------------------------------
+
+// the interactive scenarios (I1-I12) leave ~interactive true on the parameter server
+static const std::vector<std::string> NOT_INTERACTIVE = {"_interactive:=false"};
+
+static std::optional<double> phase_time(const char* phase) {
+  std::lock_guard<std::mutex> g(W->m);
+  for (size_t i = 0; i < W->status.size(); ++i)
+    if (l4::get(W->status[i], "phase") == phase) return W->status_t[i];
+  return std::nullopt;
+}
+
+// 7c: MAVROS dies mid-leg: /mavros/state and the FC pose stop ("connected" stays true in the last message). STOPPED
+// "FC link lost" within ~1.5 s, no mode command after it, the bridge off, never the next leg
+TEST_F(Executive, S34_FcLinkLost) {
+  std::optional<double> gone;
+  auto kill_mavros = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!gone && W->enabled && W->pos[0] > 1.0) {
+      gone = wall();
+      W->silent_mavros = true;
+    }
+  };
+  auto ph = run_executive({fly(6.0, 0.0, 1.0), fly(0.0, 2.0, 1.0)}, nullptr, kill_mavros, 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}}, NOT_INTERACTIVE);
+  auto last = W->last_status();
+  auto ts = phase_time("STOPPED");
+  check("MAVROS gone -> STOPPED 'FC link lost' at once",
+        last_is(ph, "STOPPED") && l4::get(last, "reason", "").get<std::string>().rfind("FC link lost", 0) == 0 && gone && ts &&
+            *ts - *gone < 2.5,
+        l4::dumps(last) + ", " + (ts && gone ? std::to_string(*ts - *gone) : "None") + " s after");
+  std::lock_guard<std::mutex> g(W->m);
+  std::vector<int> after;
+  for (auto& x : W->mode_cmds)
+    if (gone && x.first > *gone) after.push_back(x.second);
+  check("MAVROS gone -> no mode command, no next leg, bridge off", after.empty() && W->goals.size() == 1 && !W->enabled,
+        "modes after " + join(after) + " goals " + std::to_string(W->goals.size()));
+}
+
+// 1d: the bridge dies while driving (its status stops): the executive streams the drive stop itself (MASK_STOP
+// 1479) until the rover is at rest, STOPPED "planner bridge died"; no QR mode on the ground
+TEST_F(Executive, S35_BridgeDiesDriving) {
+  std::optional<double> gone;
+  auto kill_bridge = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!gone && W->enabled && W->pos[0] > 1.0) {
+      gone = wall();
+      W->silent_bridge = true;
+      W->enabled = false;   // nothing streams any more: the fake stands
+    }
+  };
+  auto ph = run_executive({drive(5.0, 0.0), drive(0.0, 1.0)}, nullptr, kill_bridge, 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}}, NOT_INTERACTIVE);
+  wsleep(2.5);   // the drive stop (at least drive_stop_min_s, then rest_s) after STOPPED: run_executive kills it 0.5 s after
+  auto last = W->last_status();
+  auto ts = phase_time("STOPPED");
+  check("bridge dies driving -> STOPPED 'planner bridge died' within ~1 s",
+        last_is(ph, "STOPPED") && gone && ts && *ts - *gone < 1.5,
+        l4::dumps(last) + ", " + (ts && gone ? std::to_string(*ts - *gone) : "None") + " s after");
+  std::lock_guard<std::mutex> g(W->m);
+  int stops = 0;
+  for (auto& x : W->setpoints)
+    if (x.second == 1479) stops += 1;
+  check("bridge dies driving -> the executive streams the drive stop (1479)", stops >= 5, std::to_string(stops) + " stops");
+  std::vector<int> modes;
+  for (auto& x : W->mode_cmds) modes.push_back(x.second);
+  check("bridge dies driving -> GUIDED only, no next leg", modes == std::vector<int>{15} && W->drive_goals.size() == 1,
+        join(modes));
+}
+
+// 1c: the bridge dies in flight: a hover target at the vehicle (2048), then QRLOITER, STOPPED
+TEST_F(Executive, S36_BridgeDiesFlying) {
+  std::optional<double> gone;
+  auto kill_bridge = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!gone && W->enabled && W->pos[0] > 1.0) {
+      gone = wall();
+      W->silent_bridge = true;
+    }
+  };
+  auto ph = run_executive({fly(6.0, 0.0, 1.0), fly(0.0, 2.0, 1.0)}, nullptr, kill_bridge, 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}}, NOT_INTERACTIVE);
+  auto last = W->last_status();
+  auto ts = phase_time("STOPPED");
+  check("bridge dies flying -> STOPPED 'planner bridge died' within ~2.5 s",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "planner bridge died" && gone && ts && *ts - *gone < 3.0,
+        l4::dumps(last));
+  std::lock_guard<std::mutex> g(W->m);
+  int hovers = 0;
+  for (auto& x : W->setpoints)
+    if (x.second == 2048) hovers += 1;
+  std::vector<int> modes;
+  for (auto& x : W->mode_cmds) modes.push_back(x.second);
+  check("bridge dies flying -> a hover target, then QRLOITER (19)", hovers >= 5 && modes == std::vector<int>{15, 19},
+        std::to_string(hovers) + " hovers, modes " + join(modes));
+}
+
+// 3a: a re-anchor hold that waits for a plan after it (the bridge's "reanchor"): with SLAM fresh, the goal goes again
+// after map_rebuild_s while the bridge still holds (SUPER at rest plans only on a goal; 10-28 note 5: the deadlock);
+// when the bridge streams again the leg resumes without another resend; DONE
+TEST_F(Executive, S37_ReanchorResendsDuringTheHold) {
+  std::optional<double> t_jump;
+  size_t goals_at_jump = 0;
+  auto jump = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!t_jump && W->pos[0] > 2.0) {
+      t_jump = wall();
+      goals_at_jump = W->goals.size();
+      W->bridge_state = {{"state", "HOLD"}, {"reason", "frame re-anchored (SLAM frame reset)"}, {"slam_hold", true},
+                         {"slam_age", 0.05}, {"reanchor", {{"age", 0.1}, {"waiting", "plan"}}}};
+    }
+    // the bridge releases once a goal came after the jump (SUPER planned it)
+    if (t_jump && W->goals.size() > goals_at_jump && l4::get(W->bridge_state, "state") != "OK") W->bridge_state = {{"state", "OK"}};
+  };
+  auto ph = run_executive({fly(6.0, 0.0, 1.0)}, nullptr, jump, 40, true, ojson::object(), NOT_INTERACTIVE);
+  check("re-anchor hold -> HOLD_SLAM, goal resent in the hold, DONE", contains(ph, "HOLD_SLAM") && last_is(ph, "DONE"), join(ph));
+  std::lock_guard<std::mutex> g(W->m);
+  check("one resend (in the hold), not another on resuming", W->goals.size() == goals_at_jump + 1,
+        std::to_string(W->goals.size()) + " goals, " + std::to_string(goals_at_jump) + " before the jump");
+}
+
+// 10-28 note 5: a SLAM hold that never ends: after hold_slam_timeout_s QRLOITER, then QRLAND (21), STOPPED
+TEST_F(Executive, S38_SlamHoldTimesOut) {
+  std::optional<double> t_hold;
+  auto stale = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (!t_hold && W->pos[0] > 1.0) {
+      t_hold = wall();
+      W->bridge_state = {{"state", "HOLD"}, {"reason", "SLAM stale 0.5 s"}, {"slam_hold", true}};
+    }
+  };
+  auto ph = run_executive({fly(6.0, 0.0, 1.0), fly(0.0, 2.0, 1.0)}, nullptr, stale, 40, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}},
+                          {"_interactive:=false", "_hold_slam_timeout_s:=3.0"});
+  auto last = W->last_status();
+  auto modes = W->modes();
+  check("SLAM hold over the timeout -> STOPPED 'SLAM hold timed out'",
+        last_is(ph, "STOPPED") && l4::get(last, "reason") == "SLAM hold timed out", l4::dumps(last));
+  check("SLAM hold timeout -> QRLOITER (19) then QRLAND (21)", modes == std::vector<int>{15, 19, 21}, join(modes));
+}
+
+// 4a: SUPER moved the goal (inside a box) and the scans have points round where it moved it: the leg ends "goal in an
+// obstacle" at once (not after no_progress_s); the vehicle low over a surface backs off upward first; next leg
+TEST_F(Executive, S39_GoalInAnObstacle) {
+  auto shifted = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (W->goals.size() >= 1 && W->goals.size() < 2 && W->enabled) {
+      // SUPER moved our goal (4, 0, 0.3) 0.7 m up and flies there: its plan ends at (2, 0, 1.0)
+      W->target = Vec3(2.0, 0.0, 1.0);
+      W->bridge_state = {{"state", "OK"}, {"planner_goal", {2.0, 0.0, 1.0}}, {"planner_goal_clear", true}};
+      W->floor_z = W->pos[2] - 0.35;   // over the box top: 0.35 m under the vehicle
+      W->hold_moves = true;
+    } else {
+      W->bridge_state = {{"state", "OK"}};
+    }
+  };
+  auto ph = run_executive({fly(4.0, 0.0, 0.3), fly(0.0, 2.0, 1.0)}, nullptr, shifted, 60, true,
+                          {{"no_progress_s", 20}, {"on_unreachable", "next"}}, NOT_INTERACTIVE);
+  bool not_clear = false, back_off = false;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& st : W->status) {
+      not_clear = not_clear || l4::truthy(l4::get(st, "goal_not_clear", false));
+      back_off = back_off || l4::get(st, "phase") == "BACK_OFF";
+    }
+  }
+  check("goal in an obstacle -> the leg given up, BACK_OFF, the next leg, DONE",
+        not_clear && back_off && contains(ph, "UNREACHABLE") && last_is(ph, "DONE"), join(ph));
+}
+
+// roof run hpr8 (2026-11-03): a climb leg whose first plans end part way up, near the vehicle's height but not at the
+// vehicle, and move as SUPER replans: not "goal in an obstacle"; the leg is flown
+TEST_F(Executive, S41_ClimbPlansEndPartWay) {
+  auto partway = [&](double) {
+    std::lock_guard<std::mutex> g(W->m);
+    if (W->goals.size() == 1 && W->enabled && W->pos[2] < 2.5)
+      W->bridge_state = {{"state", "OK"}, {"planner_goal", {W->pos[0], W->pos[1], W->pos[2] + 0.6}}, {"planner_goal_clear", true}};
+    else
+      W->bridge_state = {{"state", "OK"}};
+  };
+  auto ph = run_executive({fly(0.5, 0.0, 3.0)}, nullptr, partway, 40, true, ojson::object(), NOT_INTERACTIVE);
+  bool not_clear = false;
+  {
+    std::lock_guard<std::mutex> g(W->m);
+    for (const auto& st : W->status) not_clear = not_clear || l4::truthy(l4::get(st, "goal_not_clear", false));
+  }
+  check("a climb's part-way plans -> no 'goal in an obstacle', DONE", !not_clear && last_is(ph, "DONE"), join(ph));
+}
+

@@ -6,9 +6,14 @@
 // Frames (L4 plan, D7):
 //   raw      FAST-LIO's world frame: +x left, +y up, +z forward (raw /Odometry, /cloud_registered).
 //   planner  raw rotated z-up by POSITION_MATRIX, the transform fastlio_mavros_bridge.py applies
-//            before its frame anchor. SUPER and ROG-Map work here.
+//            before its frame anchor. SUPER, ROG-Map, the track planner and the landing check work here.
+//            It does NOT jump with a FAST-LIO frame reset (2026-11-02 evening): after one, the bridge keeps
+//            publishing the planner frame it had, carried over the reset (FrameCarry below): planner =
+//            carry(raw rotated z-up); carry is the identity until the first reset.
 //   fc       MAVROS local ENU ("map"): the frame of /mavros/vision_pose/pose, i.e. the planner frame
-//            after the bridge's frame anchor  fc = Rz(psi) * planner + t  (frame_anchor.Anchor).
+//            after the bridge's frame anchor  fc = Rz(psi) * planner + t  (frame_anchor.Anchor). Mission
+//            goals are in fc (the EKF's frame survives a SLAM reset: the SLAM-to-FC bridge re-anchors onto the
+//            EKF); /planner_bridge/anchor is fc <- planner as published, unchanged by a carried reset.
 // Quaternions are [x, y, z, w]; angles in radians.
 #pragma once
 
@@ -76,6 +81,12 @@ class AnchorTracker {
   // -> (anchor, jump reason or none)
   std::pair<Anchor, std::optional<std::string>> update(const Vec3& p_planner, const Quat& q_planner, const Vec3& p_fc,
                                                        const Quat& q_fc);
+  // take this anchor now (a SLAM frame reset classified on its first pair; counts as a jump)
+  void force(const Anchor& a) {
+    anchor = a;
+    candidate_.clear();
+    jumps += 1;
+  }
   std::optional<Anchor> anchor;
   int jumps = 0;
   double jump_m, jump_rad;
@@ -492,6 +503,68 @@ class FloorFinder {
   int min_points_;
   std::vector<double> d_;
 };
+
+// ---- a SLAM frame reset (L2 3a / 3b, 2026-11-02 evening) ---------------------------------------------------
+// A FAST-LIO restart (laserMapping restarted: a new origin at the lidar, level, at the current heading) or a
+// pose jump changes the raw frame. The SLAM-to-FC bridge re-anchors onto the EKF, so the FC's frame carries on;
+// but SUPER's ROG-map and committed trajectory (and the track planner's and landing check's scan memory) are in
+// the planner frame, and a planner frame that jumps with the raw frame left them in the old one (SITL lf12: the
+// old map's floor slab at the vehicle's new height, SUPER climbed over it, 0.96 -> 3.14 m, 1.45 m/s; lf11 the
+// same after a 2 s gap). SUPER has no map reset (only its click goal topic; ROG-map clears only when the pose
+// leaves its local map). So the bridge carries the planner frame over the reset: it keeps publishing the planner
+// frame it had (FrameCarry, a yaw + offset from the new raw-derived frame to the old one), and SUPER's map and
+// trajectory stay valid (up to the EKF's dead-reckoning over the gap).
+//
+// Anchor algebra (fc = A(p) = Rz(psi) p + t).
+Anchor anchor_compose(const Anchor& a, const Anchor& b);   // a after b: p -> a(b(p))
+Anchor anchor_inverse(const Anchor& a);
+
+// Which change is it? The raw pose came after a gap (gap_s since the one before) or with a step from it. Under
+// "the same raw frame" (FAST-LIO stalled and resumed: the SLAM-to-FC bridge re-anchors onto the EKF, whose drift
+// over the gap the fc frame then carries, L2 2a), the anchor in use maps the new raw pose onto the vision pose to
+// within that drift. Under "a new raw frame" it misses by as much as the frames differ. residual_m / residual_deg:
+// |A_old(p_new) - p_vision| and the yaw difference. A reset when residual_m > max(min_m, rate * gap_s) or
+// residual_deg > min_deg. Near the old origin, at the old heading, the two are alike, and so are the frames.
+struct FrameChange {
+  bool reset = false;
+  double residual_m = 0.0, residual_deg = 0.0;
+};
+FrameChange classify_frame_change(const Anchor& old_anchor, const Vec3& p_raw_planner, const Quat& q_raw_planner,
+                                  const Vec3& p_vision, const Quat& q_vision, double gap_s, double min_m, double rate,
+                                  double min_deg, double mount_yaw = 0.0);
+
+// The planner frame carried over SLAM frame resets: published = carry(raw-derived planner frame). Identity until
+// the first reset. On a reset with the anchor before it (raw-derived, A_old) and the one the new raw frame pairs
+// with (A_new): carry = A_pub^-1 after A_new, A_pub = A_old after carry^-1 (the published frame's anchor) kept.
+class FrameCarry {
+ public:
+  void reset_to(const Anchor& a_old_raw, const Anchor& a_new_raw);
+  Vec3 pos(const Vec3& p) const { return c_.pos(p); }
+  Vec3 vec(const Vec3& v) const { return c_.vec(v); }
+  Quat quat(const Quat& q) const;
+  // the published frame's anchor (fc <- published planner) for a raw-derived one
+  Anchor published(const Anchor& a_raw) const { return anchor_compose(a_raw, anchor_inverse(c_)); }
+  bool active() const { return resets > 0; }
+  const Anchor& carry() const { return c_; }
+  int resets = 0;
+
+ private:
+  Anchor c_;   // raw-derived planner -> published planner
+};
+
+// After a re-anchor in flight the bridge holds until SUPER has planned in the frame now in use (L2 3a, 3b): a
+// committed trajectory that started after the re-anchor (start_WT, SUPER's clock: the bridge's ROS time; less
+// `slack` for SUPER planning from odometry received just before) and from the vehicle (its start within
+// `start_tol` of the vehicle, planner frame; a replan spliced onto the old committed trajectory starts where that
+// one was).
+bool plan_after(const std::optional<PolyTraj>& traj, double t_reanchor, const Vec3& vehicle, double start_tol,
+                double slack = 0.05);
+
+// Defence in depth on a flight target's height (L2 3b: targets in the old frame climbed 2.2 m): the target's z
+// moves at most vz_max * dt from the last one sent (none: no limit), lies within z_lead of the vehicle's, and the
+// vertical feed-forward is at most vz_max (acceleration zeroed where it is clipped). -> true when it clipped.
+bool clamp_vertical(Vec3& p, Vec3& v, Vec3& a, const Vec3& p_now, const std::optional<double>& z_last, double dt,
+                    double vz_max, double z_lead);
 
 // printf-style formatting into a std::string (the Python "%" reasons)
 std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));

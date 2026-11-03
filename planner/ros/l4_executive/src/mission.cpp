@@ -14,6 +14,10 @@ namespace l4_executive {
 const char* const NOT_STATIONARY = "not stationary before takeoff";
 const char* const PLANNER_DIED = "planner died";
 const char* const SLAM_FROZE = "SLAM pose frozen";
+const char* const BRIDGE_DIED = "planner bridge died";
+const char* const FC_LINK_LOST = "FC link lost";
+const char* const SLAM_HOLD_TIMEOUT = "SLAM hold timed out";
+const char* const GOAL_NOT_CLEAR = "goal in an obstacle";
 
 const std::map<std::string, int>& modes() {
   static const std::map<std::string, int> m = {
@@ -174,6 +178,9 @@ Mission load_mission_text(const std::string& text, const std::string& path) {
     if (kind == "scan") num(full["yaw_sweep_deg"]);
     if (full.contains("yaw")) num(full["yaw"]);   // a deliberate waypoint yaw, deg, fc frame (owner 2026-10-29)
     if (full.contains("scan_rate_deg")) num(full["scan_rate_deg"]);
+    // a land leg's "landing_check" (owner 2026-11-03, SITL roof demo): a boolean, on land legs only; default true
+    if (full.contains("landing_check") && (kind != "land" || !full["landing_check"].is_boolean()))
+      throw std::invalid_argument("leg " + std::to_string(i) + ": landing_check must be true or false, on a land leg");
     const ojson pol = l4::get(full, "on_unreachable", "next");
     if (!pol.is_string() || !unreachable_policy_ok(pol.get<std::string>()))
       throw std::invalid_argument("leg " + std::to_string(i) + ": on_unreachable must be one of next, stop");
@@ -220,7 +227,8 @@ bool SettleWindow::settled(double speed_max, double rate_max, std::optional<doub
 }
 
 SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& goal, const Eigen::Vector3d& here,
-                           double dz, std::optional<double> ceiling_above, double ceiling_clear) {
+                           double dz, std::optional<double> ceiling_above, double ceiling_clear,
+                           std::optional<double> floor_below, double floor_clear) {
   const Eigen::Vector2d d = (goal - start).head<2>();
   const double len2 = d.squaredNorm();
   double plan_z;
@@ -233,6 +241,13 @@ SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& 
   // always a dz move from the vehicle (SUPER needs a real move from rest, Gate L2 b7; m2: a seed 5 mm from
   // the vehicle left leg 7 unreachable): up when at or below the plan, down toward it when above
   SeedAltitude out{here[2] <= plan_z ? here[2] + dz : here[2] - dz, plan_z, false};
+  if (floor_below) {
+    const double low = here[2] - *floor_below + floor_clear;
+    if (out.z < low) {
+      out.z = low;
+      out.floored = true;
+    }
+  }
   if (ceiling_above) {
     const double cap = here[2] + *ceiling_above - ceiling_clear;
     if (out.z > cap) {
@@ -241,6 +256,29 @@ SeedAltitude seed_altitude(const Eigen::Vector3d& start, const Eigen::Vector3d& 
     }
   }
   return out;
+}
+
+GoalCheck check_resent_goal(const Eigen::Vector3d& goal_fc, const Eigen::Vector3d& vehicle_fc,
+                            const Eigen::Vector3d& vehicle_planner_converted, const std::optional<Eigen::Vector3d>& planner_pos,
+                            std::optional<double> floor_below, double tol, double floor_min) {
+  GoalCheck c;
+  c.goal_fc = goal_fc;
+  if (planner_pos) {
+    const Eigen::Vector3d d = vehicle_planner_converted - *planner_pos;
+    c.anchor_err_m = std::max(d.head<2>().norm(), std::abs(d[2]));
+    if (c.anchor_err_m > tol) {
+      c.ok = false;
+      return c;
+    }
+  }
+  if (floor_below) {
+    c.above_floor = *floor_below + goal_fc[2] - vehicle_fc[2];
+    if (*c.above_floor < floor_min) {
+      c.raised_m = floor_min - *c.above_floor;
+      c.goal_fc[2] += c.raised_m;
+    }
+  }
+  return c;
 }
 
 }  // namespace l4_executive

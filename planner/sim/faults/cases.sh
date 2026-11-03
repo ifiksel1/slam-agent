@@ -48,6 +48,8 @@ case $case_ in
   stale_fly_freeze)    TRIG=$FLY; ACT=('render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;
   stale_drive_stop)    TRIG=$DRV; ACT=('render:{"stale": "stop"}' "sleep:8" 'render:{"stale": "none"}') ;;
   stale_drive_freeze)  TRIG=$DRV; ACT=('render:{"stale": "freeze"}' "sleep:8" 'render:{"stale": "none"}') ;;
+  # 2d with a 30 s freeze (2026-11-03, the ground vision cut: the EKF dead-reckoning that long, any failsafe)
+  stale_drive_freeze_long) TRIG=$DRV; HOLD=45; MAXS=200; ACT=('render:{"stale": "freeze"}' "sleep:30" 'render:{"stale": "none"}') ;;
   # 2b manual: a frozen pose in a manual flight (no executive, no planner bridge): mid fly leg 3 the executive and
   #   the planner bridge are killed, QRLOITER set (the pilot's mode), and 0.3 s later the pose freezes while
   #   QRLoiter brakes from ~1 m/s (MAV_CMD_DO_SET_MODE 19: MAVROS's set_mode does not know the QR names). Only the SLAM-to-FC bridge's own detection can act (vision cut, owner 2026-11-02)
@@ -87,6 +89,8 @@ case $case_ in
   *) echo "unknown case $case_ ($0 list)"; exit 2 ;;
 esac
 [ -n "$run" ] || { echo "usage: $0 <case> <run name>"; exit 2; }
+# Env CASE_PARMS: more SITL-only params for this run ("NAME VALUE;NAME VALUE"), e.g. an A/B of a Rover setting
+[ -n "${CASE_PARMS:-}" ] && PARMS="$PARMS;$CASE_PARMS"
 
 # the fault runner's command, as a script the ROS container reads from /planner_sim (mounted read-only)
 mkdir -p $F/hooks

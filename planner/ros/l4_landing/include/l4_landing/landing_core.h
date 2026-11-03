@@ -47,10 +47,15 @@ struct Viz {
 };
 
 struct Params {
-  double margin = 0.2, cell = 0.10, observed_min = 0.7, slope_max_deg = 5.0, residual_max = 0.03;
-  double obstacle_min_h = 0.05;
+  // owner 2026-11-03 ("the landing check is too sensitive"), after verification (~/sim/landrelax on Shannon):
+  // observed_min 0.7 -> 0.65, residual_max 0.03 -> 0.04, obstacle_min_h 0.05 -> 0.06, floor_layer_max 0.20 -> 0.12.
+  // 3 cm refused normal floor (the HP start spot at 0.035); 70 % refused a roof seen at a grazing angle (68 %).
+  // The first relaxation (0.6 / 0.05 / 0.08) let a 0-0.28 m scattered floor clear (ThickFloorLayerIsUncertain) and
+  // missed 10-20 cm boxes on recorded spots: floor_layer_max 0.12 and obstacle_min_h 0.06 close those holes.
+  double margin = 0.2, cell = 0.10, observed_min = 0.65, slope_max_deg = 5.0, residual_max = 0.04;
+  double obstacle_min_h = 0.06;
   int obstacle_min_points = 5;
-  double descent_top = 3.0, ground_band = 0.08, floor_layer_max = 0.20;
+  double descent_top = 3.0, ground_band = 0.08, floor_layer_max = 0.12;
   int obstacle_min_cells = 2;
   double align_radius = 1.5, align_band = 0.3;
   int align_min_cells = 30;
