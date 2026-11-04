@@ -380,7 +380,19 @@ class PlannerBridge {
     obs_all_ = ObstacleVoxels(l4::param_double(pnh_, "path_block_voxel", 0.1), l4::param_int(pnh_, "waypoint_clear_scans", 10), 0.0);
     obs_max_age_ = l4::param_double(pnh_, "path_block_cloud_max_age", 0.5);
     // the waypoint hold's point must have no scan point (path_block_min_voxels voxels) within this of it
+    // (horizontally; vertically within ~goal_clear_rz)
     wp_clear_r_ = l4::param_double(pnh_, "waypoint_clear_r", 0.44);
+    // the leg's memory (L2 5a pillar fix, 2026-11-03; bridge_core LegMemory): every return within ~leg_memory_r of the
+    // executive's goal since it was sent, for the path check, the waypoint hold point and the goal approach
+    mem_on_ = l4::param_bool(pnh_, "leg_memory_enable", true);
+    mem_ = LegMemory(l4::param_double(pnh_, "path_block_voxel", 0.1), l4::param_double(pnh_, "leg_memory_r", 2.5),
+                     l4::param_double(pnh_, "path_block_self_r", 0.4), l4::param_int(pnh_, "leg_memory_min_hits", 2));
+    goal_rz_ = l4::param_double(pnh_, "goal_clear_rz", 0.30);
+    // the goal approach (bridge_core goal_short): a goal that is not clear is held short of, within ~goal_approach_dist
+    short_on_ = l4::param_bool(pnh_, "goal_short_enable", true);
+    approach_dist_ = l4::param_double(pnh_, "goal_approach_dist", 2.0);
+    short_max_ = l4::param_double(pnh_, "goal_short_max", 0.45);
+    short_r_ = l4::param_double(pnh_, "goal_short_r", 0.6);
     // a SLAM frame reset (L2 3a / 3b): the planner frame carried over it (bridge_core FrameCarry). A raw pose after
     // a gap over ~raw_gap_s, or a step over ~raw_jump_m / ~raw_jump_deg from the one before, waits for its vision
     // pair (at most ~raw_pair_timeout_s, then the EKF pose) and is classified (classify_frame_change)
@@ -577,6 +589,7 @@ class PlannerBridge {
     // the path_blocked check's voxels: this scan's points but the robot's own (near the vehicle)
     obs_.begin_scan(now(), last_planner_ ? std::optional<Vec3>(last_planner_->first) : std::nullopt);
     obs_all_.begin_scan(now(), std::nullopt);
+    if (mem_on_) mem_.begin_scan(last_planner_ ? std::optional<Vec3>(last_planner_->first) : std::nullopt);
     if (last_planner_) {
       ceil.emplace(last_planner_->first, ceiling_radius_, ceiling_min_up_);
       floor.emplace(last_planner_->first, ceiling_radius_, floor_min_down_, floor_pct_, floor_min_points_);
@@ -599,10 +612,12 @@ class PlannerBridge {
         if (floor) floor->add(planner[0], planner[1], planner[2]);
         obs_.add(planner[0], planner[1], planner[2]);
         obs_all_.add(planner[0], planner[1], planner[2]);
+        if (mem_on_) mem_.add(planner[0], planner[1], planner[2]);
       }
     }
     obs_.end_scan();
     obs_all_.end_scan();
+    if (mem_on_) mem_.end_scan();
     if (ceil) {
       t_ceiling_ = now();
       ceiling_ = ceil->above();
@@ -683,6 +698,8 @@ class PlannerBridge {
     depart_.reset();
     drive_stop_.reset();
     path_guard_.reset();
+    approach_.reset();
+    approach_last_.reset();
     hold_.latch("mode changed to " + mode, now());
     publish_mode();
     ROS_INFO("planner bridge: mode %s", mode.c_str());
@@ -756,6 +773,10 @@ class PlannerBridge {
   void on_goal(const geometry_msgs::PoseStamped::ConstPtr& m) {
     goal_planner_ = vec(m->pose.position);
     t_goal_ = now();
+    // a new leg's goal: a new memory (the same goal sent again, a re-seed or a resend, keeps it)
+    if (mem_on_ && (!mem_.centre() || (*mem_.centre() - *goal_planner_).norm() > 0.3)) mem_.reset(goal_planner_);
+    if (approach_ && (approach_->goal - *goal_planner_).norm() > 0.3) approach_.reset();
+    if (approach_last_ && (approach_last_->goal - *goal_planner_).norm() > 0.3) approach_last_.reset();
   }
 
   // the flight yaw to send. planner: SUPER's (anchored) yaw. travel (owner rule 2026-10-29): the travel
@@ -834,7 +855,32 @@ class PlannerBridge {
     // the path ahead (flight, SUPER's command streamed or about to be: not the waypoint hold, which holds its
     // own, clearance-checked point)
     path_checked_ = false;
-    if (path_on_ && mode == "flight" && fc_mode_ == guided_mode_ && enabled_ && !yaw_cmd_ && cmd && last_planner_) {
+    // the goal approach (L2 5a pillar fix): a goal not clear in the scans and the leg's memory is not flown onto; within
+    // ~goal_approach_dist the bridge holds short of it (bridge_core goal_short), SUPER no longer streamed, its path not
+    // checked (the line to the short point was)
+    if (approach_ && (mode != "flight" || !enabled_ || yaw_cmd_ || fc_mode_ != guided_mode_)) approach_.reset();
+    if (approach_ && count_near(approach_->point, short_r_, goal_rz_, true) >= path_guard_.min_voxels) {
+      ROS_WARN("planner bridge: the goal's short point is no longer clear: approach dropped");
+      approach_.reset();
+    }
+    if (short_on_ && mem_on_ && !approach_ && mode == "flight" && fc_mode_ == guided_mode_ && enabled_ && !yaw_cmd_ &&
+        goal_planner_ && last_planner_ && anchor) {
+      const GoalShort gs = goal_short(*goal_planner_, last_planner_->first, approach_dist_, short_max_, wp_clear_r_, short_r_,
+                                      goal_rz_, path_guard_.min_voxels, path_guard_.r, path_skip_, 0.05,
+                                      [this](const Vec3& p, double rh, double rz) { return count_near(p, rh, rz, true); });
+      if (gs.point) {
+        approach_ = Approach{*gs.point, *goal_planner_, t_now};
+        approach_last_ = approach_;
+        n_short_ += 1;
+        const Vec3 pf = anchor->pos(*gs.point), gf = anchor->pos(*goal_planner_);
+        ROS_WARN("planner bridge: the goal (%.2f %.2f %.2f) is not clear (scans + leg memory within %.2f m): holding short "
+                 "at (%.2f %.2f %.2f), %.2f m from it, %.2f m from the vehicle", gf[0], gf[1], gf[2], wp_clear_r_, pf[0],
+                 pf[1], pf[2], (*gs.point - *goal_planner_).norm(), (*gs.point - last_planner_->first).norm());
+        if (path_guard_.blocked) ROS_INFO("planner bridge: path_blocked released into the goal approach");
+        path_guard_.reset();
+      }
+    }
+    if (path_on_ && mode == "flight" && fc_mode_ == guided_mode_ && enabled_ && !yaw_cmd_ && !approach_ && cmd && last_planner_) {
       const auto w0 = std::chrono::steady_clock::now();
       const bool fresh = obs_.newest() && t_now - *obs_.newest() <= obs_max_age_;
       // SUPER's trajectory while it lasts (past its end SUPER holds its end point: the segment covers it)
@@ -843,7 +889,12 @@ class PlannerBridge {
       const auto samples = path_samples(tr, t_now - path_back_, t_now + path_horizon_, path_dt_, last_planner_->first,
                                         cmd->p, path_dt_, path_skip_);
       const bool was = path_guard_.blocked;
-      if (fresh) path_guard_.update(t_now, obs_, samples, t_traj_);
+      if (fresh) {
+        if (mem_on_)
+          path_guard_.update(t_now, [this](const Vec3& p, double r) { return count_near(p, r, r, false); }, samples, t_traj_);
+        else
+          path_guard_.update(t_now, obs_, samples, t_traj_);
+      }
       path_checked_ = true;
       path_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
       path_ms_max_ = std::max(path_ms_max_, path_ms_);
@@ -894,6 +945,12 @@ class PlannerBridge {
       wp_quiet_ = true;
       return;
     }
+    // the goal approach does not follow SUPER either (SUPER may fall silent with its goal in its inflated map)
+    if (planner_quiet && mode == "flight" && approach_ && anchor) {
+      hold_point_.reset();
+      approach_tick(*anchor, p_now, yaw_now, t_now, yaw_out_ ? *yaw_out_ : yaw_now);
+      return;
+    }
     if (state == "STREAM" && target) {
       hold_point_.reset();
       if (mode == "drive") {
@@ -913,6 +970,10 @@ class PlannerBridge {
         // the waypoint hold: not SUPER's command, a fixed point (the reached goal, or the vehicle when the
         // hold began), capped like any target, zero velocity, turning to the waypoint yaw
         waypoint_hold(*anchor, p_now, yaw_now, t_now, target->yaw);
+      } else if (approach_) {
+        // the goal approach: the goal's short point, not SUPER's command (it flies onto the goal)
+        depart_.reset();
+        approach_tick(*anchor, p_now, yaw_now, t_now, target->yaw);
       } else if (depart_ && !departing_done(*anchor, *target, t_now)) {
         // the departure: hold on, point and yaw, until SUPER sets off toward the next goal
         const Vec3 zero = Vec3::Zero();
@@ -971,12 +1032,38 @@ class PlannerBridge {
       std::optional<Vec3> goal_fc, super_fc;
       if (goal_planner_) goal_fc = anchor.pos(*goal_planner_);
       if (traj_) super_fc = anchor.pos(traj_->end());
+      // clear: no scan / leg-memory voxels within ~waypoint_clear_r of it (vertically ~goal_clear_rz), and the line
+      // to it from the vehicle clear by path_block_r (beyond path_block_skip: SUPER's shifted end can lie beyond the
+      // obstacle, pillar fix)
       std::function<bool(const Vec3&)> clear;
-      if (obs_all_.newest() && t_now - *obs_all_.newest() <= obs_max_age_)
-        clear = [&](const Vec3& c) {
-          return obs_all_.count_within(anchor.inverse_pos(c), wp_clear_r_) < path_guard_.min_voxels;
+      if ((obs_all_.newest() && t_now - *obs_all_.newest() <= obs_max_age_) || (mem_on_ && mem_.size() > 0)) {
+        const Vec3 vp = anchor.inverse_pos(p_now);
+        clear = [&, vp](const Vec3& c) {
+          const Vec3 cp = anchor.inverse_pos(c);
+          if (count_near(cp, wp_clear_r_, mem_on_ ? goal_rz_ : wp_clear_r_, true) >= path_guard_.min_voxels) return false;
+          if (!mem_on_) return true;
+          return line_clear(vp, cp, path_guard_.r, path_guard_.min_voxels, path_skip_, 0.05,
+                            [this](const Vec3& p, double rh, double rz) { return count_near(p, rh, rz, true); });
         };
-      const HoldPoint hp = waypoint_hold_point(goal_fc, super_fc, p_now, wp_goal_max_, clear);
+      }
+      // the goal's short point (a goal not clear): the approach's, while still clear, else one from here
+      std::optional<Vec3> short_fc;
+      if (short_on_ && mem_on_ && clear && goal_planner_) {
+        auto cnt = [this](const Vec3& p, double rh, double rz) { return count_near(p, rh, rz, true); };
+        const Vec3 vp = anchor.inverse_pos(p_now);
+        if (cnt(*goal_planner_, wp_clear_r_, goal_rz_) >= path_guard_.min_voxels) {
+          if (approach_last_ && (approach_last_->goal - *goal_planner_).norm() <= 0.3 &&
+              cnt(approach_last_->point, short_r_, goal_rz_) < path_guard_.min_voxels &&
+              line_clear(vp, approach_last_->point, path_guard_.r, path_guard_.min_voxels, path_skip_, 0.05, cnt)) {
+            short_fc = anchor.pos(approach_last_->point);
+          } else {
+            const GoalShort gs = goal_short(*goal_planner_, vp, wp_goal_max_, short_max_, wp_clear_r_, short_r_, goal_rz_,
+                                            path_guard_.min_voxels, path_guard_.r, path_skip_, 0.05, cnt);
+            if (gs.point) short_fc = anchor.pos(*gs.point);
+          }
+        }
+      }
+      const HoldPoint hp = waypoint_hold_point(goal_fc, super_fc, p_now, wp_goal_max_, clear, short_fc);
       wp_point_ = fence_.clamp(hp.p);
       wp_from_ = hp.from;
       ROS_INFO("planner bridge: waypoint hold at the %s (%.2f %.2f %.2f), %.2f m from the vehicle, yaw %.1f deg%s",
@@ -989,6 +1076,27 @@ class PlannerBridge {
     clamp_z(c, p_now);
     send(c.p, &c.v, &c.a, flight_yaw(planner_yaw, std::nullopt, yaw_now, true), MASK_FLIGHT);
     wp_active_ = true;
+  }
+
+  // occupied voxels near p (planner frame; the upright ellipsoid rh / rz): the latest scans (all: unfiltered
+  // ~waypoint_clear_scans; else the self-filtered path_block_scans), fresh only, and the leg's memory
+  int count_near(const Vec3& p, double rh, double rz, bool all) const {
+    const ObstacleVoxels& o = all ? obs_all_ : obs_;
+    const double t = now();
+    const bool fresh = o.newest() && t - *o.newest() <= obs_max_age_;
+    const bool m = mem_on_ && mem_.size() > 0;
+    if (!fresh && !m) return 0;
+    return count_voxels_near(p, rh, rz, o.voxel, [&](int64_t k) { return (fresh && o.has(k)) || (m && mem_.has(k)); });
+  }
+
+  // one tick of the goal approach: the short point (capped, zero velocity), yaw held (or the waypoint yaw)
+  void approach_tick(const Anchor& anchor, const Vec3& p_now, double yaw_now, double t_now, double planner_yaw) {
+    const Vec3 pt = fence_.clamp(anchor.pos(approach_->point));
+    const Vec3 zero = Vec3::Zero();
+    auto c = cap_command(pt, zero, zero, p_now, speed_cap_, max_lead_, fc_pos_p_);
+    clamp_z(c, p_now);
+    freeze_.on_command(t_now, fc_demand(c.p, c.v, p_now));
+    send(c.p, &c.v, &c.a, flight_yaw(planner_yaw, std::nullopt, yaw_now, false), MASK_FLIGHT);
   }
 
   // the departure is over (and cleared): SUPER sets off toward the goal, or ~depart_timeout_s passed
@@ -1203,6 +1311,23 @@ class PlannerBridge {
       s["planner_goal"] = nullptr;
       s["planner_goal_clear"] = nullptr;
     }
+    // the leg's memory and the goal approach (pillar fix): the executive's goal clear of the scans + memory, the short
+    // point held (fc) while the approach lasts
+    if (mem_on_ && mode_ == "flight" && goal_planner_) {
+      s["goal_clear"] = count_near(*goal_planner_, wp_clear_r_, goal_rz_, true) < path_guard_.min_voxels;
+    } else {
+      s["goal_clear"] = nullptr;
+    }
+    s["leg_memory"] = mem_on_ ? l4::ojson({{"voxels", mem_.size()}, {"scans", mem_.scans()}}) : l4::ojson(nullptr);
+    if (approach_ && a) {
+      const Vec3 pf = a->pos(approach_->point);
+      s["goal_short"] = {{"point", {l4::py_round(pf[0], 3), l4::py_round(pf[1], 3), l4::py_round(pf[2], 3)}},
+                         {"from_goal", l4::py_round((approach_->point - approach_->goal).norm(), 3)},
+                         {"for_s", l4::py_round(t_now - approach_->t0, 2)}};
+    } else {
+      s["goal_short"] = nullptr;
+    }
+    s["goal_shorts"] = n_short_;
     s["targets_sent"] = n_out_;
     s["flight_yaw"] = flight_yaw_;
     s["yaw_cmd_deg"] = yaw_cmd_ ? l4::ojson(l4::py_round(*yaw_cmd_ * (180.0 / M_PI), 2)) : l4::ojson(nullptr);
@@ -1305,6 +1430,18 @@ class PlannerBridge {
   double path_horizon_ = 1.5, path_back_ = 0.5, path_dt_ = 0.05, path_skip_ = 0.25, obs_max_age_ = 0.5, path_ms_ = 0.0, path_ms_max_ = 0.0;
   PathGuard path_guard_;
   ObstacleVoxels obs_, obs_all_;                        // the latest scans: self-filtered (path), all (hold point)
+  // the leg's memory and the goal approach (pillar fix)
+  bool mem_on_ = true, short_on_ = true;
+  LegMemory mem_;
+  double goal_rz_ = 0.30, approach_dist_ = 2.0, short_max_ = 0.45, short_r_ = 0.6;
+  struct Approach {
+    Vec3 point;   // the short point (planner frame)
+    Vec3 goal;    // the goal it is short of (planner frame)
+    double t0;
+  };
+  std::optional<Approach> approach_;
+  std::optional<Approach> approach_last_;               // the last one for this goal (the waypoint hold's point)
+  long long n_short_ = 0;
   std::optional<PolyTraj> traj_;                        // SUPER's committed trajectory (planner frame)
   std::optional<double> t_traj_;                        // when it came
   long long n_path_blocks_ = 0;

@@ -67,8 +67,32 @@ path_block_traj_topic: /planning_cmd/poly_traj
 # the waypoint hold point (L2 5a lf16: the raw goal 0.19 m from a pillar): the executive's goal, else SUPER's
 # committed trajectory's end (its reached or shifted goal), else the vehicle: the first with fewer than
 # path_block_min_voxels occupied voxels within waypoint_clear_r
-waypoint_clear_r: 0.44       # m, SUPER's robot_r
+waypoint_clear_r: 0.44       # m, SUPER's robot_r (horizontally; vertically goal_clear_rz with the leg memory on)
 waypoint_clear_scans: 10     # latest scans for that check (unfiltered: nothing near the vehicle is left out)
+# the leg's memory (L2 5a pillar fix, SITL fx16c / fx16dr 2026-11-02/03: a pillar 0.09 m from leg 3's goal; SUPER curled
+# round it and came back onto the goal toward it at 0.9 m/s; the forward dome had turned away from it and FAST-LIO's
+# 0.4 m blind hides it close up, so the path check (3 scans) and the hold point's (10 scans) saw nothing: the hold point
+# was the goal, the vehicle ran 0.4 m past it into the pillar). Every return within leg_memory_r of the executive's goal
+# since it was sent (self-filtered at path_block_self_r; a voxel counts after leg_memory_min_hits scans), cleared on a new
+# goal. Used with the latest scans by the path check (path_blocked), the waypoint hold point (and the line to it), and:
+leg_memory_enable: true
+leg_memory_r: 2.5            # m round the goal
+leg_memory_min_hits: 2       # scans a voxel must be in (one stray return does not count)
+goal_clear_rz: 0.30          # m: the clearance ellipsoid's vertical half-axis (the frame's height; a hover 0.4-0.6 m over
+                             # a roof or a landing spot stays clear, HP container "R low")
+# the goal approach: a goal with path_block_min_voxels scan / memory voxels inside that ellipsoid (waypoint_clear_r x
+# goal_clear_rz) is not flown onto. Within goal_approach_dist of it the bridge stops streaming SUPER and flies (capped,
+# zero velocity) to its short point, at most goal_short_max from the goal (inside the executive's accept_radius 0.5: the
+# leg still ends). No such point (the goal deep in the obstacle): SUPER as before. The waypoint hold then holds there
+# too ("goal_short")
+goal_short_enable: true
+goal_approach_dist: 2.0      # m from the goal (the path check's reach, 1.5 s at the 1.0 m/s sim speed cap, and a margin)
+goal_short_max: 0.45         # m
+goal_short_r: 0.6            # m: the short point's own clearance (horizontal; vertical goal_clear_rz): the frame's 0.25 m,
+                             # the scans' offset from the real obstacle (SITL pf1: 0.15-0.2 m) and the hold's settling.
+                             # The point: the nearest to the goal so clear (rings every 0.05 m, 16 directions and the one
+                             # toward the vehicle), the line from the vehicle clear by path_block_r. The waypoint hold
+                             # takes it before SUPER's end (SITL pf1: SUPER's end, 0.44 clear, was 0.21 m from the pillar)
 
 # HOLD triggers
 planner_timeout: 0.3         # s since the mode's planner command (SUPER ~100 Hz, track planner 10 Hz)

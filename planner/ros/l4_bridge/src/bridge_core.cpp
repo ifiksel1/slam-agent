@@ -416,11 +416,25 @@ Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, 
 }
 
 HoldPoint waypoint_hold_point(const std::optional<Vec3>& goal_fc, const std::optional<Vec3>& planner_goal_fc,
-                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear) {
+                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear,
+                              const std::optional<Vec3>& goal_short_fc) {
   auto ok = [&](const std::optional<Vec3>& c) { return c && (*c - p_now).norm() <= goal_max && (!clear || clear(*c)); };
   if (ok(goal_fc)) return {*goal_fc, "goal"};
+  // the short point was checked with its own (larger) clearance
+  if (clear && goal_short_fc && (*goal_short_fc - p_now).norm() <= goal_max) return {*goal_short_fc, "goal_short"};
   if (ok(planner_goal_fc)) return {*planner_goal_fc, "planner_goal"};
   return {p_now, "vehicle"};
+}
+
+std::optional<Vec3> first_clear_toward(const Vec3& from, const Vec3& to, double step,
+                                       const std::function<bool(const Vec3&)>& clear) {
+  const Vec3 d = to - from;
+  const int n = std::max(1, int(std::ceil(d.norm() / std::max(step, 1e-3))));
+  for (int k = 0; k <= n; ++k) {
+    const Vec3 p = from + d * (double(k) / n);
+    if (!clear || clear(p)) return p;
+  }
+  return std::nullopt;
 }
 
 // ---- obstacles on the path ahead ---------------------------------------------------------------------
@@ -468,25 +482,138 @@ void ObstacleVoxels::end_scan() {
 }
 
 int ObstacleVoxels::count_within(const Vec3& p, double r) const {
-  if (occ_.empty() || !(r > 0)) return 0;
-  const int64_t i0 = int64_t(std::floor((p[0] - r) / voxel)), i1 = int64_t(std::floor((p[0] + r) / voxel));
-  const int64_t j0 = int64_t(std::floor((p[1] - r) / voxel)), j1 = int64_t(std::floor((p[1] + r) / voxel));
-  const int64_t k0 = int64_t(std::floor((p[2] - r) / voxel)), k1 = int64_t(std::floor((p[2] + r) / voxel));
-  const double r2 = r * r;
+  if (occ_.empty()) return 0;
+  return count_voxels_near(p, r, r, voxel, [this](int64_t k) { return occ_.count(k) > 0; });
+}
+
+int count_voxels_near(const Vec3& p, double rh, double rz, double voxel, const std::function<bool(int64_t)>& occupied) {
+  if (!(rh > 0) || !(rz > 0) || !(voxel > 0) || !occupied) return 0;
+  const int64_t i0 = int64_t(std::floor((p[0] - rh) / voxel)), i1 = int64_t(std::floor((p[0] + rh) / voxel));
+  const int64_t j0 = int64_t(std::floor((p[1] - rh) / voxel)), j1 = int64_t(std::floor((p[1] + rh) / voxel));
+  const int64_t k0 = int64_t(std::floor((p[2] - rz) / voxel)), k1 = int64_t(std::floor((p[2] + rz) / voxel));
+  const double h2 = rh * rh, z2 = rz * rz;
   int n = 0;
   for (int64_t i = i0; i <= i1; ++i) {
     const double dx = (i + 0.5) * voxel - p[0];
     for (int64_t j = j0; j <= j1; ++j) {
       const double dy = (j + 0.5) * voxel - p[1];
-      if (dx * dx + dy * dy > r2) continue;
+      const double eh = (dx * dx + dy * dy) / h2;
+      if (eh > 1.0) continue;
       for (int64_t k = k0; k <= k1; ++k) {
         const double dz = (k + 0.5) * voxel - p[2];
-        if (dx * dx + dy * dy + dz * dz > r2) continue;
-        if (occ_.count(key(i, j, k))) ++n;
+        if (eh + dz * dz / z2 > 1.0) continue;
+        if (occupied(ObstacleVoxels::key(i, j, k))) ++n;
       }
     }
   }
   return n;
+}
+
+LegMemory::LegMemory(double voxel_, double radius_, double self_r_, int min_hits_)
+    : voxel(voxel_), radius(radius_), self_r(self_r_), min_hits(std::max(1, min_hits_)) {}
+
+void LegMemory::reset(const std::optional<Vec3>& centre) {
+  centre_ = centre;
+  hits_.clear();
+  cur_.clear();
+  open_ = false;
+  n_scans_ = 0;
+  n_counted_ = 0;
+}
+
+void LegMemory::begin_scan(const std::optional<Vec3>& vehicle) {
+  cur_.clear();
+  veh_ = vehicle;
+  open_ = centre_.has_value() && radius > 0;
+}
+
+void LegMemory::add(double x, double y, double z) {
+  if (!open_ || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
+  const double cx = x - (*centre_)[0], cy = y - (*centre_)[1], cz = z - (*centre_)[2];
+  if (cx * cx + cy * cy + cz * cz > radius * radius) return;
+  if (veh_) {
+    const double dx = x - (*veh_)[0], dy = y - (*veh_)[1], dz = z - (*veh_)[2];
+    if (dx * dx + dy * dy + dz * dz <= self_r * self_r) return;
+  }
+  cur_.push_back(ObstacleVoxels::key(int64_t(std::floor(x / voxel)), int64_t(std::floor(y / voxel)),
+                                     int64_t(std::floor(z / voxel))));
+}
+
+void LegMemory::end_scan() {
+  if (!open_) return;
+  open_ = false;
+  std::sort(cur_.begin(), cur_.end());
+  cur_.erase(std::unique(cur_.begin(), cur_.end()), cur_.end());
+  for (int64_t k : cur_)
+    if (++hits_[k] == min_hits) ++n_counted_;
+  cur_.clear();
+  ++n_scans_;
+}
+
+bool LegMemory::has(int64_t k) const {
+  auto it = hits_.find(k);
+  return it != hits_.end() && it->second >= min_hits;
+}
+
+int LegMemory::count_within(const Vec3& p, double r) const {
+  if (hits_.empty()) return 0;
+  return count_voxels_near(p, r, r, voxel, [this](int64_t k) { return has(k); });
+}
+
+size_t LegMemory::size() const { return n_counted_; }
+
+bool line_clear(const Vec3& a, const Vec3& b, double r, int min_voxels, double skip, double step, const VoxelCount& count) {
+  const Vec3 e = b - a;
+  const int n = std::max(1, int(std::ceil(e.norm() / std::max(step, 1e-3))));
+  for (int k = 0; k <= n; ++k) {
+    const Vec3 p = a + e * (double(k) / n);
+    if ((p - a).norm() < skip) continue;
+    if (count(p, r, r) >= min_voxels) return false;
+  }
+  return true;
+}
+
+GoalShort goal_short(const Vec3& goal, const Vec3& vehicle, double approach_dist, double short_max, double rh,
+                     double short_r, double rz, int min_voxels, double line_r, double line_skip, double step,
+                     const VoxelCount& count) {
+  GoalShort out;
+  if (!count) return out;
+  if ((goal - vehicle).norm() > approach_dist) {
+    out.why = "far";
+    return out;
+  }
+  out.goal_clear = count(goal, rh, rz) < min_voxels;
+  if (out.goal_clear) {
+    out.why = "goal clear";
+    return out;
+  }
+  // rings round the goal, nearest first: 16 directions and the one toward the vehicle
+  std::vector<double> dirs;
+  for (int k = 0; k < 16; ++k) dirs.push_back(k * (M_PI / 8.0));
+  const Vec3 dv = vehicle - goal;
+  if (dv.head<2>().norm() > 1e-6) dirs.push_back(std::atan2(dv[1], dv[0]));
+  const double st = std::max(step, 1e-3);
+  for (int ir = 1; ir * st <= short_max + 1e-9; ++ir) {
+    const double r = ir * st;
+    std::optional<Vec3> best;
+    double best_d = 0.0;
+    for (double th : dirs) {
+      const Vec3 c = goal + Vec3(r * std::cos(th), r * std::sin(th), 0.0);
+      if (count(c, short_r, rz) >= min_voxels) continue;
+      const double d = (c - vehicle).norm();
+      if (best && d >= best_d) continue;
+      if (!line_clear(vehicle, c, line_r, min_voxels, line_skip, st, count)) continue;
+      best = c;
+      best_d = d;
+    }
+    if (best) {
+      out.point = best;
+      out.why = "short";
+      return out;
+    }
+  }
+  out.why = "no clear point within short_max";
+  return out;
 }
 
 double PolyTraj::duration() const {
@@ -546,10 +673,15 @@ void PathGuard::reset() {
 
 bool PathGuard::update(double now, const ObstacleVoxels& obs, const std::vector<Vec3>& samples,
                        std::optional<double> traj_rcv) {
+  return update(now, [&obs](const Vec3& p, double rr) { return obs.count_within(p, rr); }, samples, traj_rcv);
+}
+
+bool PathGuard::update(double now, const std::function<int(const Vec3&, double)>& count, const std::vector<Vec3>& samples,
+                       std::optional<double> traj_rcv) {
   std::optional<Vec3> hit;
   int nv = 0;
   for (const Vec3& p : samples) {
-    nv = obs.count_within(p, r);
+    nv = count(p, r);
     if (nv >= min_voxels) {
       hit = p;
       break;

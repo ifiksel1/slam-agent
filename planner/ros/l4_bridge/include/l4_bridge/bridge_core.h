@@ -314,13 +314,22 @@ Vec3 waypoint_hold_point(const std::optional<Vec3>& goal_fc, const Vec3& p_now, 
 // goal and the FC centre came to 0.08 m from the pillar). In order, the first candidate within goal_max of the
 // vehicle that `clear` accepts: the executive's goal ("goal"), the end of SUPER's committed trajectory, its
 // reached or shifted goal ("planner_goal"); else the vehicle ("vehicle"). clear: none checks nothing (the old
-// waypoint_hold_point).
+// waypoint_hold_point). The pillar fix (2026-11-03): the goal's short point (bridge_core goal_short; none: left out)
+// comes after the goal and before SUPER's end ("goal_short"; SITL pf1: SUPER's shifted end, 0.44 m clear in the
+// planner frame, was 0.21 m from the real pillar and the move there from the short point passed it at 0.04 m).
 struct HoldPoint {
   Vec3 p;
-  std::string from;   // "goal" | "planner_goal" | "vehicle"
+  std::string from;   // "goal" | "goal_short" | "planner_goal" | "vehicle"
 };
 HoldPoint waypoint_hold_point(const std::optional<Vec3>& goal_fc, const std::optional<Vec3>& planner_goal_fc,
-                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear);
+                              const Vec3& p_now, double goal_max, const std::function<bool(const Vec3&)>& clear,
+                              const std::optional<Vec3>& goal_short_fc = std::nullopt);
+
+// The point nearest `from` on the segment from -> to (every step m, `to` last) that `clear` accepts; none: none is.
+// The hold short of a goal that is not clear (L2 5a pillar fix, 2026-11-03: the pillar 0.09 m from leg 3's goal,
+// SUPER's own end beside it too): the nearest clear point on the way back to the vehicle.
+std::optional<Vec3> first_clear_toward(const Vec3& from, const Vec3& to, double step,
+                                       const std::function<bool(const Vec3&)>& clear);
 
 // ---- obstacles on the path ahead (L2 5a, SITL f25r, 2026-11-02) ---------------------------------------------
 // SUPER committed a trajectory 0.01 s before a pillar reached its map; every replan after that failed, and it
@@ -338,13 +347,14 @@ class ObstacleVoxels {
   void end_scan();
   // the occupied voxels whose centre lies within r of p
   int count_within(const Vec3& p, double r) const;
+  bool has(int64_t k) const { return occ_.count(k) > 0; }
   std::optional<double> newest() const { return scans_.empty() ? std::nullopt : std::optional<double>(scans_.back().first); }
   size_t size() const { return occ_.size(); }
   double voxel, self_r;
   int scans;
+  static int64_t key(int64_t i, int64_t j, int64_t k);
 
  private:
-  static int64_t key(int64_t i, int64_t j, int64_t k);
   std::deque<std::pair<double, std::vector<int64_t>>> scans_;   // each kept scan's voxels
   std::unordered_map<int64_t, int> occ_;                         // voxel -> kept scans with it
   std::vector<int64_t> cur_;
@@ -352,6 +362,68 @@ class ObstacleVoxels {
   double t_cur_ = 0.0;
   bool open_ = false;
 };
+
+// The voxels (size `voxel`, keyed as ObstacleVoxels::key) that `occupied` accepts whose centre lies within the
+// upright ellipsoid round p: horizontal radius rh, vertical half-axis rz (rz = rh: a sphere).
+int count_voxels_near(const Vec3& p, double rh, double rz, double voxel, const std::function<bool(int64_t)>& occupied);
+
+// The leg's memory (L2 5a pillar fix, 2026-11-03). The JT128 sees a forward dome only and FAST-LIO drops returns within
+// 0.4 m (its blind): an obstacle beside, behind or right at the vehicle is in none of the latest scans. SITL fx16c /
+// fx16dr: a pillar 0.09 m from leg 3's goal; SUPER curled round it and flew back onto the goal toward it at 0.9 m/s, the
+// path check (3 scans, self filter 0.4 m) and the waypoint hold's (10 scans) no longer saw it, the hold point was the
+// goal, the FC centre reached the pillar (0.00 m). The memory keeps every return within `radius` of the leg's goal (the
+// executive's, planner frame) since the goal was sent, less the robot's own (within self_r of the vehicle at that
+// scan); a voxel counts once `min_hits` scans had it (one stray scan does not). It is cleared on a new goal (reset).
+// Static world assumed for one leg: a person who walked through the goal's surroundings stays in it until the leg ends.
+class LegMemory {
+ public:
+  explicit LegMemory(double voxel = 0.1, double radius = 2.5, double self_r = 0.4, int min_hits = 2);
+  // the leg's goal (planner frame), the memory emptied; none: off (nothing kept)
+  void reset(const std::optional<Vec3>& centre);
+  void begin_scan(const std::optional<Vec3>& vehicle);
+  void add(double x, double y, double z);
+  void end_scan();
+  bool has(int64_t k) const;
+  int count_within(const Vec3& p, double r) const;
+  size_t size() const;   // the voxels that count
+  size_t scans() const { return n_scans_; }
+  const std::optional<Vec3>& centre() const { return centre_; }
+  double voxel, radius, self_r;
+  int min_hits;
+
+ private:
+  std::optional<Vec3> centre_;
+  std::unordered_map<int64_t, int> hits_;   // voxel -> scans with it
+  std::vector<int64_t> cur_;
+  std::optional<Vec3> veh_;
+  bool open_ = false;
+  size_t n_scans_ = 0, n_counted_ = 0;
+};
+
+// A goal's clearance in the scans and the leg's memory (L2 5a pillar fix): fewer than min_voxels occupied voxels
+// inside the upright ellipsoid round it (horizontal rh: SUPER's robot_r 0.44; vertical rz: the frame's height, so a
+// hover 0.4-0.6 m over a roof or a landing spot stays clear, HP container R low). `count(p, rh, rz)` counts them.
+using VoxelCount = std::function<int(const Vec3&, double, double)>;
+
+// The goal approach (L2 5a pillar fix, SITL fx16dr): a goal that is not clear (min_voxels inside the rh x rz
+// ellipsoid) is not flown onto. The vehicle comes in at up to the speed cap behind SUPER's reference and overshoots it
+// when it stops (fx16dr: 0.9 m/s at the accept radius, 0.4 m past the goal into the pillar), and the scans may sit
+// 0.15-0.2 m off the real obstacle (SITL's SLAM). Within approach_dist of the goal the bridge stops streaming SUPER
+// and flies (capped, zero velocity) to the goal's short point: the point nearest the goal (rings every `step` m out to
+// short_max, 16 directions and the one toward the vehicle, at the goal's height; the executive's accept radius: the leg
+// still ends there) that is clear by the larger short_r x rz, with the line from the vehicle to it clear by line_r
+// (path_block_r; beyond line_skip); of a ring's candidates the one nearest the vehicle. None (the goal clear, no such
+// point): SUPER is streamed as before.
+struct GoalShort {
+  std::optional<Vec3> point;   // the short point, when the approach is to be held there
+  bool goal_clear = true;
+  std::string why;             // "goal clear" | "far" | "no clear point within short_max" | "short"
+};
+GoalShort goal_short(const Vec3& goal, const Vec3& vehicle, double approach_dist, double short_max, double rh,
+                     double short_r, double rz, int min_voxels, double line_r, double line_skip, double step,
+                     const VoxelCount& count);
+// the line from a to b clear: fewer than min_voxels within r of every point on it (every step m) farther than skip from a
+bool line_clear(const Vec3& a, const Vec3& b, double r, int min_voxels, double skip, double step, const VoxelCount& count);
 
 // SUPER's committed position trajectory (quadrotor_msgs/PolynomialTrajectory on /planning_cmd/poly_traj, which
 // SUPER publishes with each successful plan): pieces of `order`, coefficients highest power first (SUPER's
@@ -383,6 +455,9 @@ class PathGuard {
   explicit PathGuard(double r = 0.30, int min_voxels = 2, double release_s = 0.3);
   // -> blocked. traj_rcv: when the trajectory in use arrived (none: no trajectory seen)
   bool update(double now, const ObstacleVoxels& obs, const std::vector<Vec3>& samples, std::optional<double> traj_rcv);
+  // the same against any voxel count (count(p, r): occupied voxels within r of p; the scans and the leg's memory)
+  bool update(double now, const std::function<int(const Vec3&, double)>& count, const std::vector<Vec3>& samples,
+              std::optional<double> traj_rcv);
   void reset();
   double r, release_s;
   int min_voxels;

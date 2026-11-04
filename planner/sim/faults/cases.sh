@@ -32,6 +32,9 @@ HOLD=15            # END_HOLD_S
 MAXS=150
 GONE=10            # observe this long after the executive exits (inject.py --gone_hold)
 ACT=()
+# low battery cases: the robot's battery failsafe params, and SITL's simulated pack voltage set through MAVROS
+BATT="SIM_BATT_VOLTAGE 12.6;SIM_BATT_CAP_AH 0;BATT_LOW_TIMER 10;BATT_FS_LOW_ACT 2;BATT_FS_CRT_ACT 2"
+batt_v() { echo "shell:rosservice call /mavros/param/set \"{param_id: SIM_BATT_VOLTAGE, value: {integer: 0, real: $1}}\""; }
 case $case_ in
   list) grep -E "^  [a-z_]+\)" $0 | sed 's/).*//'; exit 0 ;;
   baseline)            TRIG="start"; ACT=(none) ;;
@@ -86,6 +89,21 @@ case $case_ in
                        ACT=("pkill:-9 -f '^python3 -u /planner_sim/faults/mav_watch.py'") ;;
   link_mavros_fly)     TRIG=$FLY; HOLD=40; MAXS=90; ACT=("pkill:-9 -x mavros_node") ;;
   link_mavros_drive)   TRIG=$DRV; HOLD=40; MAXS=90; ACT=("pkill:-9 -x mavros_node") ;;
+  # 8 low battery (L2 task list: "low battery (QRLand)"). SITL's pack is constant at SIM_BATT_VOLTAGE (SIM_BATT_CAP_AH 0);
+  #   the injection sets it through MAVROS's param service. Thresholds as sitl_overrides.parm scales the robot's 6S pack
+  #   (low 10.8 / critical 10.5 V; robot 21.6 / 21.0); the robot's BATT_LOW_TIMER 10, BATT_FS_LOW_ACT 2, BATT_FS_CRT_ACT 2
+  #   (Hold: QRLand in copter flight, Rover Hold otherwise; Rover/failsafe.cpp handle_battery_failsafe), set again
+  #   here. Each stage fires BATT_LOW_TIMER s after the voltage goes under it. Staged: 10.65 V (low), 20 s later 10.35 V
+  #   (critical). batt_fly: mid fly leg 3, the low failsafe ~10 s later on leg 4. batt_drive: at the land leg's NAV_LAND
+  #   (the drive leg lasts ~7 s, shorter than the timer), the low failsafe ~10 s later mid drive leg 6.
+  #   *_crit: straight to 10.35 V (a sudden sag: only the critical stage fires)
+  #   batt_fly's failsafe comes as the vehicle turns at leg 4's end (bf02, bf03: 0.1-0.2 m/s); batt_fly_cruise injects at
+  #   leg 4's start so that it comes in transit on leg 5 (the land leg's fly-over)
+  batt_fly)            TRIG=$FLY; HOLD=40; PARMS="$PARMS;$BATT"; ACT=("$(batt_v 10.65)" "sleep:20" "$(batt_v 10.35)") ;;
+  batt_fly_cruise)     TRIG="leg_type=fly,leg=4"; HOLD=40; PARMS="$PARMS;$BATT"; ACT=("$(batt_v 10.65)" "sleep:20" "$(batt_v 10.35)") ;;
+  batt_drive)          TRIG="phase=LAND,leg=5"; HOLD=40; PARMS="$PARMS;$BATT"; ACT=("$(batt_v 10.65)" "sleep:20" "$(batt_v 10.35)") ;;
+  batt_fly_crit)       TRIG=$FLY; HOLD=30; PARMS="$PARMS;$BATT"; ACT=("$(batt_v 10.35)") ;;
+  batt_drive_crit)     TRIG="phase=LAND,leg=5"; HOLD=30; PARMS="$PARMS;$BATT"; ACT=("$(batt_v 10.35)") ;;
   *) echo "unknown case $case_ ($0 list)"; exit 2 ;;
 esac
 [ -n "$run" ] || { echo "usage: $0 <case> <run name>"; exit 2; }

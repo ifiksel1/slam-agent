@@ -1062,6 +1062,150 @@ TEST(WaypointHold, ClearanceCheckedGoalElseSupersGoalElseTheVehicle) {
   EXPECT_EQ(hp.from, "goal");
 }
 
+// ---- the leg's memory and the goal approach (L2 5a pillar fix, 2026-11-03) ---------------------------------------
+namespace {
+void mscan(LegMemory& m, const std::vector<Vec3>& pts, const std::optional<Vec3>& vehicle) {
+  m.begin_scan(vehicle);
+  for (auto& p : pts) m.add(p[0], p[1], p[2]);
+  m.end_scan();
+}
+// SITL fx16dr in the planner frame, simplified: the goal at the origin (z 1.05), the 0.6 x 0.6 x 3 m pillar's near face
+// 0.28 m from it along +x (its returns 0.15 m nearer than the truth: the goal 0.13 m from the real face), the vehicle
+// coming back onto the goal from -x after curling round the pillar
+const Vec3 G5(0.0, 0.0, 1.05);
+std::vector<Vec3> pillar5() { return box_surface(Vec3(0.28, -0.3, 0.0), Vec3(0.88, 0.3, 3.0), 0.05); }
+}  // namespace
+
+TEST(LegMemory, KeepsTheGoalsSurroundingsOutOfViewNotTheRobotsOwnNorStrays) {
+  LegMemory m(0.1, 2.5, 0.4, 2);
+  // off until a goal is known
+  mscan(m, {Vec3(0.5, 0, 1)}, std::nullopt);
+  mscan(m, {Vec3(0.5, 0, 1)}, std::nullopt);
+  EXPECT_EQ(m.size(), 0u);
+  m.reset(G5);
+  const Vec3 veh(-2.0, 0.0, 1.05);
+  // the pillar seen twice as the vehicle comes in, then never again (the dome turned away, FAST-LIO's blind close up)
+  mscan(m, pillar5(), veh);
+  EXPECT_EQ(m.count_within(Vec3(0.28, 0.0, 1.05), 0.15), 0) << "one scan is not enough (min_hits 2)";
+  mscan(m, pillar5(), veh);
+  EXPECT_GE(m.count_within(Vec3(0.28, 0.0, 1.05), 0.15), 2);
+  for (int k = 0; k < 50; ++k) mscan(m, {}, veh);
+  EXPECT_GE(m.count_within(Vec3(0.28, 0.0, 1.05), 0.15), 2) << "kept for the whole leg";
+  // a return beyond leg_memory_r of the goal is not kept; one within self_r of the vehicle (its own body) neither
+  mscan(m, {Vec3(3.0, 0, 1.05), Vec3(-1.7, 0.0, 1.05)}, veh);
+  mscan(m, {Vec3(3.0, 0, 1.05), Vec3(-1.7, 0.0, 1.05)}, veh);
+  EXPECT_EQ(m.count_within(Vec3(3.0, 0, 1.05), 0.1), 0);
+  EXPECT_EQ(m.count_within(Vec3(-1.7, 0, 1.05), 0.1), 0);
+  // a stray return in one scan only does not count
+  mscan(m, {Vec3(-1.0, 1.0, 1.0)}, veh);
+  EXPECT_EQ(m.count_within(Vec3(-1.0, 1.0, 1.0), 0.1), 0);
+  EXPECT_GT(m.scans(), 50u);
+  // a new goal: a new memory
+  m.reset(Vec3(10, 0, 1));
+  EXPECT_EQ(m.size(), 0u);
+  EXPECT_EQ(m.count_within(Vec3(0.28, 0.0, 1.05), 0.15), 0);
+}
+
+TEST(LegMemory, EllipsoidCountsTheWallBesideNotTheRoofBelow) {
+  LegMemory m(0.1, 2.5, 0.4, 1);
+  m.reset(G5);
+  std::vector<Vec3> roof, wall;
+  for (double x = -1.0; x <= 1.0; x += 0.05)
+    for (double y = -1.0; y <= 1.0; y += 0.05) roof.push_back(Vec3(x, y, G5[2] - 0.45));   // 0.45 m under the goal
+  for (double y = -1.0; y <= 1.0; y += 0.05)
+    for (double z = 0.0; z <= 2.0; z += 0.05) wall.push_back(Vec3(0.38, y, z));            // 0.38 m beside it
+  mscan(m, roof, std::nullopt);
+  auto pred = [&](int64_t k) { return m.has(k); };
+  EXPECT_EQ(count_voxels_near(G5, 0.44, 0.30, 0.1, pred), 0) << "a hover 0.45 m over a roof is clear";
+  EXPECT_GT(count_voxels_near(G5, 0.44, 0.44, 0.1, pred), 2) << "the sphere would not be";
+  mscan(m, wall, std::nullopt);
+  EXPECT_GE(count_voxels_near(G5, 0.44, 0.30, 0.1, pred), 2);
+}
+
+TEST(GoalShort, HeldShortOfAGoalBesideAPillarAtTheNearestClearPoint) {
+  LegMemory m(0.1, 2.5, 0.4, 1);
+  m.reset(G5);
+  mscan(m, pillar5(), std::nullopt);
+  const VoxelCount count = [&](const Vec3& p, double rh, double rz) {
+    return count_voxels_near(p, rh, rz, 0.1, [&](int64_t k) { return m.has(k); });
+  };
+  auto gsh = [&](const Vec3& goal, const Vec3& veh) {
+    return goal_short(goal, veh, 2.0, 0.45, 0.44, 0.6, 0.30, 2, 0.30, 0.25, 0.05, count);
+  };
+  // fx16dr: the vehicle coming back onto the goal from -x, 1.5 m out: the nearest point to the goal clear by 0.6 m
+  // (the pillar's voxel centres 0.25 m beyond the goal: 0.35 m back), within 0.45 m, on the vehicle's side
+  GoalShort gs = gsh(G5, Vec3(-1.5, 0.0, 1.05));
+  EXPECT_FALSE(gs.goal_clear);
+  ASSERT_TRUE(gs.point.has_value()) << gs.why;
+  EXPECT_EQ(gs.why, "short");
+  near3(*gs.point, Vec3(-0.35, 0.0, 1.05), 1e-6);
+  EXPECT_LT(count(*gs.point, 0.6, 0.30), 2);
+  // from the side (+y, 1.5 m out): the same nearest point (the line from there passes the pillar's corner clear)
+  gs = gsh(G5, Vec3(-0.5, 1.4, 1.05));
+  ASSERT_TRUE(gs.point.has_value()) << gs.why;
+  EXPECT_LE((*gs.point - G5).norm(), 0.45 + 1e-9);
+  EXPECT_LT(count(*gs.point, 0.6, 0.30), 2);
+  // farther than goal_approach_dist: SUPER as before
+  EXPECT_EQ(gsh(G5, Vec3(-2.5, 0.0, 1.05)).why, "far");
+  // the vehicle on the pillar's far side (+x): every clear point's line from it crosses the pillar: none
+  gs = gsh(G5, Vec3(1.8, 0.0, 1.05));
+  EXPECT_FALSE(gs.point.has_value());
+  EXPECT_EQ(gs.why, "no clear point within short_max");
+  // a clear goal (1 m from the pillar): nothing to do
+  gs = gsh(Vec3(-1.0, 0, 1.05), Vec3(-2.0, 0, 1.05));
+  EXPECT_TRUE(gs.goal_clear);
+  EXPECT_FALSE(gs.point.has_value());
+  // the line from the vehicle blocked (a second post between them, which also crowds the points behind the goal): none
+  std::vector<Vec3> post = box_surface(Vec3(-0.9, -0.15, 0.0), Vec3(-0.7, 0.15, 3.0), 0.05);
+  mscan(m, post, std::nullopt);
+  gs = gsh(G5, Vec3(-1.5, 0.0, 1.05));
+  EXPECT_FALSE(gs.point.has_value());
+  EXPECT_TRUE(line_clear(Vec3(-1.5, 1.0, 1.05), Vec3(-0.35, 1.0, 1.05), 0.30, 2, 0.25, 0.05, count));
+  EXPECT_FALSE(line_clear(Vec3(-1.5, 0.0, 1.05), Vec3(-0.35, 0.0, 1.05), 0.30, 2, 0.25, 0.05, count));
+}
+
+TEST(GoalShort, WaypointHoldPointTakesTheShortPointBeforeSupersEnd) {
+  // SITL pf1: neither the goal clear; SUPER's shifted end read clear (0.44 m) but was 0.21 m from the real pillar: the
+  // short point (its own, larger clearance) comes first
+  const Vec3 p_now(1.0, 2.0, 1.0), goal(1.3, 2.3, 1.0), super(1.0, 1.75, 1.0), shortp(1.0, 2.2, 1.0);
+  const Vec3 pillar_c(1.6, 2.3, 1.0);
+  auto clear = [&](const Vec3& c) { return (c - pillar_c).norm() > 0.44; };
+  auto hp = waypoint_hold_point(goal, super, p_now, 1.0, clear, shortp);
+  EXPECT_EQ(hp.from, "goal_short");
+  EXPECT_TRUE(hp.p.isApprox(shortp));
+  // no short point: SUPER's end, as before; neither: the vehicle
+  hp = waypoint_hold_point(goal, super, p_now, 1.0, clear, std::nullopt);
+  EXPECT_EQ(hp.from, "planner_goal");
+  hp = waypoint_hold_point(goal, std::nullopt, p_now, 1.0, clear, std::nullopt);
+  EXPECT_EQ(hp.from, "vehicle");
+  // the goal clear: the goal; a short point too far from the vehicle (goal_max): not taken
+  hp = waypoint_hold_point(goal, super, p_now, 1.0, [](const Vec3&) { return true; }, shortp);
+  EXPECT_EQ(hp.from, "goal");
+  hp = waypoint_hold_point(goal, std::nullopt, p_now, 1.0, clear, Vec3(3.0, 2.0, 1.0));
+  EXPECT_EQ(hp.from, "vehicle");
+}
+
+TEST(PathBlock, TheLegMemorySeesWhatTheLatestScansNoLongerDo) {
+  // the vehicle 0.6 m from the pillar's face, moving at it, the pillar out of the latest scans (the dome turned away)
+  const Vec3 veh(-0.9, 0.0, 1.05);
+  ObstacleVoxels o(0.1, 3, 0.4);
+  scan(o, 0.0, {Vec3(-5.0, 4.0, 1.0)}, veh);
+  LegMemory m(0.1, 2.5, 0.4, 2);
+  m.reset(G5);
+  mscan(m, pillar5(), Vec3(-2.5, 0, 1.05));
+  mscan(m, pillar5(), Vec3(-2.5, 0, 1.05));
+  const PolyTraj tr = line(0.0, veh, Vec3(0.8, 0.0, 0.0), 2.0);
+  const auto s = path_samples(tr, -0.5, 1.5, 0.05, veh, veh + Vec3(0.3, 0, 0), 0.05, 0.25);
+  PathGuard g(0.30, 2, 0.3), h(0.30, 2, 0.3);
+  EXPECT_FALSE(g.update(0.0, o, s, 0.0)) << "the scans alone: clear";
+  auto both = [&](const Vec3& p, double r) {
+    return count_voxels_near(p, r, r, 0.1, [&](int64_t k) { return o.has(k) || m.has(k); });
+  };
+  EXPECT_TRUE(h.update(0.0, both, s, 0.0)) << "with the memory: blocked";
+  ASSERT_TRUE(h.at.has_value());
+  EXPECT_LT((*h.at)[0], 0.28);
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

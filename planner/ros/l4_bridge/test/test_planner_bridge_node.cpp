@@ -1059,3 +1059,87 @@ TEST_F(Node, T12_WaypointHoldWhileThePlannerIsQuiet) {
   feed(0.5, f);
 }
 
+TEST_F(Node, T13_GoalBesideAPillarOutOfViewIsHeldShortOf) {
+  // L2 5a pillar fix (SITL fx16dr): a pillar 0.28 m beyond the goal (planner frame), seen as the vehicle came in, then
+  // out of every scan; the vehicle 1.5 m from the goal, SUPER commanding it on toward the goal at 0.9 m/s. The leg's
+  // memory keeps the pillar: the bridge holds short of the goal on the vehicle's side (zero velocity, capped), and the
+  // waypoint hold holds there too
+  const Vec3 a(1.0, 0.5, 1.2), goal = a + Vec3(1.5, 0.0, 0.0);
+  std::vector<Vec3> pillar;
+  for (double x = goal[0] + 0.28; x <= goal[0] + 0.88 + 1e-9; x += 0.05)
+    for (double y = goal[1] - 0.3; y <= goal[1] + 0.3 + 1e-9; y += 0.05)
+      for (double z = 0.2; z <= 2.2 + 1e-9; z += 0.1) pillar.push_back(Vec3(x, y, z));
+  const auto seen = raw_cloud(pillar);
+  const auto empty = raw_cloud({Vec3(a[0] - 6.0, a[1] + 6.0, 1.0)});   // the dome turned away: fresh scans, no pillar
+  geometry_msgs::PoseStamped g;
+  g.header.stamp = ros::Time::now();
+  g.pose.position.x = goal[0];
+  g.pose.position.y = goal[1];
+  g.pose.position.z = goal[2];
+  g.pose.orientation.w = 1.0;
+  Feed far;
+  far.p_planner = a - Vec3(1.0, 0.0, 0.0);   // 2.5 m out: no approach yet
+  far.cloud = &seen;
+  feed(0.3, far);
+  pub_goal.publish(g);
+  wsleep(0.1);
+  feed(1.2, far);   // > waypoint_clear_scans scans: the earlier tests' scans are gone
+  auto st = status_json();
+  EXPECT_FALSE(st["goal_clear"].get<bool>());
+  EXPECT_TRUE(st["goal_short"].is_null());
+  EXPECT_GT(st["leg_memory"]["voxels"].get<int>(), 20);
+  // 1.5 m out, the pillar out of view: held short
+  Feed f;
+  f.p_planner = a;
+  f.cloud = &empty;
+  f.cmd_pos = a + Vec3(0.5, 0.0, 0.0);
+  f.cmd_vel = Vec3(0.9, 0.0, 0.0);
+  const double t0 = wall();
+  feed(0.8, f);
+  st = status_json();
+  ASSERT_TRUE(st["goal_short"].is_object()) << status_str();
+  EXPECT_EQ(st["state"], "STREAM");
+  EXPECT_GE(st["goal_shorts"].get<int>(), 1);
+  // the nearest point to the goal clear by goal_short_r 0.6 (the pillar's voxel centres 0.25 m beyond it): 0.35 m back
+  EXPECT_NEAR(st["goal_short"]["from_goal"].get<double>(), 0.35, 0.03);
+  const Anchor br(st["anchor"]["psi_deg"].get<double>() * M_PI / 180.0,
+                  Vec3(st["anchor"]["t"][0].get<double>(), st["anchor"]["t"][1].get<double>(), st["anchor"]["t"][2].get<double>()));
+  const Vec3 spt(st["goal_short"]["point"][0].get<double>(), st["goal_short"]["point"][1].get<double>(),
+                 st["goal_short"]["point"][2].get<double>());
+  near3(spt, br.pos(goal - Vec3(st["goal_short"]["from_goal"].get<double>(), 0.0, 0.0)), 0.01);
+  const Vec3 v = ANCHOR.pos(a);   // the FC pose fed
+  const Vec3 dir = (spt - v).normalized();
+  auto out = last(t0 + 0.3);
+  ASSERT_GT(out.size(), 10u);
+  for (const auto& m : out) {
+    EXPECT_EQ(m.type_mask, 2048);
+    EXPECT_TRUE(zero_vel(m));
+    // toward the short point, never past it (not SUPER's command 0.5 m ahead at 0.9 m/s)
+    const Vec3 p(m.position.x, m.position.y, m.position.z);
+    EXPECT_LE((p - v).dot(dir), (spt - v).norm() + 0.02);
+    EXPECT_LE((p - spt).norm(), (v - spt).norm() + 0.02);
+  }
+  // the vehicle at the short point's side, the leg ends (the waypoint yaw): the waypoint hold holds the short point
+  Feed at = f;
+  at.p_planner = goal - Vec3(0.45, 0.0, 0.0);
+  feed(0.3, at);
+  std_msgs::Float64 y;
+  y.data = 0.3;
+  pub_yaw.publish(y);
+  feed(0.5, at);
+  st = status_json();
+  ASSERT_TRUE(st["waypoint_hold"].is_object()) << status_str();
+  EXPECT_EQ(st["waypoint_hold"]["from"], "goal_short");
+  const Vec3 hp(st["waypoint_hold"]["point"][0].get<double>(), st["waypoint_hold"]["point"][1].get<double>(),
+                st["waypoint_hold"]["point"][2].get<double>());
+  EXPECT_NEAR((hp - br.pos(goal)).norm(), 0.35, 0.03);
+  y.data = std::numeric_limits<double>::quiet_NaN();
+  pub_yaw.publish(y);
+  // the next leg's goal far from the pillar: a new memory, the goal clear, SUPER streamed
+  g.pose.position.x = a[0] - 3.0;
+  pub_goal.publish(g);
+  feed(1.0, f);
+  st = status_json();
+  EXPECT_TRUE(st["goal_clear"].get<bool>());
+  EXPECT_TRUE(st["goal_short"].is_null());
+}

@@ -258,7 +258,10 @@ while not rospy.is_shutdown() and t_fault is not None:
     now = rospy.get_time()
     e = last_exec()
     if t_exec_end is None and e.get("phase") in ("DONE", "STOPPED"):
-        t_exec_end = now
+        # when the executive said so, not when this loop saw it: actions with sleeps (the low-battery cases) can
+        # outlast the STOPPED, and fly_mission.py lands SITL END_HOLD_S after it, ending the run before the result
+        with lock:
+            t_exec_end = next((t for t, s in execs if t >= t_fault and s.get("phase") in ("DONE", "STOPPED")), now)
     if t_exec_end is not None and now - t_exec_end >= args.end_hold - 1.0:
         end_why = "executive %s + %.0f s" % (e.get("phase"), args.end_hold - 1.0)
         break
